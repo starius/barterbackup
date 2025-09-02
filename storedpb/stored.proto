@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package storedpb;
+
+option go_package = "github.com/starius/barterbackup/storedpb";
+
+// ContentRevision specifies a particular version of user content produced
+// from client-provided files and set by a clirpc.SetFile call.
+// AEAD(ContentRevision) is used as content_id in bbrpc. The content of this
+// struct is used to derive the keys used for AEAD encryption of Metadata and
+// for AES_CTR encryption of the files. Files don't need AEAD, because their
+// hashes are stored in Metadata.
+message ContentRevision {
+    // created_at is a Unix timestamp (seconds) at the time of a SetFile call.
+    int64 created_at = 1;
+
+    // created_at_ns is the nanosecond component corresponding to created_at.
+    int64 created_at_ns = 2;
+
+    // metadata_aead_length is the length of AEAD-encrypted Metadata in bytes.
+    int64 metadata_aead_length = 3;
+}
+
+// FileHeader represents a single user-provided file that participates in
+// forming the current content blob.
+message FileHeader {
+    // name is an arbitrary identifier shown to the user (for example,
+    // a filename).
+    string name = 1;
+
+    // file_length is the length of the file in bytes.
+    int64 file_length = 2;
+
+    // file_sha256 is the SHA-256 hash of the file.
+    bytes file_sha256 = 3;
+}
+
+// Peer is data about the peer that should survive a node reset.
+message Peer {
+    // onion_pubkey is the peer's onion service public key.
+    bytes onion_pubkey = 1;
+
+    // aead_key is the per-peer symmetric key for chat, encrypted for storage.
+    bytes aead_key = 2;
+
+    // score_seconds is the accumulated availability score in seconds. The
+    // higher, the better this peer was for us.
+    int64 score_seconds = 3;
+
+    // score_measured_at is a Unix timestamp (seconds) when score was measured.
+    int64 score_measured_at = 4;
+}
+
+// Metadata is short data that is stored together with the main content on
+// other peers and survives a node reset.
+message Metadata {
+    // most_recent_content is the latest content revision.
+    ContentRevision most_recent_content = 1;
+
+    // files is the list of files stored as a concatenation in the content
+    // after the metadata.
+    repeated FileHeader files = 2;
+
+    // peers is the list of known peers with some information about them.
+    repeated Peer peers = 3;
+}

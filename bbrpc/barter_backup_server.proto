@@ -1,0 +1,189 @@
+syntax = "proto3";
+
+package bbrpc;
+
+option go_package = "github.com/starius/barterbackup/bbrpc";
+
+// BarterBackupServer is gRPC service implemented by BarterBackup daemon and
+// exposed to the world as an onion site. BarterBackup nodes speak to each other
+// using this protocol. A single main key must be used by a single instance of
+// BarterBackup node as a time.
+service BarterBackupServer {
+    // PeerExchange shares peers (onion IDs) with the peer. This is needed for
+    // peers to discover other peers in the network.
+    rpc PeerExchange(PeerExchangeRequest) returns (PeerExchangeResponse);
+
+    // GetContentRevision returns the most recent state of content IDs of both
+    // nodes as recorded by the responding side.
+    rpc GetContentRevision(GetContentRevisionRequest)
+        returns (GetContentRevisionResponse);
+
+    // SetContentRevision proposes another peer to download and store the data
+    // referenced in the request. If peer agrees, it will respond successfully.
+    rpc SetContentRevision(SetContentRevisionRequest)
+        returns (SetContentRevisionResponse);
+
+    // Download downloads a section of a file which can be content of either
+    // the requester or the responder or a file sent in chat by the responder.
+    rpc Download(DownloadRequest) returns (DownloadResponse);
+
+    // EncryptedDownload makes encrypted download request. The encryption
+    // password needs to be setup out-of-band. This is used only within an
+    // encrypted chat.
+    rpc EncryptedDownload(EncryptedDownloadRequest)
+        returns (EncryptedDownloadResponse);
+
+    // Chat sends a chat action to another side.
+    rpc Chat(ChatRequest) returns (ChatResponse);
+
+    // EncryptedChat sends a symmetrically encrypted chat action. The
+    // encryption password needs to be setup out-of-band.
+    rpc EncryptedChat(EncryptedChatRequest) returns (EncryptedChatResponse);
+}
+
+message Peer {
+    bytes onion_pubkey = 1;
+}
+
+message PeerExchangeRequest {
+    repeated Peer peers = 1;
+}
+
+message PeerExchangeResponse {
+    repeated Peer peers = 1;
+}
+
+message ContentInfo {
+    bytes content_id = 1;
+    int64 content_length = 2;
+}
+
+message GetContentRevisionRequest {
+}
+
+message GetContentRevisionResponse {
+    // requester_content is the description of the requester's content stored
+    // by the responder, if any.
+    ContentInfo requester_content = 1;
+
+    // requester_remaining_seconds is the amount of time the responder will
+    // store the content of the requester if the requester does not store the
+    // content of the responder.
+    int64 requester_remaining_seconds = 2;
+
+    // responder_content is the description of the responder's content which
+    // the requester has to store to fulfill the conditions of the contract.
+    // Can be empty if the responder does not store anything at the moment.
+    ContentInfo responder_content = 3;
+}
+
+message SetContentRevisionRequest {
+    // requester_content is the description of the requester's content which
+    // the requester wants the responder to download and store. Can be empty
+    // if the requester wants to delete their content.
+    ContentInfo requester_content = 1;
+}
+
+message SetContentRevisionResponse {
+}
+
+message DownloadRequest {
+    bytes content_id = 1;
+
+    int64 offset = 2;
+
+    // reference_content_id is an existing revision used in reference
+    // sections. Optional.
+    bytes reference_content_id = 3;
+}
+
+message RawBytes {
+    bytes value = 1;
+}
+
+message Reference {
+    int64 offset_in_reference = 1;
+    int64 length = 2;
+}
+
+message DownloadResponse {
+    int64 total_length = 1;
+
+    // sha256 is sha256 hash sum of the file.
+    bytes sha256 = 2;
+
+    oneof section {
+        RawBytes raw_bytes = 3;
+        Reference reference = 4;
+    }
+}
+
+message EncryptedDownloadRequest {
+    // encrypted_download_request is AEAD(DownloadRequest).
+    bytes encrypted_download_request = 1;
+}
+
+message EncryptedDownloadResponse {
+    // encrypted_download_response is AEAD(DownloadResponse).
+    bytes encrypted_download_response = 1;
+}
+
+message ChatRequest {
+    // chat_id is chosen arbitrarily and uniquely identifies a chat session.
+    int64 chat_id = 1;
+
+    oneof action {
+        // init is the first action in a chat session. Other chat actions
+        // fail until another node makes ChatInit with this chat_id. Each
+        // chat_id can be used once in a ChatInit action.
+        ChatInit init = 2;
+
+        // msg is a regular text message in the chat.
+        ChatMessage msg = 3;
+
+        // file gives the other side the content_id of a local file to
+        // download.
+        ChatFile file = 4;
+
+        // stop interrupts a chat. Shutting down the CLI or the daemon
+        // closes all chats.
+        ChatStop stop = 5;
+    }
+}
+
+message ChatInit {
+}
+
+message ChatMessage {
+    // msg is a text message. Maximum size: 2048 bytes. It must be a valid
+    // UTF-8 string with printable terminal characters and no line breaks.
+    // It can be encrypted using AEAD if symmetric_encryption is enabled.
+    string msg = 1;
+}
+
+message ChatFile {
+    // content_id uniquely identifies a file on the sending side. The file
+    // stays available for downloading until this chat is stopped.
+    bytes content_id = 1;
+
+    // sha256 is sha256 hash sum of the file.
+    bytes sha256 = 2;
+
+    int64 content_length = 3;
+}
+
+message ChatStop {
+}
+
+message ChatResponse {
+}
+
+message EncryptedChatRequest {
+    // encrypted_chat_request is AEAD(ChatRequest).
+    bytes encrypted_chat_request = 1;
+}
+
+message EncryptedChatResponse {
+    // encrypted_chat_response is AEAD(ChatResponse).
+    bytes encrypted_chat_response = 1;
+}

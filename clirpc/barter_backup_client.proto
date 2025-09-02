@@ -1,0 +1,494 @@
+syntax = "proto3";
+
+package clirpc;
+
+option go_package = "github.com/starius/barterbackup/clirpc";
+
+// BarterBackupClient is a gRPC service implemented by the BarterBackup
+// daemon and exposed locally. The CLI tool speaks to the daemon using this
+// protocol.
+//
+// Terminology:
+// - File: A user-provided file (one or more) that a client uploads to the
+//   daemon. Files are inputs.
+// - Content: A single finalized encrypted blob produced by the daemon from
+//   the current set of files. This is what gets backed up to peers.
+service BarterBackupClient {
+    // Unlock sends the main password to the daemon. The password is used to
+    // derive the master secret key from which all other keys are derived,
+    // for encryption, onion service private key, and for authentication.
+    rpc Unlock(UnlockRequest) returns (UnlockResponse);
+
+    // ConnectPeer adds the peer to the list of known peers. The daemon will
+    // try to connect to it.
+    rpc ConnectPeer(ConnectPeerRequest) returns (ConnectPeerResponse);
+
+    // ConnectedPeers returns the list of connected online peers.
+    rpc ConnectedPeers(ConnectedPeersRequest) returns (ConnectedPeersResponse);
+
+    // SetFile sends a single file to the daemon. The daemon assembles a
+    // single content blob from the current set of files, stores it encrypted
+    // locally, and uploads the resulting content to other peers (also
+    // encrypted). It stores other peers' content in exchange.
+    rpc SetFile(SetFileRequest) returns (SetFileResponse);
+
+    // GetFile returns the file data by its name from the current set of
+    // files that form the most recent content blob.
+    rpc GetFile(GetFileRequest) returns (GetFileResponse);
+
+    // ListFiles returns only the names of files that form the most recent
+    // content blob.
+    rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
+
+    // SetStorageConfig sets how much data of other peers we want to store
+    // and what is the minimum number of replicas (peers) we want to store
+    // data on. We also have obligations under old contracts (where peers are
+    // offline but still have remaining time to download their data from us).
+    // Given all of this it is possible to reduce the maximum content length
+    // of another peer we accept into our storage.
+    rpc SetStorageConfig(SetStorageConfigRequest)
+        returns (SetStorageConfigResponse);
+
+    // GetStorageConfig returns the current storage configuration.
+    rpc GetStorageConfig(GetStorageConfigRequest)
+        returns (GetStorageConfigResponse);
+
+    // GetContracts returns the current state of storage contracts.
+    rpc GetContracts(GetContractsRequest) returns (GetContractsResponse);
+
+    // ProposeContract tells the server to form a contract if not already
+    // present with the specified peer.
+    rpc ProposeContract(ProposeContractRequest)
+        returns (stream ProposeContractUpdate);
+
+    // CheckContract tells the server to check the contract with the peer.
+    // It verifies that we and the peer store the most recent versions of
+    // contents of each other, then downloads a random piece of our content
+    // from the peer and verifies it. Such checks are also run in the
+    // background.
+    rpc CheckContract(CheckContractRequest)
+        returns (stream CheckContractUpdate);
+
+    // RecoverContent triggers content recovery from peers. The daemon does
+    // it on its own after starting and in the background. This just triggers
+    // it. The stream works forever sending new recovery events.
+    rpc RecoverContent(RecoverContentRequest)
+        returns (stream RecoverContentUpdate);
+
+    // SetAeadKeyForPeer sets a password for symmetric encryption of chats
+    // with the peer. This is an additional measure to secure communications.
+    // The password has to be shared between the peers out-of-band. The key
+    // derived from the password is encrypted and added to the stored content
+    // so it will survive a node reset together with the main content.
+    rpc SetAeadKeyForPeer(SetAeadKeyForPeerRequest)
+        returns (SetAeadKeyForPeerResponse);
+
+    // Chat initiates a chat with a node. When the stream is closed, the
+    // chat is ended. It uses a symmetrically encrypted chat if the AEAD key
+    // is set for the node. File transfers over the chat are passed through
+    // the stream.
+    rpc Chat(stream ChatAction) returns (stream ChatEvent);
+}
+
+message UnlockRequest {
+    // main_password is the main password used to derive the master secret.
+    string main_password = 1;
+}
+
+message UnlockResponse {
+}
+
+message Peer {
+    // onion_service_id is the Tor onion service identifier of the peer.
+    string onion_service_id = 1;
+}
+
+message ConnectPeerRequest {
+    // peer is the peer to add to the list of known peers.
+    Peer peer = 1;
+}
+
+message ConnectPeerResponse {
+}
+
+message ConnectedPeersRequest {
+}
+
+message ConnectedPeersResponse {
+    // connected_peers contains the list of connected online peers.
+    repeated Peer connected_peers = 1;
+
+    // online_not_connected_peers contains the list of peers we believe are
+    // online, but we are not connected to them now.
+    repeated Peer online_not_connected_peers = 2;
+
+    // offline_peers contains the list of known offline peers.
+    repeated Peer offline_peers = 3;
+}
+
+// File represents a single user-provided file that participates in forming
+// the current content blob.
+message File {
+    // name is an arbitrary identifier shown to the user (for example,
+    // a filename).
+    string name = 1;
+
+    // data is the raw file bytes.
+    bytes data = 2;
+}
+
+message SetFileRequest {
+    // file is the file to add or update in the current content set.
+    File file = 1;
+}
+
+message SetFileResponse {}
+
+message GetFileRequest {
+    // name is the name of the file to fetch from the current content.
+    string name = 1;
+}
+
+message GetFileResponse {
+    // file is the requested file from the current content set.
+    File file = 1;
+}
+
+message ListFilesRequest {}
+
+message ListFilesResponse {
+    // name contains names of files that form the most recent content blob.
+    repeated string name = 1;
+}
+
+// StorageConfig has settings that the user can change.
+message StorageConfig {
+    // allocated_storage_for_peers is the total number of bytes allocated to
+    // store other peers' content.
+    int64 allocated_storage_for_peers = 1;
+
+    // min_replicas is the minimum number of peers to store our content on.
+    int64 min_replicas = 2;
+}
+
+// StorageInfo is inferred data about storage configuration which the user
+// can read, but can not change.
+message StorageInfo {
+    // online_peers_storage_obligations_bytes is total number of bytes we
+    // spend on storing data of peers which are currently online and store
+    // our most recent content properly.
+    int64 online_peers_storage_obligations_bytes = 1;
+
+    // offline_peers_storage_obligations_bytes is total number of bytes we
+    // spend on storing data of peers which are currently offline or who store
+    // an outdated version of our content.
+    int64 offline_peers_storage_obligations_bytes = 2;
+
+    // expired_offline_peers_storage_obligations_bytes is a subset of
+    // offline_peers_storage_obligations_bytes where the remote peer's
+    // score is negative.
+    int64 expired_offline_peers_storage_obligations_bytes = 3;
+
+    // our_content_bytes is the number of bytes in our encrypted content.
+    int64 our_content_bytes = 4;
+
+    // maximum_peer_content_accepted_bytes is the maximum size of a remote
+    // peer's content we can accept.
+    int64 maximum_peer_content_accepted_bytes = 5;
+}
+
+message SetStorageConfigRequest {
+    // config is the new storage configuration to apply.
+    StorageConfig config = 1;
+}
+
+message SetStorageConfigResponse {
+}
+
+message GetStorageConfigRequest {
+}
+
+message GetStorageConfigResponse {
+    // config is the current storage configuration.
+    StorageConfig config = 1;
+
+    // info reports derived storage information and capacity.
+    StorageInfo info = 2;
+}
+
+message GetContractsRequest {
+}
+
+// ContractInfo holds important information about a contract with a peer.
+message ContractInfo {
+    // peer specifies the peer with which there is this contract.
+    Peer peer = 1;
+
+    // our_content_synced specifies if the peer stores the most recent version
+    // of our content.
+    bool our_content_synced = 2;
+
+    // our_remaining_seconds specifies our score from the peer's perspective.
+    // The longer we have stored their content properly, the higher this number.
+    int64 our_remaining_seconds = 3;
+
+    // their_remaining_seconds specifies peer's score from our perspective.
+    // The longer the peer stored our content properly, the higher this number.
+    int64 their_remaining_seconds = 4;
+
+    // their_content_length is the number of bytes we spend on storing the
+    // content of this peer.
+    int64 their_content_length = 5;
+
+    // online indicates if the peer is online now.
+    bool online = 6;
+}
+
+message GetContractsResponse {
+    repeated ContractInfo contracts = 1;
+}
+
+// ProposeContractRequest asks the daemon to create or renew a contract with
+// a specific peer.
+message ProposeContractRequest {
+    // peer is the peer to negotiate with.
+    Peer peer = 1;
+}
+
+enum ContractState {
+    // NOT_STARTED means the operation has not begun.
+    NOT_STARTED = 0;
+
+    // CONNECTING_TO_PEER means we are connecting to the peer.
+    CONNECTING_TO_PEER = 1;
+
+    // PROPOSING_CONTRACT means we are proposing a contract to the peer.
+    PROPOSING_CONTRACT = 2;
+
+    // PEER_REFUSED means the peer refused to form or renew a contract.
+    PEER_REFUSED = 3;
+
+    // SYNCING_CONTENTS means we and the peer are downloading data or
+    // each other.
+    SYNCING_CONTENTS = 4;
+
+    // CHECKING_CONTENTS means we are verifying stored content.
+    CHECKING_CONTENTS = 5;
+
+    // OUR_CONTENT_REVISION_MISSING means our content revision is missing on
+    // the peer.
+    OUR_CONTENT_REVISION_MISSING = 6;
+
+    // INVALID_CONTENT_RETURNED means the peer returned invalid content when
+    // we were checking it.
+    INVALID_CONTENT_RETURNED = 7;
+
+    // COMPLETED means the operation finished successfully.
+    COMPLETED = 8;
+};
+
+// ProposeContractUpdate reports progress or status changes while proposing a
+// contract.
+message ProposeContractUpdate {
+    // state is the current contract proposal state.
+    ContractState state = 1;
+
+    // success is true when the proposal finished successfully.
+    bool success = 2;
+
+    // their_content_length is the size of the peer's content in bytes.
+    int64 their_content_length = 3;
+
+    // their_content_downloaded_bytes is the downloaded portion in bytes.
+    int64 their_content_downloaded_bytes = 4;
+
+    // our_content_length is our content size in bytes.
+    int64 our_content_length = 5;
+
+    // our_content_uploaded_bytes is the uploaded portion in bytes.
+    int64 our_content_uploaded_bytes = 6;
+}
+
+// CheckContractRequest asks the daemon to verify a contract with a peer.
+message CheckContractRequest {
+    // peer is the peer to check.
+    Peer peer = 1;
+}
+
+// CheckContractUpdate reports progress or status during a contract check.
+message CheckContractUpdate {
+    // state is the current contract check state.
+    ContractState state = 1;
+
+    // success is true when the check finished successfully.
+    bool success = 2;
+
+    // our_content_length is our content size in bytes.
+    int64 our_content_length = 3;
+
+    // our_content_section_offset is the offset of the sampled section.
+    int64 our_content_section_offset = 4;
+
+    // our_content_section_length is the length of the sampled section.
+    int64 our_content_section_length = 5;
+}
+
+// RecoverContentRequest triggers content recovery workflow.
+message RecoverContentRequest {}
+
+// RecoverContentUpdate reports recovery progress and events.
+message RecoverContentUpdate {
+    // most_recent_content_id is the content_id of the most recent version.
+    bytes most_recent_content_id = 1;
+
+    // most_recent_ts is the Unix timestamp (seconds) of the most recent
+    // revision.
+    int64 most_recent_ts = 2;
+
+    // most_recent_ts_ns is the nanosecond component corresponding to
+    // most_recent_ts.
+    int64 most_recent_ts_ns = 3;
+
+    // most_recent_length is the byte length of the most recent version.
+    int64 most_recent_length = 4;
+
+    // num_peers_with_most_recent_version is the number of peers that have the
+    // most recent version.
+    int64 num_peers_with_most_recent_version = 5;
+
+    // total_versions_found is the total number of content versions discovered.
+    int64 total_versions_found = 6;
+
+    // num_peers_with_any_versions is the number of peers that have any
+    // version of our content.
+    int64 num_peers_with_any_versions = 7;
+
+    // most_recent_downloaded_bytes is the number of bytes downloaded for the
+    // most recent version.
+    int64 most_recent_downloaded_bytes = 8;
+
+    // most_recent_downloaded_files is the number of files recovered for the
+    // most recent version.
+    int64 most_recent_downloaded_files = 9;
+
+    // total_downloaded_bytes is the total number of bytes recovered.
+    int64 total_downloaded_bytes = 10;
+
+    // recovered_most_recent_version indicates whether the most recent version
+    // has been fully recovered.
+    bool recovered_most_recent_version = 11;
+}
+
+// SetAeadKeyForPeerRequest configures a password-derived symmetric key for a
+// peer chat.
+message SetAeadKeyForPeerRequest {
+    // peer is the peer for which to set the key.
+    Peer peer = 1;
+
+    // password is the shared password to derive the AEAD key.
+    string password = 2;
+}
+
+// SetAeadKeyForPeerResponse is returned when the key is set.
+message SetAeadKeyForPeerResponse {}
+
+// ChatAction carries an action initiated by the CLI.
+message ChatAction {
+    // chat_id uniquely identifies the chat session.
+    int64 chat_id = 1;
+
+    // peer is the chat counterpart onion service identifier.
+    Peer peer = 2;
+
+    oneof action {
+        // init starts a chat session or joins a pending chat request.
+        ChatInit init = 3;
+
+        // send_msg sends a text message.
+        ChatSendMsg send_msg = 4;
+
+        // send_file offers a file to the peer.
+        ChatSendFile send_file = 5;
+
+        // stop ends the chat session.
+        ChatStop stop = 6;
+    }
+}
+
+// ChatEvent carries an event produced by the daemon.
+message ChatEvent {
+    // chat_id is the chat session identifier.
+    int64 chat_id = 1;
+
+    oneof event {
+        // opened confirms that the chat session is open.
+        ChatOpened opened = 2;
+
+        // incoming_msg is an incoming text message.
+        ChatIncomingMsg incoming_msg = 3;
+
+        // file_offered is a file the peer made available to download.
+        ChatFileOffered file_offered = 4;
+
+        // closed indicates that the chat session has ended.
+        ChatClosed closed = 5;
+
+        // error is a human-readable error string.
+        ChatError error = 6;
+    }
+}
+
+// ChatInit starts a chat.
+message ChatInit {}
+
+// ChatSendMsg contains an outgoing message body.
+message ChatSendMsg {
+    // msg is the text message to send.
+    string msg = 1;
+}
+
+// ChatSendFile contains an outgoing file to offer via the chat.
+message ChatSendFile {
+    // name is a descriptive file name shown to the receiving user.
+    string name = 1;
+
+    // local_file_path is local file path of the file to send. It is not
+    // seen by the receiving user.
+    string local_file_path = 2;
+}
+
+// ChatStop requests the chat to stop.
+message ChatStop {}
+
+// ChatOpened acknowledges an opened chat.
+message ChatOpened {}
+
+// ChatIncomingMsg contains an incoming text message.
+message ChatIncomingMsg {
+    // msg is a text message from the peer.
+    string msg = 1;
+}
+
+// ChatFileOffered describes a file available for download from the peer.
+message ChatFileOffered {
+    // name is a descriptive file name shown to the user.
+    string name = 1;
+
+    // content_id is the identifier used for Download in bbrpc.
+    bytes content_id = 2;
+
+    // sha256 is the SHA-256 hash of the file.
+    bytes sha256 = 3;
+
+    // content_length is the total file size in bytes.
+    int64 content_length = 4;
+}
+
+// ChatClosed signals the end of a chat.
+message ChatClosed {}
+
+// ChatError carries an error string related to the chat.
+message ChatError {
+    // error is a human-readable error message.
+    string error = 1;
+}
