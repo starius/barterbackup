@@ -1,0 +1,162 @@
+syntax = "proto3";
+
+package clirpc;
+
+option go_package = "github.com/starius/barterbackup/clirpc";
+
+// BarterBackupClient is gRPC service implemented by BarterBackup daemon and
+// exposed locally. The CLI tool speaks to the daemon using this protocol.
+service BarterBackupClient {
+    // Unlock sends the main password to the daemon. The password is used to
+    // derive master secret key from which all other keys are derived, for
+    // encryption, onion service private key, for authentication etc.
+    rpc Unlock(UnlockRequest) returns (UnlockResponse);
+
+    // ConnectPeer adds the peer to the list of known peers. The daemon will
+    // try to connect to it.
+    rpc ConnectPeer(ConnectPeerRequest) returns (ConnectPeerResponse);
+
+    // ConnectedPeers returns the list of connected online peers.
+    rpc ConnectedPeers(ConnectedPeersRequest) returns (ConnectedPeersResponse);
+
+    // SetContent sends the content to store to the daemon. It will be stored
+    // in the encrypted form locally by the daemon and uploaded to other peers
+    // also in encrypted form. It will store other peer's content in exchange.
+    rpc SetContent(SetContentRequest) returns (SetContentResponse);
+
+    // GetContent returns the currently stored content.
+    rpc GetContent(GetContentRequest) returns (GetContentResponse);
+
+    // SetStorageConfig sets how much data of other peers we want to store and
+    // what is the minimum number of replicas (peers) we want to store data on.
+    // We also have obligations under old contracts (where peers are offline but
+    // still have remaining time to download their data from us). Given all of
+    // this it is possible to reduce what is maximum content length of another
+    // peer we accept into our storage.
+    rpc SetStorageConfig(SetStorageConfigRequest)
+        returns (SetStorageConfigResponse);
+
+    // GetStorageConfig returns the current storage configuration.
+    rpc GetStorageConfig(GetStorageConfigRequest)
+        returns (GetStorageConfigResponse);
+
+    // GetContracts returns the current state of storage contacts.
+    rpc GetContracts(GetContractsRequest) returns (GetContractsResponse);
+
+    // ProposeContract tells the server to form a contract if not already with
+    // the specified peer.
+    rpc ProposeContract(ProposeContractRequest)
+        returns (stream ProposeContractUpdate);
+
+    // CheckContract tells the server to check the contract with the peer.
+    // It verifies that we and the peer store the most recent versions of
+    // contents of each other, then it downloads a random piece of our content
+    // from peer and verifies it. Such checks are also run in background.
+    rpc CheckContract(CheckContractRequest)
+        returns (stream CheckContractUpdate);
+
+    // RecoverContent triggers content recovery from peers. The daemon does it
+    // on its own after starting and in background. This just triggers it. The
+    // stream works forever sending new recovery events.
+    rpc RecoverContent(RecoverContentRequest)
+        returns (stream RecoverContentUpdate);
+
+    // SetAeadKeyForPeer sets a password for symmetric encryption of chats with
+    // the peer. This is an additional measure to secure communications. The
+    // password has to be shared between the peers out-of-band. The key derived
+    // from the password is encrypted and added to the stored content so it will
+    // survive a node reset together with the main content.
+    rpc SetAeadKeyForPeer(SetAeadKeyForPeerRequest)
+        returns (SetAeadKeyForPeerResponse);
+
+    // Chat initiates a chat with a node. When the stream is closed, the chat
+    // is ended. It uses a symmetrically encrypted chat if AEAD key is set for
+    // the node. File transfers over the chat are passed through the stream.
+    rpc Chat(stream ChatAction) returns (stream ChatEvent);
+}
+
+message UnlockRequest {
+    string main_password = 1;
+}
+
+message UnlockResponse {
+    string main_password = 1;
+}
+
+message Peer {
+    string onion_service_id = 1;
+}
+
+message ConnectPeerRequest {
+    Peer peer = 1;
+}
+
+message ConnectPeerResponse {
+    Peer peer = 1;
+}
+
+message ConnectedPeersRequest {
+}
+
+message ConnectedPeersResponse {
+    repeated Peer peer = 1;
+}
+
+message SetContentRequest {
+    bytes content = 1;
+}
+
+message SetContentResponse {
+}
+
+message GetContentRequest {
+}
+
+message GetContentResponse {
+    bytes content = 1;
+}
+
+message StorageConfig {
+    int64 allocated_storage_for_peers = 1;
+
+    int64 min_replicas = 2;
+}
+
+message StorageInfo {
+    int64 offline_peers_storage_obligations_bytes = 1;
+    int64 expired_offline_peers_storage_obligations_bytes = 2;
+    int64 our_content_bytes = 3;
+    int64 our_full_content_bytes = 4;
+    int64 maximum_peer_content_accepted_bytes = 5;
+}
+
+message SetStorageConfigRequest {
+    StorageConfig config = 1;
+}
+
+message SetStorageConfigResponse {
+    StorageInfo info = 1;
+}
+
+message GetStorageConfigRequest {
+}
+
+message GetStorageConfigResponse {
+    StorageConfig config = 1;
+    StorageInfo info = 2;
+}
+
+message GetContractsRequest {
+}
+
+message ContractInfo {
+    Peer peer = 1;
+    bool our_content_synced = 2;
+    int64 our_remaining_seconds = 3;
+    int64 their_remaining_seconds = 4;
+    int64 their_content_length = 5;
+}
+
+message GetContractsResponse {
+    repeated ContractInfo contracts = 1;
+}

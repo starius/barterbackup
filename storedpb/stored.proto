@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package storedpb;
+
+option go_package = "github.com/starius/barterbackup/storedpb";
+
+// ContentRevision specifies particular version of user content set by
+// clirpc.SetContent call. AEAD(ContentRevision) is used as content_id in
+// bbrpc. The content of this struct is used to derive the keys used for
+// AEAD encryption of Metadata and for AES_CTR encryption of content.
+message ContentRevision {
+    // Unix timestamp (seconds) of time of SetContent call.
+    int64 created_at = 1;
+    int64 created_at_ns = 2;
+
+    int64 metadata_aead_length = 3;
+}
+
+// Peer is data about the peer that should survive a node reset.
+message Peer {
+    bytes onion_pubkey = 1;
+    bytes aead_key = 2;
+
+    int64 score_seconds = 3;
+    int64 score_measured_at = 4;
+}
+
+// Metadata is short data that is stored together with the main content on other
+// peers and survives node reset.
+message Metadata {
+    ContentRevision most_recent_content = 1;
+
+    int64 userdata_length = 2;
+    bytes userdata_sha256 = 3;
+
+    repeated Peer peers = 4;
+}
