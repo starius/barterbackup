@@ -1,0 +1,22 @@
+FROM golang:1.24.6-bookworm
+
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      protobuf-compiler ca-certificates git; \
+    rm -rf /var/lib/apt/lists/*
+
+ENV GOBIN=/usr/local/bin
+ENV PATH=/usr/local/bin:${PATH}
+
+COPY go.mod go.sum .
+
+# Install Go protoc plugins pinned in go.mod tool directives.
+RUN set -eux; \
+    go install google.golang.org/protobuf/cmd/protoc-gen-go; \
+    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc; \
+    protoc --version; \
+    /usr/local/bin/protoc-gen-go --version; \
+    /usr/local/bin/protoc-gen-go-grpc --version
+
+CMD ["/bin/bash", "scripts/gen_rpc.sh"]

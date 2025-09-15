@@ -80,9 +80,8 @@ Mutual backup system: you store my data, I store yours.
 
 **Status and TODOs**
 - Client API uses SetFile/GetFile/ListFiles for file management.
-- Some streaming RPCs in clirpc reference message types that still need
-  concrete schemas (ProposeContract*, CheckContract*, RecoverContent*,
-  ChatAction/ChatEvent).
+- clirpc message types for contract management, recovery, and chat are
+  defined; implementations may still evolve.
 - bbrpc ChatRequest tag numbers corrected (msg = 3, file = 4, stop = 5).
 - Next steps:
   - Implement contract lifecycle and background verification.
