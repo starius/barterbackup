@@ -92,6 +92,23 @@ Go code style
 - Don't inline short structs definitions and literals into a single line. Each field on a separate line.
 - If fields of a structs are commented, insert an empty line before a commented field.
 
+Testing
+
+- Prefer table-driven tests with subtests and `t.Parallel()` at test and subtest levels when appropriate.
+- Use `github.com/stretchr/testify/require` for assertions; avoid ad-hoc logging.
+- Do not capture loop variables (no `tc := tc`); recent Go range semantics make this unnecessary.
+- Put every field in table structs on its own line for readability.
+- For deterministic cryptographic outputs, store expected values as hex strings.
+  - If unknown initially, leave empty, run tests to see the actual hex in the failure message, and paste into the table.
+
+Build and install
+
+- Install daemon: `make install` (sets `CGO_ENABLED=0` and runs `go install ./cmd/bbdaemon`).
+
+Proto updates
+
+- bbrpc includes `HealthCheck(HealthCheckRequest) returns (HealthCheckResponse)` for simple liveness checks.
+
 Keys and crypto (internal/keys)
 
 - DeriveMasterPriv(seed string) → []byte: Derives master private material from a user‑provided password/seed string using Argon2id with a deterministic salt.

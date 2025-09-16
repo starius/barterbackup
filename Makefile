@@ -1,10 +1,13 @@
 RPC_IMAGE ?= barterbackup-rpc:bookworm
 
-.PHONY: install rpc rpc-image
+.PHONY: install unit rpc rpc-image fmt
 
 # Install the daemon binary.
 install:
 	CGO_ENABLED=0 go install ./cmd/bbdaemon
+
+unit:
+	CGO_ENABLED=0 go test ./...
 
 # Build the Docker image that contains Debian's protoc and Go plugins pinned
 # by the tool directives in go.mod.
