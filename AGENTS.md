@@ -88,6 +88,9 @@ Go code style
 - Insert a single empty line before any `return` that follows other code at the same indentation level (not immediately after `{`).
 - No trailing whitespace or tabs on otherwise empty lines.
 - Run `go fmt ./...` to normalize formatting.
+- Don't inline short functions into a single line.
+- Don't inline short structs definitions and literals into a single line. Each field on a separate line.
+- If fields of a structs are commented, insert an empty line before a commented field.
 
 Keys and crypto (internal/keys)
 

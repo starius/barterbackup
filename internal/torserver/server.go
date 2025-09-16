@@ -20,6 +20,7 @@ import (
 type Config struct {
 	// MasterPriv is the master private key material (output of memory-hard KDF).
 	MasterPriv []byte
+
 	// ListenOnionPort is the exposed onion port (default 80).
 	ListenOnionPort int
 }
@@ -32,10 +33,14 @@ type Server struct {
 }
 
 // OnionID returns the v3 onion identifier (without ".onion").
-func (s *Server) OnionID() string { return s.onionID }
+func (s *Server) OnionID() string {
+	return s.onionID
+}
 
 // GRPC returns the underlying gRPC server instance.
-func (s *Server) GRPC() *grpc.Server { return s.grpcServer }
+func (s *Server) GRPC() *grpc.Server {
+	return s.grpcServer
+}
 
 // Close stops gRPC and Tor onion listener.
 func (s *Server) Close() error {
@@ -132,6 +137,7 @@ func pqTLSServerConfigFromEd25519(priv ed25519.PrivateKey) (*tls.Config, error) 
 	cfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS13,
+
 		// Enforce hybrid PQ key exchange only.
 		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
 	}
