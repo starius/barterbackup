@@ -19,4 +19,5 @@ rpc: rpc-image
 	  $(RPC_IMAGE)
 
 fmt:
+	clang-format -i */*.proto
 	go fmt ./...

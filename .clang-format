@@ -1,0 +1,10 @@
+Language: Proto
+BasedOnStyle: Google
+IndentWidth: 4
+
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterClass: true
+  AfterStruct: true
+  AfterEnum: true
+  SplitEmptyRecord: false

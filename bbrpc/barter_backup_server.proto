@@ -67,8 +67,7 @@ message ContentInfo {
     int64 content_length = 2;
 }
 
-message GetContentRevisionRequest {
-}
+message GetContentRevisionRequest {}
 
 message GetContentRevisionResponse {
     // requester_content is the description of the requester's content stored
@@ -93,8 +92,7 @@ message SetContentRevisionRequest {
     ContentInfo requester_content = 1;
 }
 
-message SetContentRevisionResponse {
-}
+message SetContentRevisionResponse {}
 
 message DownloadRequest {
     bytes content_id = 1;
@@ -160,8 +158,7 @@ message ChatRequest {
     }
 }
 
-message ChatInit {
-}
+message ChatInit {}
 
 message ChatMessage {
     // msg is a text message. Maximum size: 2048 bytes. It must be a valid
@@ -181,11 +178,9 @@ message ChatFile {
     int64 content_length = 3;
 }
 
-message ChatStop {
-}
+message ChatStop {}
 
-message ChatResponse {
-}
+message ChatResponse {}
 
 message EncryptedChatRequest {
     // encrypted_chat_request is AEAD(ChatRequest).

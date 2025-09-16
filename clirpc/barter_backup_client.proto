@@ -104,8 +104,7 @@ message UnlockRequest {
     string main_password = 1;
 }
 
-message UnlockResponse {
-}
+message UnlockResponse {}
 
 message Peer {
     // onion_service_id is the Tor onion service identifier of the peer.
@@ -117,11 +116,9 @@ message ConnectPeerRequest {
     Peer peer = 1;
 }
 
-message ConnectPeerResponse {
-}
+message ConnectPeerResponse {}
 
-message ConnectedPeersRequest {
-}
+message ConnectedPeersRequest {}
 
 message ConnectedPeersResponse {
     // connected_peers contains the list of connected online peers.
@@ -211,11 +208,9 @@ message SetStorageConfigRequest {
     StorageConfig config = 1;
 }
 
-message SetStorageConfigResponse {
-}
+message SetStorageConfigResponse {}
 
-message GetStorageConfigRequest {
-}
+message GetStorageConfigRequest {}
 
 message GetStorageConfigResponse {
     // config is the current storage configuration.
@@ -225,8 +220,7 @@ message GetStorageConfigResponse {
     StorageInfo info = 2;
 }
 
-message GetContractsRequest {
-}
+message GetContractsRequest {}
 
 // ContractInfo holds important information about a contract with a peer.
 message ContractInfo {
@@ -264,7 +258,8 @@ message ProposeContractRequest {
     Peer peer = 1;
 }
 
-enum ContractState {
+enum ContractState
+{
     // NOT_STARTED means the operation has not begun.
     NOT_STARTED = 0;
 
