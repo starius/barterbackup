@@ -14,6 +14,9 @@ option go_package = "github.com/starius/barterbackup/clirpc";
 // - Content: A single finalized encrypted blob produced by the daemon from
 //   the current set of files. This is what gets backed up to peers.
 service BarterBackupClient {
+    // HealthCheck returns success when the server is healthy.
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
     // Unlock sends the main password to the daemon. The password is used to
     // derive the master secret key from which all other keys are derived,
     // for encryption, onion service private key, and for authentication.
@@ -89,6 +92,12 @@ service BarterBackupClient {
     // the stream.
     rpc Chat(stream ChatAction) returns (stream ChatEvent);
 }
+
+// HealthCheckRequest is an empty health check request.
+message HealthCheckRequest {}
+
+// HealthCheckResponse is an empty health check response.
+message HealthCheckResponse {}
 
 message UnlockRequest {
     // main_password is the main password used to derive the master secret.

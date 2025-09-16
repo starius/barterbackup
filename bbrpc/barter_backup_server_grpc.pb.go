@@ -19,6 +19,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	BarterBackupServer_HealthCheck_FullMethodName        = "/bbrpc.BarterBackupServer/HealthCheck"
 	BarterBackupServer_PeerExchange_FullMethodName       = "/bbrpc.BarterBackupServer/PeerExchange"
 	BarterBackupServer_GetContentRevision_FullMethodName = "/bbrpc.BarterBackupServer/GetContentRevision"
 	BarterBackupServer_SetContentRevision_FullMethodName = "/bbrpc.BarterBackupServer/SetContentRevision"
@@ -37,6 +38,8 @@ const (
 // using this protocol. A single main key must be used by a single instance of
 // BarterBackup node as a time.
 type BarterBackupServerClient interface {
+	// HealthCheck returns success when the server is healthy.
+	HealthCheck(ctx context.Context, in *HealthCheckRequest, opts ...grpc.CallOption) (*HealthCheckResponse, error)
 	// PeerExchange shares peers (onion IDs) with the peer. This is needed for
 	// peers to discover other peers in the network.
 	PeerExchange(ctx context.Context, in *PeerExchangeRequest, opts ...grpc.CallOption) (*PeerExchangeResponse, error)
@@ -66,6 +69,16 @@ type barterBackupServerClient struct {
 
 func NewBarterBackupServerClient(cc grpc.ClientConnInterface) BarterBackupServerClient {
 	return &barterBackupServerClient{cc}
+}
+
+func (c *barterBackupServerClient) HealthCheck(ctx context.Context, in *HealthCheckRequest, opts ...grpc.CallOption) (*HealthCheckResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HealthCheckResponse)
+	err := c.cc.Invoke(ctx, BarterBackupServer_HealthCheck_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *barterBackupServerClient) PeerExchange(ctx context.Context, in *PeerExchangeRequest, opts ...grpc.CallOption) (*PeerExchangeResponse, error) {
@@ -147,6 +160,8 @@ func (c *barterBackupServerClient) EncryptedChat(ctx context.Context, in *Encryp
 // using this protocol. A single main key must be used by a single instance of
 // BarterBackup node as a time.
 type BarterBackupServerServer interface {
+	// HealthCheck returns success when the server is healthy.
+	HealthCheck(context.Context, *HealthCheckRequest) (*HealthCheckResponse, error)
 	// PeerExchange shares peers (onion IDs) with the peer. This is needed for
 	// peers to discover other peers in the network.
 	PeerExchange(context.Context, *PeerExchangeRequest) (*PeerExchangeResponse, error)
@@ -178,6 +193,9 @@ type BarterBackupServerServer interface {
 // pointer dereference when methods are called.
 type UnimplementedBarterBackupServerServer struct{}
 
+func (UnimplementedBarterBackupServerServer) HealthCheck(context.Context, *HealthCheckRequest) (*HealthCheckResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method HealthCheck not implemented")
+}
 func (UnimplementedBarterBackupServerServer) PeerExchange(context.Context, *PeerExchangeRequest) (*PeerExchangeResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PeerExchange not implemented")
 }
@@ -218,6 +236,24 @@ func RegisterBarterBackupServerServer(s grpc.ServiceRegistrar, srv BarterBackupS
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&BarterBackupServer_ServiceDesc, srv)
+}
+
+func _BarterBackupServer_HealthCheck_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HealthCheckRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BarterBackupServerServer).HealthCheck(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BarterBackupServer_HealthCheck_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BarterBackupServerServer).HealthCheck(ctx, req.(*HealthCheckRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _BarterBackupServer_PeerExchange_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -353,6 +389,10 @@ var BarterBackupServer_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "bbrpc.BarterBackupServer",
 	HandlerType: (*BarterBackupServerServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "HealthCheck",
+			Handler:    _BarterBackupServer_HealthCheck_Handler,
+		},
 		{
 			MethodName: "PeerExchange",
 			Handler:    _BarterBackupServer_PeerExchange_Handler,

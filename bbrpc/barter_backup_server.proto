@@ -9,6 +9,9 @@ option go_package = "github.com/starius/barterbackup/bbrpc";
 // using this protocol. A single main key must be used by a single instance of
 // BarterBackup node as a time.
 service BarterBackupServer {
+    // HealthCheck returns success when the server is healthy.
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
     // PeerExchange shares peers (onion IDs) with the peer. This is needed for
     // peers to discover other peers in the network.
     rpc PeerExchange(PeerExchangeRequest) returns (PeerExchangeResponse);
@@ -40,6 +43,12 @@ service BarterBackupServer {
     // encryption password needs to be setup out-of-band.
     rpc EncryptedChat(EncryptedChatRequest) returns (EncryptedChatResponse);
 }
+
+// HealthCheckRequest is an empty health check request.
+message HealthCheckRequest {}
+
+// HealthCheckResponse is an empty health check response.
+message HealthCheckResponse {}
 
 message Peer {
     bytes onion_pubkey = 1;

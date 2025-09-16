@@ -100,6 +100,80 @@ func (ContractState) EnumDescriptor() ([]byte, []int) {
 	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{0}
 }
 
+// HealthCheckRequest is an empty health check request.
+type HealthCheckRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HealthCheckRequest) Reset() {
+	*x = HealthCheckRequest{}
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HealthCheckRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HealthCheckRequest) ProtoMessage() {}
+
+func (x *HealthCheckRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HealthCheckRequest.ProtoReflect.Descriptor instead.
+func (*HealthCheckRequest) Descriptor() ([]byte, []int) {
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{0}
+}
+
+// HealthCheckResponse is an empty health check response.
+type HealthCheckResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HealthCheckResponse) Reset() {
+	*x = HealthCheckResponse{}
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HealthCheckResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HealthCheckResponse) ProtoMessage() {}
+
+func (x *HealthCheckResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HealthCheckResponse.ProtoReflect.Descriptor instead.
+func (*HealthCheckResponse) Descriptor() ([]byte, []int) {
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{1}
+}
+
 type UnlockRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// main_password is the main password used to derive the master secret.
@@ -110,7 +184,7 @@ type UnlockRequest struct {
 
 func (x *UnlockRequest) Reset() {
 	*x = UnlockRequest{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[0]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -122,7 +196,7 @@ func (x *UnlockRequest) String() string {
 func (*UnlockRequest) ProtoMessage() {}
 
 func (x *UnlockRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[0]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -135,7 +209,7 @@ func (x *UnlockRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnlockRequest.ProtoReflect.Descriptor instead.
 func (*UnlockRequest) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{0}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *UnlockRequest) GetMainPassword() string {
@@ -153,7 +227,7 @@ type UnlockResponse struct {
 
 func (x *UnlockResponse) Reset() {
 	*x = UnlockResponse{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[1]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -165,7 +239,7 @@ func (x *UnlockResponse) String() string {
 func (*UnlockResponse) ProtoMessage() {}
 
 func (x *UnlockResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[1]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -178,7 +252,7 @@ func (x *UnlockResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnlockResponse.ProtoReflect.Descriptor instead.
 func (*UnlockResponse) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{1}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{3}
 }
 
 type Peer struct {
@@ -191,7 +265,7 @@ type Peer struct {
 
 func (x *Peer) Reset() {
 	*x = Peer{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[2]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -203,7 +277,7 @@ func (x *Peer) String() string {
 func (*Peer) ProtoMessage() {}
 
 func (x *Peer) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[2]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -216,7 +290,7 @@ func (x *Peer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Peer.ProtoReflect.Descriptor instead.
 func (*Peer) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{2}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Peer) GetOnionServiceId() string {
@@ -236,7 +310,7 @@ type ConnectPeerRequest struct {
 
 func (x *ConnectPeerRequest) Reset() {
 	*x = ConnectPeerRequest{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[3]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -248,7 +322,7 @@ func (x *ConnectPeerRequest) String() string {
 func (*ConnectPeerRequest) ProtoMessage() {}
 
 func (x *ConnectPeerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[3]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -261,7 +335,7 @@ func (x *ConnectPeerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectPeerRequest.ProtoReflect.Descriptor instead.
 func (*ConnectPeerRequest) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{3}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ConnectPeerRequest) GetPeer() *Peer {
@@ -279,7 +353,7 @@ type ConnectPeerResponse struct {
 
 func (x *ConnectPeerResponse) Reset() {
 	*x = ConnectPeerResponse{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[4]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -291,7 +365,7 @@ func (x *ConnectPeerResponse) String() string {
 func (*ConnectPeerResponse) ProtoMessage() {}
 
 func (x *ConnectPeerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[4]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -304,7 +378,7 @@ func (x *ConnectPeerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectPeerResponse.ProtoReflect.Descriptor instead.
 func (*ConnectPeerResponse) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{4}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{6}
 }
 
 type ConnectedPeersRequest struct {
@@ -315,7 +389,7 @@ type ConnectedPeersRequest struct {
 
 func (x *ConnectedPeersRequest) Reset() {
 	*x = ConnectedPeersRequest{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[5]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -327,7 +401,7 @@ func (x *ConnectedPeersRequest) String() string {
 func (*ConnectedPeersRequest) ProtoMessage() {}
 
 func (x *ConnectedPeersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[5]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -340,7 +414,7 @@ func (x *ConnectedPeersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectedPeersRequest.ProtoReflect.Descriptor instead.
 func (*ConnectedPeersRequest) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{5}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{7}
 }
 
 type ConnectedPeersResponse struct {
@@ -358,7 +432,7 @@ type ConnectedPeersResponse struct {
 
 func (x *ConnectedPeersResponse) Reset() {
 	*x = ConnectedPeersResponse{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[6]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -370,7 +444,7 @@ func (x *ConnectedPeersResponse) String() string {
 func (*ConnectedPeersResponse) ProtoMessage() {}
 
 func (x *ConnectedPeersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[6]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -383,7 +457,7 @@ func (x *ConnectedPeersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectedPeersResponse.ProtoReflect.Descriptor instead.
 func (*ConnectedPeersResponse) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{6}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ConnectedPeersResponse) GetConnectedPeers() []*Peer {
@@ -422,7 +496,7 @@ type File struct {
 
 func (x *File) Reset() {
 	*x = File{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[7]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -434,7 +508,7 @@ func (x *File) String() string {
 func (*File) ProtoMessage() {}
 
 func (x *File) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[7]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -447,7 +521,7 @@ func (x *File) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use File.ProtoReflect.Descriptor instead.
 func (*File) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{7}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *File) GetName() string {
@@ -474,7 +548,7 @@ type SetFileRequest struct {
 
 func (x *SetFileRequest) Reset() {
 	*x = SetFileRequest{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[8]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -486,7 +560,7 @@ func (x *SetFileRequest) String() string {
 func (*SetFileRequest) ProtoMessage() {}
 
 func (x *SetFileRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[8]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -499,7 +573,7 @@ func (x *SetFileRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetFileRequest.ProtoReflect.Descriptor instead.
 func (*SetFileRequest) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{8}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *SetFileRequest) GetFile() *File {
@@ -517,7 +591,7 @@ type SetFileResponse struct {
 
 func (x *SetFileResponse) Reset() {
 	*x = SetFileResponse{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[9]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -529,7 +603,7 @@ func (x *SetFileResponse) String() string {
 func (*SetFileResponse) ProtoMessage() {}
 
 func (x *SetFileResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[9]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -542,7 +616,7 @@ func (x *SetFileResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetFileResponse.ProtoReflect.Descriptor instead.
 func (*SetFileResponse) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{9}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{11}
 }
 
 type GetFileRequest struct {
@@ -555,7 +629,7 @@ type GetFileRequest struct {
 
 func (x *GetFileRequest) Reset() {
 	*x = GetFileRequest{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[10]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -567,7 +641,7 @@ func (x *GetFileRequest) String() string {
 func (*GetFileRequest) ProtoMessage() {}
 
 func (x *GetFileRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[10]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -580,7 +654,7 @@ func (x *GetFileRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetFileRequest.ProtoReflect.Descriptor instead.
 func (*GetFileRequest) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{10}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *GetFileRequest) GetName() string {
@@ -600,7 +674,7 @@ type GetFileResponse struct {
 
 func (x *GetFileResponse) Reset() {
 	*x = GetFileResponse{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[11]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -612,7 +686,7 @@ func (x *GetFileResponse) String() string {
 func (*GetFileResponse) ProtoMessage() {}
 
 func (x *GetFileResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[11]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -625,7 +699,7 @@ func (x *GetFileResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetFileResponse.ProtoReflect.Descriptor instead.
 func (*GetFileResponse) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{11}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *GetFileResponse) GetFile() *File {
@@ -643,7 +717,7 @@ type ListFilesRequest struct {
 
 func (x *ListFilesRequest) Reset() {
 	*x = ListFilesRequest{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[12]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -655,7 +729,7 @@ func (x *ListFilesRequest) String() string {
 func (*ListFilesRequest) ProtoMessage() {}
 
 func (x *ListFilesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[12]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -668,7 +742,7 @@ func (x *ListFilesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListFilesRequest.ProtoReflect.Descriptor instead.
 func (*ListFilesRequest) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{12}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{14}
 }
 
 type ListFilesResponse struct {
@@ -681,7 +755,7 @@ type ListFilesResponse struct {
 
 func (x *ListFilesResponse) Reset() {
 	*x = ListFilesResponse{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[13]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -693,7 +767,7 @@ func (x *ListFilesResponse) String() string {
 func (*ListFilesResponse) ProtoMessage() {}
 
 func (x *ListFilesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[13]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -706,7 +780,7 @@ func (x *ListFilesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListFilesResponse.ProtoReflect.Descriptor instead.
 func (*ListFilesResponse) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{13}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ListFilesResponse) GetName() []string {
@@ -730,7 +804,7 @@ type StorageConfig struct {
 
 func (x *StorageConfig) Reset() {
 	*x = StorageConfig{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[14]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -742,7 +816,7 @@ func (x *StorageConfig) String() string {
 func (*StorageConfig) ProtoMessage() {}
 
 func (x *StorageConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[14]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -755,7 +829,7 @@ func (x *StorageConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StorageConfig.ProtoReflect.Descriptor instead.
 func (*StorageConfig) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{14}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *StorageConfig) GetAllocatedStorageForPeers() int64 {
@@ -799,7 +873,7 @@ type StorageInfo struct {
 
 func (x *StorageInfo) Reset() {
 	*x = StorageInfo{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[15]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -811,7 +885,7 @@ func (x *StorageInfo) String() string {
 func (*StorageInfo) ProtoMessage() {}
 
 func (x *StorageInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[15]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -824,7 +898,7 @@ func (x *StorageInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StorageInfo.ProtoReflect.Descriptor instead.
 func (*StorageInfo) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{15}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *StorageInfo) GetOnlinePeersStorageObligationsBytes() int64 {
@@ -872,7 +946,7 @@ type SetStorageConfigRequest struct {
 
 func (x *SetStorageConfigRequest) Reset() {
 	*x = SetStorageConfigRequest{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[16]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -884,7 +958,7 @@ func (x *SetStorageConfigRequest) String() string {
 func (*SetStorageConfigRequest) ProtoMessage() {}
 
 func (x *SetStorageConfigRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[16]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -897,7 +971,7 @@ func (x *SetStorageConfigRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetStorageConfigRequest.ProtoReflect.Descriptor instead.
 func (*SetStorageConfigRequest) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{16}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *SetStorageConfigRequest) GetConfig() *StorageConfig {
@@ -915,7 +989,7 @@ type SetStorageConfigResponse struct {
 
 func (x *SetStorageConfigResponse) Reset() {
 	*x = SetStorageConfigResponse{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[17]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -927,7 +1001,7 @@ func (x *SetStorageConfigResponse) String() string {
 func (*SetStorageConfigResponse) ProtoMessage() {}
 
 func (x *SetStorageConfigResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[17]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -940,7 +1014,7 @@ func (x *SetStorageConfigResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetStorageConfigResponse.ProtoReflect.Descriptor instead.
 func (*SetStorageConfigResponse) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{17}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{19}
 }
 
 type GetStorageConfigRequest struct {
@@ -951,7 +1025,7 @@ type GetStorageConfigRequest struct {
 
 func (x *GetStorageConfigRequest) Reset() {
 	*x = GetStorageConfigRequest{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[18]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -963,7 +1037,7 @@ func (x *GetStorageConfigRequest) String() string {
 func (*GetStorageConfigRequest) ProtoMessage() {}
 
 func (x *GetStorageConfigRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[18]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -976,7 +1050,7 @@ func (x *GetStorageConfigRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStorageConfigRequest.ProtoReflect.Descriptor instead.
 func (*GetStorageConfigRequest) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{18}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{20}
 }
 
 type GetStorageConfigResponse struct {
@@ -991,7 +1065,7 @@ type GetStorageConfigResponse struct {
 
 func (x *GetStorageConfigResponse) Reset() {
 	*x = GetStorageConfigResponse{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[19]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1003,7 +1077,7 @@ func (x *GetStorageConfigResponse) String() string {
 func (*GetStorageConfigResponse) ProtoMessage() {}
 
 func (x *GetStorageConfigResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[19]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1016,7 +1090,7 @@ func (x *GetStorageConfigResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStorageConfigResponse.ProtoReflect.Descriptor instead.
 func (*GetStorageConfigResponse) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{19}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *GetStorageConfigResponse) GetConfig() *StorageConfig {
@@ -1041,7 +1115,7 @@ type GetContractsRequest struct {
 
 func (x *GetContractsRequest) Reset() {
 	*x = GetContractsRequest{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[20]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1053,7 +1127,7 @@ func (x *GetContractsRequest) String() string {
 func (*GetContractsRequest) ProtoMessage() {}
 
 func (x *GetContractsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[20]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1066,7 +1140,7 @@ func (x *GetContractsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetContractsRequest.ProtoReflect.Descriptor instead.
 func (*GetContractsRequest) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{20}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{22}
 }
 
 // ContractInfo holds important information about a contract with a peer.
@@ -1094,7 +1168,7 @@ type ContractInfo struct {
 
 func (x *ContractInfo) Reset() {
 	*x = ContractInfo{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[21]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1106,7 +1180,7 @@ func (x *ContractInfo) String() string {
 func (*ContractInfo) ProtoMessage() {}
 
 func (x *ContractInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[21]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1119,7 +1193,7 @@ func (x *ContractInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ContractInfo.ProtoReflect.Descriptor instead.
 func (*ContractInfo) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{21}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ContractInfo) GetPeer() *Peer {
@@ -1173,7 +1247,7 @@ type GetContractsResponse struct {
 
 func (x *GetContractsResponse) Reset() {
 	*x = GetContractsResponse{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[22]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1185,7 +1259,7 @@ func (x *GetContractsResponse) String() string {
 func (*GetContractsResponse) ProtoMessage() {}
 
 func (x *GetContractsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[22]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1198,7 +1272,7 @@ func (x *GetContractsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetContractsResponse.ProtoReflect.Descriptor instead.
 func (*GetContractsResponse) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{22}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *GetContractsResponse) GetContracts() []*ContractInfo {
@@ -1220,7 +1294,7 @@ type ProposeContractRequest struct {
 
 func (x *ProposeContractRequest) Reset() {
 	*x = ProposeContractRequest{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[23]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1232,7 +1306,7 @@ func (x *ProposeContractRequest) String() string {
 func (*ProposeContractRequest) ProtoMessage() {}
 
 func (x *ProposeContractRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[23]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1245,7 +1319,7 @@ func (x *ProposeContractRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProposeContractRequest.ProtoReflect.Descriptor instead.
 func (*ProposeContractRequest) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{23}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *ProposeContractRequest) GetPeer() *Peer {
@@ -1277,7 +1351,7 @@ type ProposeContractUpdate struct {
 
 func (x *ProposeContractUpdate) Reset() {
 	*x = ProposeContractUpdate{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[24]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1289,7 +1363,7 @@ func (x *ProposeContractUpdate) String() string {
 func (*ProposeContractUpdate) ProtoMessage() {}
 
 func (x *ProposeContractUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[24]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1302,7 +1376,7 @@ func (x *ProposeContractUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProposeContractUpdate.ProtoReflect.Descriptor instead.
 func (*ProposeContractUpdate) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{24}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *ProposeContractUpdate) GetState() ContractState {
@@ -1358,7 +1432,7 @@ type CheckContractRequest struct {
 
 func (x *CheckContractRequest) Reset() {
 	*x = CheckContractRequest{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[25]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1370,7 +1444,7 @@ func (x *CheckContractRequest) String() string {
 func (*CheckContractRequest) ProtoMessage() {}
 
 func (x *CheckContractRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[25]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1383,7 +1457,7 @@ func (x *CheckContractRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckContractRequest.ProtoReflect.Descriptor instead.
 func (*CheckContractRequest) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{25}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *CheckContractRequest) GetPeer() *Peer {
@@ -1412,7 +1486,7 @@ type CheckContractUpdate struct {
 
 func (x *CheckContractUpdate) Reset() {
 	*x = CheckContractUpdate{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[26]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1424,7 +1498,7 @@ func (x *CheckContractUpdate) String() string {
 func (*CheckContractUpdate) ProtoMessage() {}
 
 func (x *CheckContractUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[26]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1437,7 +1511,7 @@ func (x *CheckContractUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckContractUpdate.ProtoReflect.Descriptor instead.
 func (*CheckContractUpdate) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{26}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *CheckContractUpdate) GetState() ContractState {
@@ -1484,7 +1558,7 @@ type RecoverContentRequest struct {
 
 func (x *RecoverContentRequest) Reset() {
 	*x = RecoverContentRequest{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[27]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1496,7 +1570,7 @@ func (x *RecoverContentRequest) String() string {
 func (*RecoverContentRequest) ProtoMessage() {}
 
 func (x *RecoverContentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[27]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1509,7 +1583,7 @@ func (x *RecoverContentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecoverContentRequest.ProtoReflect.Descriptor instead.
 func (*RecoverContentRequest) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{27}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{29}
 }
 
 // RecoverContentUpdate reports recovery progress and events.
@@ -1550,7 +1624,7 @@ type RecoverContentUpdate struct {
 
 func (x *RecoverContentUpdate) Reset() {
 	*x = RecoverContentUpdate{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[28]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1562,7 +1636,7 @@ func (x *RecoverContentUpdate) String() string {
 func (*RecoverContentUpdate) ProtoMessage() {}
 
 func (x *RecoverContentUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[28]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1575,7 +1649,7 @@ func (x *RecoverContentUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecoverContentUpdate.ProtoReflect.Descriptor instead.
 func (*RecoverContentUpdate) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{28}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *RecoverContentUpdate) GetMostRecentContentId() []byte {
@@ -1669,7 +1743,7 @@ type SetAeadKeyForPeerRequest struct {
 
 func (x *SetAeadKeyForPeerRequest) Reset() {
 	*x = SetAeadKeyForPeerRequest{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[29]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1681,7 +1755,7 @@ func (x *SetAeadKeyForPeerRequest) String() string {
 func (*SetAeadKeyForPeerRequest) ProtoMessage() {}
 
 func (x *SetAeadKeyForPeerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[29]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1694,7 +1768,7 @@ func (x *SetAeadKeyForPeerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetAeadKeyForPeerRequest.ProtoReflect.Descriptor instead.
 func (*SetAeadKeyForPeerRequest) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{29}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *SetAeadKeyForPeerRequest) GetPeer() *Peer {
@@ -1720,7 +1794,7 @@ type SetAeadKeyForPeerResponse struct {
 
 func (x *SetAeadKeyForPeerResponse) Reset() {
 	*x = SetAeadKeyForPeerResponse{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[30]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1732,7 +1806,7 @@ func (x *SetAeadKeyForPeerResponse) String() string {
 func (*SetAeadKeyForPeerResponse) ProtoMessage() {}
 
 func (x *SetAeadKeyForPeerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[30]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1745,7 +1819,7 @@ func (x *SetAeadKeyForPeerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetAeadKeyForPeerResponse.ProtoReflect.Descriptor instead.
 func (*SetAeadKeyForPeerResponse) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{30}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{32}
 }
 
 // ChatAction carries an action initiated by the CLI.
@@ -1768,7 +1842,7 @@ type ChatAction struct {
 
 func (x *ChatAction) Reset() {
 	*x = ChatAction{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[31]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1780,7 +1854,7 @@ func (x *ChatAction) String() string {
 func (*ChatAction) ProtoMessage() {}
 
 func (x *ChatAction) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[31]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1793,7 +1867,7 @@ func (x *ChatAction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatAction.ProtoReflect.Descriptor instead.
 func (*ChatAction) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{31}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *ChatAction) GetChatId() int64 {
@@ -1904,7 +1978,7 @@ type ChatEvent struct {
 
 func (x *ChatEvent) Reset() {
 	*x = ChatEvent{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[32]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1916,7 +1990,7 @@ func (x *ChatEvent) String() string {
 func (*ChatEvent) ProtoMessage() {}
 
 func (x *ChatEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[32]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1929,7 +2003,7 @@ func (x *ChatEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatEvent.ProtoReflect.Descriptor instead.
 func (*ChatEvent) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{32}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *ChatEvent) GetChatId() int64 {
@@ -2039,7 +2113,7 @@ type ChatInit struct {
 
 func (x *ChatInit) Reset() {
 	*x = ChatInit{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[33]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2051,7 +2125,7 @@ func (x *ChatInit) String() string {
 func (*ChatInit) ProtoMessage() {}
 
 func (x *ChatInit) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[33]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2064,7 +2138,7 @@ func (x *ChatInit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatInit.ProtoReflect.Descriptor instead.
 func (*ChatInit) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{33}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{35}
 }
 
 // ChatSendMsg contains an outgoing message body.
@@ -2078,7 +2152,7 @@ type ChatSendMsg struct {
 
 func (x *ChatSendMsg) Reset() {
 	*x = ChatSendMsg{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[34]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2090,7 +2164,7 @@ func (x *ChatSendMsg) String() string {
 func (*ChatSendMsg) ProtoMessage() {}
 
 func (x *ChatSendMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[34]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2103,7 +2177,7 @@ func (x *ChatSendMsg) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatSendMsg.ProtoReflect.Descriptor instead.
 func (*ChatSendMsg) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{34}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ChatSendMsg) GetMsg() string {
@@ -2127,7 +2201,7 @@ type ChatSendFile struct {
 
 func (x *ChatSendFile) Reset() {
 	*x = ChatSendFile{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[35]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2139,7 +2213,7 @@ func (x *ChatSendFile) String() string {
 func (*ChatSendFile) ProtoMessage() {}
 
 func (x *ChatSendFile) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[35]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2152,7 +2226,7 @@ func (x *ChatSendFile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatSendFile.ProtoReflect.Descriptor instead.
 func (*ChatSendFile) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{35}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ChatSendFile) GetName() string {
@@ -2178,7 +2252,7 @@ type ChatStop struct {
 
 func (x *ChatStop) Reset() {
 	*x = ChatStop{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[36]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2190,7 +2264,7 @@ func (x *ChatStop) String() string {
 func (*ChatStop) ProtoMessage() {}
 
 func (x *ChatStop) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[36]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2203,7 +2277,7 @@ func (x *ChatStop) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatStop.ProtoReflect.Descriptor instead.
 func (*ChatStop) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{36}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{38}
 }
 
 // ChatOpened acknowledges an opened chat.
@@ -2215,7 +2289,7 @@ type ChatOpened struct {
 
 func (x *ChatOpened) Reset() {
 	*x = ChatOpened{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[37]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2227,7 +2301,7 @@ func (x *ChatOpened) String() string {
 func (*ChatOpened) ProtoMessage() {}
 
 func (x *ChatOpened) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[37]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2240,7 +2314,7 @@ func (x *ChatOpened) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatOpened.ProtoReflect.Descriptor instead.
 func (*ChatOpened) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{37}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{39}
 }
 
 // ChatIncomingMsg contains an incoming text message.
@@ -2254,7 +2328,7 @@ type ChatIncomingMsg struct {
 
 func (x *ChatIncomingMsg) Reset() {
 	*x = ChatIncomingMsg{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[38]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2266,7 +2340,7 @@ func (x *ChatIncomingMsg) String() string {
 func (*ChatIncomingMsg) ProtoMessage() {}
 
 func (x *ChatIncomingMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[38]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2279,7 +2353,7 @@ func (x *ChatIncomingMsg) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatIncomingMsg.ProtoReflect.Descriptor instead.
 func (*ChatIncomingMsg) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{38}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ChatIncomingMsg) GetMsg() string {
@@ -2306,7 +2380,7 @@ type ChatFileOffered struct {
 
 func (x *ChatFileOffered) Reset() {
 	*x = ChatFileOffered{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[39]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2318,7 +2392,7 @@ func (x *ChatFileOffered) String() string {
 func (*ChatFileOffered) ProtoMessage() {}
 
 func (x *ChatFileOffered) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[39]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2331,7 +2405,7 @@ func (x *ChatFileOffered) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatFileOffered.ProtoReflect.Descriptor instead.
 func (*ChatFileOffered) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{39}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *ChatFileOffered) GetName() string {
@@ -2371,7 +2445,7 @@ type ChatClosed struct {
 
 func (x *ChatClosed) Reset() {
 	*x = ChatClosed{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[40]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2383,7 +2457,7 @@ func (x *ChatClosed) String() string {
 func (*ChatClosed) ProtoMessage() {}
 
 func (x *ChatClosed) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[40]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2396,7 +2470,7 @@ func (x *ChatClosed) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatClosed.ProtoReflect.Descriptor instead.
 func (*ChatClosed) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{40}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{42}
 }
 
 // ChatError carries an error string related to the chat.
@@ -2410,7 +2484,7 @@ type ChatError struct {
 
 func (x *ChatError) Reset() {
 	*x = ChatError{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[41]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2422,7 +2496,7 @@ func (x *ChatError) String() string {
 func (*ChatError) ProtoMessage() {}
 
 func (x *ChatError) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[41]
+	mi := &file_clirpc_barter_backup_client_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2435,7 +2509,7 @@ func (x *ChatError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatError.ProtoReflect.Descriptor instead.
 func (*ChatError) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{41}
+	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *ChatError) GetError() string {
@@ -2449,7 +2523,9 @@ var File_clirpc_barter_backup_client_proto protoreflect.FileDescriptor
 
 const file_clirpc_barter_backup_client_proto_rawDesc = "" +
 	"\n" +
-	"!clirpc/barter_backup_client.proto\x12\x06clirpc\"4\n" +
+	"!clirpc/barter_backup_client.proto\x12\x06clirpc\"\x14\n" +
+	"\x12HealthCheckRequest\"\x15\n" +
+	"\x13HealthCheckResponse\"4\n" +
 	"\rUnlockRequest\x12#\n" +
 	"\rmain_password\x18\x01 \x01(\tR\fmainPassword\"\x10\n" +
 	"\x0eUnlockResponse\"0\n" +
@@ -2586,8 +2662,9 @@ const file_clirpc_barter_backup_client_proto_rawDesc = "" +
 	"\x11CHECKING_CONTENTS\x10\x05\x12 \n" +
 	"\x1cOUR_CONTENT_REVISION_MISSING\x10\x06\x12\x1c\n" +
 	"\x18INVALID_CONTENT_RETURNED\x10\a\x12\r\n" +
-	"\tCOMPLETED\x10\b2\x99\b\n" +
-	"\x12BarterBackupClient\x127\n" +
+	"\tCOMPLETED\x10\b2\xe1\b\n" +
+	"\x12BarterBackupClient\x12F\n" +
+	"\vHealthCheck\x12\x1a.clirpc.HealthCheckRequest\x1a\x1b.clirpc.HealthCheckResponse\x127\n" +
 	"\x06Unlock\x12\x15.clirpc.UnlockRequest\x1a\x16.clirpc.UnlockResponse\x12F\n" +
 	"\vConnectPeer\x12\x1a.clirpc.ConnectPeerRequest\x1a\x1b.clirpc.ConnectPeerResponse\x12O\n" +
 	"\x0eConnectedPeers\x12\x1d.clirpc.ConnectedPeersRequest\x1a\x1e.clirpc.ConnectedPeersResponse\x12:\n" +
@@ -2616,109 +2693,113 @@ func file_clirpc_barter_backup_client_proto_rawDescGZIP() []byte {
 }
 
 var file_clirpc_barter_backup_client_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_clirpc_barter_backup_client_proto_msgTypes = make([]protoimpl.MessageInfo, 42)
+var file_clirpc_barter_backup_client_proto_msgTypes = make([]protoimpl.MessageInfo, 44)
 var file_clirpc_barter_backup_client_proto_goTypes = []any{
 	(ContractState)(0),                // 0: clirpc.ContractState
-	(*UnlockRequest)(nil),             // 1: clirpc.UnlockRequest
-	(*UnlockResponse)(nil),            // 2: clirpc.UnlockResponse
-	(*Peer)(nil),                      // 3: clirpc.Peer
-	(*ConnectPeerRequest)(nil),        // 4: clirpc.ConnectPeerRequest
-	(*ConnectPeerResponse)(nil),       // 5: clirpc.ConnectPeerResponse
-	(*ConnectedPeersRequest)(nil),     // 6: clirpc.ConnectedPeersRequest
-	(*ConnectedPeersResponse)(nil),    // 7: clirpc.ConnectedPeersResponse
-	(*File)(nil),                      // 8: clirpc.File
-	(*SetFileRequest)(nil),            // 9: clirpc.SetFileRequest
-	(*SetFileResponse)(nil),           // 10: clirpc.SetFileResponse
-	(*GetFileRequest)(nil),            // 11: clirpc.GetFileRequest
-	(*GetFileResponse)(nil),           // 12: clirpc.GetFileResponse
-	(*ListFilesRequest)(nil),          // 13: clirpc.ListFilesRequest
-	(*ListFilesResponse)(nil),         // 14: clirpc.ListFilesResponse
-	(*StorageConfig)(nil),             // 15: clirpc.StorageConfig
-	(*StorageInfo)(nil),               // 16: clirpc.StorageInfo
-	(*SetStorageConfigRequest)(nil),   // 17: clirpc.SetStorageConfigRequest
-	(*SetStorageConfigResponse)(nil),  // 18: clirpc.SetStorageConfigResponse
-	(*GetStorageConfigRequest)(nil),   // 19: clirpc.GetStorageConfigRequest
-	(*GetStorageConfigResponse)(nil),  // 20: clirpc.GetStorageConfigResponse
-	(*GetContractsRequest)(nil),       // 21: clirpc.GetContractsRequest
-	(*ContractInfo)(nil),              // 22: clirpc.ContractInfo
-	(*GetContractsResponse)(nil),      // 23: clirpc.GetContractsResponse
-	(*ProposeContractRequest)(nil),    // 24: clirpc.ProposeContractRequest
-	(*ProposeContractUpdate)(nil),     // 25: clirpc.ProposeContractUpdate
-	(*CheckContractRequest)(nil),      // 26: clirpc.CheckContractRequest
-	(*CheckContractUpdate)(nil),       // 27: clirpc.CheckContractUpdate
-	(*RecoverContentRequest)(nil),     // 28: clirpc.RecoverContentRequest
-	(*RecoverContentUpdate)(nil),      // 29: clirpc.RecoverContentUpdate
-	(*SetAeadKeyForPeerRequest)(nil),  // 30: clirpc.SetAeadKeyForPeerRequest
-	(*SetAeadKeyForPeerResponse)(nil), // 31: clirpc.SetAeadKeyForPeerResponse
-	(*ChatAction)(nil),                // 32: clirpc.ChatAction
-	(*ChatEvent)(nil),                 // 33: clirpc.ChatEvent
-	(*ChatInit)(nil),                  // 34: clirpc.ChatInit
-	(*ChatSendMsg)(nil),               // 35: clirpc.ChatSendMsg
-	(*ChatSendFile)(nil),              // 36: clirpc.ChatSendFile
-	(*ChatStop)(nil),                  // 37: clirpc.ChatStop
-	(*ChatOpened)(nil),                // 38: clirpc.ChatOpened
-	(*ChatIncomingMsg)(nil),           // 39: clirpc.ChatIncomingMsg
-	(*ChatFileOffered)(nil),           // 40: clirpc.ChatFileOffered
-	(*ChatClosed)(nil),                // 41: clirpc.ChatClosed
-	(*ChatError)(nil),                 // 42: clirpc.ChatError
+	(*HealthCheckRequest)(nil),        // 1: clirpc.HealthCheckRequest
+	(*HealthCheckResponse)(nil),       // 2: clirpc.HealthCheckResponse
+	(*UnlockRequest)(nil),             // 3: clirpc.UnlockRequest
+	(*UnlockResponse)(nil),            // 4: clirpc.UnlockResponse
+	(*Peer)(nil),                      // 5: clirpc.Peer
+	(*ConnectPeerRequest)(nil),        // 6: clirpc.ConnectPeerRequest
+	(*ConnectPeerResponse)(nil),       // 7: clirpc.ConnectPeerResponse
+	(*ConnectedPeersRequest)(nil),     // 8: clirpc.ConnectedPeersRequest
+	(*ConnectedPeersResponse)(nil),    // 9: clirpc.ConnectedPeersResponse
+	(*File)(nil),                      // 10: clirpc.File
+	(*SetFileRequest)(nil),            // 11: clirpc.SetFileRequest
+	(*SetFileResponse)(nil),           // 12: clirpc.SetFileResponse
+	(*GetFileRequest)(nil),            // 13: clirpc.GetFileRequest
+	(*GetFileResponse)(nil),           // 14: clirpc.GetFileResponse
+	(*ListFilesRequest)(nil),          // 15: clirpc.ListFilesRequest
+	(*ListFilesResponse)(nil),         // 16: clirpc.ListFilesResponse
+	(*StorageConfig)(nil),             // 17: clirpc.StorageConfig
+	(*StorageInfo)(nil),               // 18: clirpc.StorageInfo
+	(*SetStorageConfigRequest)(nil),   // 19: clirpc.SetStorageConfigRequest
+	(*SetStorageConfigResponse)(nil),  // 20: clirpc.SetStorageConfigResponse
+	(*GetStorageConfigRequest)(nil),   // 21: clirpc.GetStorageConfigRequest
+	(*GetStorageConfigResponse)(nil),  // 22: clirpc.GetStorageConfigResponse
+	(*GetContractsRequest)(nil),       // 23: clirpc.GetContractsRequest
+	(*ContractInfo)(nil),              // 24: clirpc.ContractInfo
+	(*GetContractsResponse)(nil),      // 25: clirpc.GetContractsResponse
+	(*ProposeContractRequest)(nil),    // 26: clirpc.ProposeContractRequest
+	(*ProposeContractUpdate)(nil),     // 27: clirpc.ProposeContractUpdate
+	(*CheckContractRequest)(nil),      // 28: clirpc.CheckContractRequest
+	(*CheckContractUpdate)(nil),       // 29: clirpc.CheckContractUpdate
+	(*RecoverContentRequest)(nil),     // 30: clirpc.RecoverContentRequest
+	(*RecoverContentUpdate)(nil),      // 31: clirpc.RecoverContentUpdate
+	(*SetAeadKeyForPeerRequest)(nil),  // 32: clirpc.SetAeadKeyForPeerRequest
+	(*SetAeadKeyForPeerResponse)(nil), // 33: clirpc.SetAeadKeyForPeerResponse
+	(*ChatAction)(nil),                // 34: clirpc.ChatAction
+	(*ChatEvent)(nil),                 // 35: clirpc.ChatEvent
+	(*ChatInit)(nil),                  // 36: clirpc.ChatInit
+	(*ChatSendMsg)(nil),               // 37: clirpc.ChatSendMsg
+	(*ChatSendFile)(nil),              // 38: clirpc.ChatSendFile
+	(*ChatStop)(nil),                  // 39: clirpc.ChatStop
+	(*ChatOpened)(nil),                // 40: clirpc.ChatOpened
+	(*ChatIncomingMsg)(nil),           // 41: clirpc.ChatIncomingMsg
+	(*ChatFileOffered)(nil),           // 42: clirpc.ChatFileOffered
+	(*ChatClosed)(nil),                // 43: clirpc.ChatClosed
+	(*ChatError)(nil),                 // 44: clirpc.ChatError
 }
 var file_clirpc_barter_backup_client_proto_depIdxs = []int32{
-	3,  // 0: clirpc.ConnectPeerRequest.peer:type_name -> clirpc.Peer
-	3,  // 1: clirpc.ConnectedPeersResponse.connected_peers:type_name -> clirpc.Peer
-	3,  // 2: clirpc.ConnectedPeersResponse.online_not_connected_peers:type_name -> clirpc.Peer
-	3,  // 3: clirpc.ConnectedPeersResponse.offline_peers:type_name -> clirpc.Peer
-	8,  // 4: clirpc.SetFileRequest.file:type_name -> clirpc.File
-	8,  // 5: clirpc.GetFileResponse.file:type_name -> clirpc.File
-	15, // 6: clirpc.SetStorageConfigRequest.config:type_name -> clirpc.StorageConfig
-	15, // 7: clirpc.GetStorageConfigResponse.config:type_name -> clirpc.StorageConfig
-	16, // 8: clirpc.GetStorageConfigResponse.info:type_name -> clirpc.StorageInfo
-	3,  // 9: clirpc.ContractInfo.peer:type_name -> clirpc.Peer
-	22, // 10: clirpc.GetContractsResponse.contracts:type_name -> clirpc.ContractInfo
-	3,  // 11: clirpc.ProposeContractRequest.peer:type_name -> clirpc.Peer
+	5,  // 0: clirpc.ConnectPeerRequest.peer:type_name -> clirpc.Peer
+	5,  // 1: clirpc.ConnectedPeersResponse.connected_peers:type_name -> clirpc.Peer
+	5,  // 2: clirpc.ConnectedPeersResponse.online_not_connected_peers:type_name -> clirpc.Peer
+	5,  // 3: clirpc.ConnectedPeersResponse.offline_peers:type_name -> clirpc.Peer
+	10, // 4: clirpc.SetFileRequest.file:type_name -> clirpc.File
+	10, // 5: clirpc.GetFileResponse.file:type_name -> clirpc.File
+	17, // 6: clirpc.SetStorageConfigRequest.config:type_name -> clirpc.StorageConfig
+	17, // 7: clirpc.GetStorageConfigResponse.config:type_name -> clirpc.StorageConfig
+	18, // 8: clirpc.GetStorageConfigResponse.info:type_name -> clirpc.StorageInfo
+	5,  // 9: clirpc.ContractInfo.peer:type_name -> clirpc.Peer
+	24, // 10: clirpc.GetContractsResponse.contracts:type_name -> clirpc.ContractInfo
+	5,  // 11: clirpc.ProposeContractRequest.peer:type_name -> clirpc.Peer
 	0,  // 12: clirpc.ProposeContractUpdate.state:type_name -> clirpc.ContractState
-	3,  // 13: clirpc.CheckContractRequest.peer:type_name -> clirpc.Peer
+	5,  // 13: clirpc.CheckContractRequest.peer:type_name -> clirpc.Peer
 	0,  // 14: clirpc.CheckContractUpdate.state:type_name -> clirpc.ContractState
-	3,  // 15: clirpc.SetAeadKeyForPeerRequest.peer:type_name -> clirpc.Peer
-	3,  // 16: clirpc.ChatAction.peer:type_name -> clirpc.Peer
-	34, // 17: clirpc.ChatAction.init:type_name -> clirpc.ChatInit
-	35, // 18: clirpc.ChatAction.send_msg:type_name -> clirpc.ChatSendMsg
-	36, // 19: clirpc.ChatAction.send_file:type_name -> clirpc.ChatSendFile
-	37, // 20: clirpc.ChatAction.stop:type_name -> clirpc.ChatStop
-	38, // 21: clirpc.ChatEvent.opened:type_name -> clirpc.ChatOpened
-	39, // 22: clirpc.ChatEvent.incoming_msg:type_name -> clirpc.ChatIncomingMsg
-	40, // 23: clirpc.ChatEvent.file_offered:type_name -> clirpc.ChatFileOffered
-	41, // 24: clirpc.ChatEvent.closed:type_name -> clirpc.ChatClosed
-	42, // 25: clirpc.ChatEvent.error:type_name -> clirpc.ChatError
-	1,  // 26: clirpc.BarterBackupClient.Unlock:input_type -> clirpc.UnlockRequest
-	4,  // 27: clirpc.BarterBackupClient.ConnectPeer:input_type -> clirpc.ConnectPeerRequest
-	6,  // 28: clirpc.BarterBackupClient.ConnectedPeers:input_type -> clirpc.ConnectedPeersRequest
-	9,  // 29: clirpc.BarterBackupClient.SetFile:input_type -> clirpc.SetFileRequest
-	11, // 30: clirpc.BarterBackupClient.GetFile:input_type -> clirpc.GetFileRequest
-	13, // 31: clirpc.BarterBackupClient.ListFiles:input_type -> clirpc.ListFilesRequest
-	17, // 32: clirpc.BarterBackupClient.SetStorageConfig:input_type -> clirpc.SetStorageConfigRequest
-	19, // 33: clirpc.BarterBackupClient.GetStorageConfig:input_type -> clirpc.GetStorageConfigRequest
-	21, // 34: clirpc.BarterBackupClient.GetContracts:input_type -> clirpc.GetContractsRequest
-	24, // 35: clirpc.BarterBackupClient.ProposeContract:input_type -> clirpc.ProposeContractRequest
-	26, // 36: clirpc.BarterBackupClient.CheckContract:input_type -> clirpc.CheckContractRequest
-	28, // 37: clirpc.BarterBackupClient.RecoverContent:input_type -> clirpc.RecoverContentRequest
-	30, // 38: clirpc.BarterBackupClient.SetAeadKeyForPeer:input_type -> clirpc.SetAeadKeyForPeerRequest
-	32, // 39: clirpc.BarterBackupClient.Chat:input_type -> clirpc.ChatAction
-	2,  // 40: clirpc.BarterBackupClient.Unlock:output_type -> clirpc.UnlockResponse
-	5,  // 41: clirpc.BarterBackupClient.ConnectPeer:output_type -> clirpc.ConnectPeerResponse
-	7,  // 42: clirpc.BarterBackupClient.ConnectedPeers:output_type -> clirpc.ConnectedPeersResponse
-	10, // 43: clirpc.BarterBackupClient.SetFile:output_type -> clirpc.SetFileResponse
-	12, // 44: clirpc.BarterBackupClient.GetFile:output_type -> clirpc.GetFileResponse
-	14, // 45: clirpc.BarterBackupClient.ListFiles:output_type -> clirpc.ListFilesResponse
-	18, // 46: clirpc.BarterBackupClient.SetStorageConfig:output_type -> clirpc.SetStorageConfigResponse
-	20, // 47: clirpc.BarterBackupClient.GetStorageConfig:output_type -> clirpc.GetStorageConfigResponse
-	23, // 48: clirpc.BarterBackupClient.GetContracts:output_type -> clirpc.GetContractsResponse
-	25, // 49: clirpc.BarterBackupClient.ProposeContract:output_type -> clirpc.ProposeContractUpdate
-	27, // 50: clirpc.BarterBackupClient.CheckContract:output_type -> clirpc.CheckContractUpdate
-	29, // 51: clirpc.BarterBackupClient.RecoverContent:output_type -> clirpc.RecoverContentUpdate
-	31, // 52: clirpc.BarterBackupClient.SetAeadKeyForPeer:output_type -> clirpc.SetAeadKeyForPeerResponse
-	33, // 53: clirpc.BarterBackupClient.Chat:output_type -> clirpc.ChatEvent
-	40, // [40:54] is the sub-list for method output_type
-	26, // [26:40] is the sub-list for method input_type
+	5,  // 15: clirpc.SetAeadKeyForPeerRequest.peer:type_name -> clirpc.Peer
+	5,  // 16: clirpc.ChatAction.peer:type_name -> clirpc.Peer
+	36, // 17: clirpc.ChatAction.init:type_name -> clirpc.ChatInit
+	37, // 18: clirpc.ChatAction.send_msg:type_name -> clirpc.ChatSendMsg
+	38, // 19: clirpc.ChatAction.send_file:type_name -> clirpc.ChatSendFile
+	39, // 20: clirpc.ChatAction.stop:type_name -> clirpc.ChatStop
+	40, // 21: clirpc.ChatEvent.opened:type_name -> clirpc.ChatOpened
+	41, // 22: clirpc.ChatEvent.incoming_msg:type_name -> clirpc.ChatIncomingMsg
+	42, // 23: clirpc.ChatEvent.file_offered:type_name -> clirpc.ChatFileOffered
+	43, // 24: clirpc.ChatEvent.closed:type_name -> clirpc.ChatClosed
+	44, // 25: clirpc.ChatEvent.error:type_name -> clirpc.ChatError
+	1,  // 26: clirpc.BarterBackupClient.HealthCheck:input_type -> clirpc.HealthCheckRequest
+	3,  // 27: clirpc.BarterBackupClient.Unlock:input_type -> clirpc.UnlockRequest
+	6,  // 28: clirpc.BarterBackupClient.ConnectPeer:input_type -> clirpc.ConnectPeerRequest
+	8,  // 29: clirpc.BarterBackupClient.ConnectedPeers:input_type -> clirpc.ConnectedPeersRequest
+	11, // 30: clirpc.BarterBackupClient.SetFile:input_type -> clirpc.SetFileRequest
+	13, // 31: clirpc.BarterBackupClient.GetFile:input_type -> clirpc.GetFileRequest
+	15, // 32: clirpc.BarterBackupClient.ListFiles:input_type -> clirpc.ListFilesRequest
+	19, // 33: clirpc.BarterBackupClient.SetStorageConfig:input_type -> clirpc.SetStorageConfigRequest
+	21, // 34: clirpc.BarterBackupClient.GetStorageConfig:input_type -> clirpc.GetStorageConfigRequest
+	23, // 35: clirpc.BarterBackupClient.GetContracts:input_type -> clirpc.GetContractsRequest
+	26, // 36: clirpc.BarterBackupClient.ProposeContract:input_type -> clirpc.ProposeContractRequest
+	28, // 37: clirpc.BarterBackupClient.CheckContract:input_type -> clirpc.CheckContractRequest
+	30, // 38: clirpc.BarterBackupClient.RecoverContent:input_type -> clirpc.RecoverContentRequest
+	32, // 39: clirpc.BarterBackupClient.SetAeadKeyForPeer:input_type -> clirpc.SetAeadKeyForPeerRequest
+	34, // 40: clirpc.BarterBackupClient.Chat:input_type -> clirpc.ChatAction
+	2,  // 41: clirpc.BarterBackupClient.HealthCheck:output_type -> clirpc.HealthCheckResponse
+	4,  // 42: clirpc.BarterBackupClient.Unlock:output_type -> clirpc.UnlockResponse
+	7,  // 43: clirpc.BarterBackupClient.ConnectPeer:output_type -> clirpc.ConnectPeerResponse
+	9,  // 44: clirpc.BarterBackupClient.ConnectedPeers:output_type -> clirpc.ConnectedPeersResponse
+	12, // 45: clirpc.BarterBackupClient.SetFile:output_type -> clirpc.SetFileResponse
+	14, // 46: clirpc.BarterBackupClient.GetFile:output_type -> clirpc.GetFileResponse
+	16, // 47: clirpc.BarterBackupClient.ListFiles:output_type -> clirpc.ListFilesResponse
+	20, // 48: clirpc.BarterBackupClient.SetStorageConfig:output_type -> clirpc.SetStorageConfigResponse
+	22, // 49: clirpc.BarterBackupClient.GetStorageConfig:output_type -> clirpc.GetStorageConfigResponse
+	25, // 50: clirpc.BarterBackupClient.GetContracts:output_type -> clirpc.GetContractsResponse
+	27, // 51: clirpc.BarterBackupClient.ProposeContract:output_type -> clirpc.ProposeContractUpdate
+	29, // 52: clirpc.BarterBackupClient.CheckContract:output_type -> clirpc.CheckContractUpdate
+	31, // 53: clirpc.BarterBackupClient.RecoverContent:output_type -> clirpc.RecoverContentUpdate
+	33, // 54: clirpc.BarterBackupClient.SetAeadKeyForPeer:output_type -> clirpc.SetAeadKeyForPeerResponse
+	35, // 55: clirpc.BarterBackupClient.Chat:output_type -> clirpc.ChatEvent
+	41, // [41:56] is the sub-list for method output_type
+	26, // [26:41] is the sub-list for method input_type
 	26, // [26:26] is the sub-list for extension type_name
 	26, // [26:26] is the sub-list for extension extendee
 	0,  // [0:26] is the sub-list for field type_name
@@ -2729,13 +2810,13 @@ func file_clirpc_barter_backup_client_proto_init() {
 	if File_clirpc_barter_backup_client_proto != nil {
 		return
 	}
-	file_clirpc_barter_backup_client_proto_msgTypes[31].OneofWrappers = []any{
+	file_clirpc_barter_backup_client_proto_msgTypes[33].OneofWrappers = []any{
 		(*ChatAction_Init)(nil),
 		(*ChatAction_SendMsg)(nil),
 		(*ChatAction_SendFile)(nil),
 		(*ChatAction_Stop)(nil),
 	}
-	file_clirpc_barter_backup_client_proto_msgTypes[32].OneofWrappers = []any{
+	file_clirpc_barter_backup_client_proto_msgTypes[34].OneofWrappers = []any{
 		(*ChatEvent_Opened)(nil),
 		(*ChatEvent_IncomingMsg)(nil),
 		(*ChatEvent_FileOffered)(nil),
@@ -2748,7 +2829,7 @@ func file_clirpc_barter_backup_client_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_clirpc_barter_backup_client_proto_rawDesc), len(file_clirpc_barter_backup_client_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   42,
+			NumMessages:   44,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

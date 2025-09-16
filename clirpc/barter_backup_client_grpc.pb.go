@@ -19,6 +19,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	BarterBackupClient_HealthCheck_FullMethodName       = "/clirpc.BarterBackupClient/HealthCheck"
 	BarterBackupClient_Unlock_FullMethodName            = "/clirpc.BarterBackupClient/Unlock"
 	BarterBackupClient_ConnectPeer_FullMethodName       = "/clirpc.BarterBackupClient/ConnectPeer"
 	BarterBackupClient_ConnectedPeers_FullMethodName    = "/clirpc.BarterBackupClient/ConnectedPeers"
@@ -49,6 +50,8 @@ const (
 //   - Content: A single finalized encrypted blob produced by the daemon from
 //     the current set of files. This is what gets backed up to peers.
 type BarterBackupClientClient interface {
+	// HealthCheck returns success when the server is healthy.
+	HealthCheck(ctx context.Context, in *HealthCheckRequest, opts ...grpc.CallOption) (*HealthCheckResponse, error)
 	// Unlock sends the main password to the daemon. The password is used to
 	// derive the master secret key from which all other keys are derived,
 	// for encryption, onion service private key, and for authentication.
@@ -112,6 +115,16 @@ type barterBackupClientClient struct {
 
 func NewBarterBackupClientClient(cc grpc.ClientConnInterface) BarterBackupClientClient {
 	return &barterBackupClientClient{cc}
+}
+
+func (c *barterBackupClientClient) HealthCheck(ctx context.Context, in *HealthCheckRequest, opts ...grpc.CallOption) (*HealthCheckResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HealthCheckResponse)
+	err := c.cc.Invoke(ctx, BarterBackupClient_HealthCheck_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *barterBackupClientClient) Unlock(ctx context.Context, in *UnlockRequest, opts ...grpc.CallOption) (*UnlockResponse, error) {
@@ -298,6 +311,8 @@ type BarterBackupClient_ChatClient = grpc.BidiStreamingClient[ChatAction, ChatEv
 //   - Content: A single finalized encrypted blob produced by the daemon from
 //     the current set of files. This is what gets backed up to peers.
 type BarterBackupClientServer interface {
+	// HealthCheck returns success when the server is healthy.
+	HealthCheck(context.Context, *HealthCheckRequest) (*HealthCheckResponse, error)
 	// Unlock sends the main password to the daemon. The password is used to
 	// derive the master secret key from which all other keys are derived,
 	// for encryption, onion service private key, and for authentication.
@@ -363,6 +378,9 @@ type BarterBackupClientServer interface {
 // pointer dereference when methods are called.
 type UnimplementedBarterBackupClientServer struct{}
 
+func (UnimplementedBarterBackupClientServer) HealthCheck(context.Context, *HealthCheckRequest) (*HealthCheckResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method HealthCheck not implemented")
+}
 func (UnimplementedBarterBackupClientServer) Unlock(context.Context, *UnlockRequest) (*UnlockResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Unlock not implemented")
 }
@@ -424,6 +442,24 @@ func RegisterBarterBackupClientServer(s grpc.ServiceRegistrar, srv BarterBackupC
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&BarterBackupClient_ServiceDesc, srv)
+}
+
+func _BarterBackupClient_HealthCheck_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HealthCheckRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BarterBackupClientServer).HealthCheck(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BarterBackupClient_HealthCheck_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BarterBackupClientServer).HealthCheck(ctx, req.(*HealthCheckRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _BarterBackupClient_Unlock_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -653,6 +689,10 @@ var BarterBackupClient_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "clirpc.BarterBackupClient",
 	HandlerType: (*BarterBackupClientServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "HealthCheck",
+			Handler:    _BarterBackupClient_HealthCheck_Handler,
+		},
 		{
 			MethodName: "Unlock",
 			Handler:    _BarterBackupClient_Unlock_Handler,
