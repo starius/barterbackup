@@ -5,6 +5,17 @@ Scope
 - This file guides agents working in this repository.
 - It documents terminology, API decisions, style rules, and open issues.
 
+Repo layout
+
+- clirpc: Local CLI ↔ daemon gRPC proto and generated stubs.
+- bbrpc: Public daemon ↔ peer gRPC proto and generated stubs.
+- storedpb: On‑disk metadata proto and generated stubs.
+- internal/keys: Key derivation utilities (memory‑hard master key, HKDF, Ed25519 from master).
+- internal/torserver: Tor‑backed gRPC server using bine and PQ‑hybrid TLS.
+- cmd/bbdaemon: Minimal daemon wiring that starts the Tor‑backed gRPC server.
+- scripts: Helper scripts (e.g., RPC code generation).
+- Makefile, Dockerfile.rpc: Reproducible RPC generation with Docker.
+
 Terminology
 
 - File: A user‑provided input. The client can submit one or more files.
@@ -23,13 +34,18 @@ Client API (clirpc)
   - ListFilesResponse returns `repeated string name`.
 - Older SetContent/SetFiles and GetContent/GetFiles were replaced by the above
   to clarify “file” vs “content”.
+- Chat: Bidirectional stream is defined via `ChatAction` and `ChatEvent`.
 
 Stored metadata (storedpb)
 
-- ContentRevision refers to versions produced by SetFile.
-- Metadata fields use content‑focused names:
-  - content_length (was userdata_length).
-  - content_sha256 (was userdata_sha256).
+- ContentRevision refers to versions produced by SetFile. Fields include
+  `created_at`, `created_at_ns`, and `metadata_aead_length` (size of the
+  AEAD‑encrypted Metadata blob).
+- Metadata tracks the most recent revision and lists of `files` and `peers`.
+  Per‑file info is in `FileHeader { name, file_length, file_sha256 }`.
+- Content‑level sizing in peer RPCs uses `content_length` (see bbrpc
+  `ContentInfo`). Content SHA‑256 appears in transfer responses such as
+  `DownloadResponse.sha256` and `ChatFile.sha256`.
 
 Server API (bbrpc)
 
@@ -52,9 +68,8 @@ Next steps for contributors
 - Regenerate Go stubs after .proto changes.
 - Update daemon and CLI implementations to the new SetFile/GetFile/ListFiles
   API.
-- Define missing message schemas referenced by comments:
-  - ProposeContract*, CheckContract*, RecoverContent*.
-  - ChatAction/ChatEvent in clirpc.
+- Message schemas for ProposeContract*, CheckContract*, RecoverContent*, and
+  ChatAction/ChatEvent are defined; wire up and refine implementations.
 - No action needed for ChatRequest tags; they are already fixed.
 
 RPC generation
@@ -62,7 +77,36 @@ RPC generation
 - Use Docker for reproducible proto builds; do not install protoc or plugins
   on the host.
 - Generate stubs: `make rpc`.
-- protoc comes from Debian bookworm. Go plugins are pinned by Go 1.23 `tool`
+- protoc comes from Debian bookworm. Go plugins are pinned by Go 1.24 `tool`
   directives in `go.mod` and installed in the Docker image via `go install`.
 - Subsequent runs only execute protoc; tools are preinstalled in the image.
 - Commit generated `.pb.go` files.
+
+Go code style
+
+- Imports are grouped into exactly two blocks: standard library, then everything else (including this repo).
+- Insert a single empty line before any `return` that follows other code at the same indentation level (not immediately after `{`).
+- No trailing whitespace or tabs on otherwise empty lines.
+- Run `go fmt ./...` to normalize formatting.
+
+Keys and crypto (internal/keys)
+
+- DeriveMasterPriv(seed string) → []byte: Derives master private material from a user‑provided password/seed string using Argon2id with a deterministic salt.
+- DeriveKey(masterPriv, purpose, n) → []byte: HKDF‑SHA256 with domain separation label `purpose`.
+- DeriveEd25519FromMaster(masterPriv, "tor/onion/v3") → ed25519 keypair for the onion service.
+
+Tor gRPC server (internal/torserver)
+
+- Uses bine to start Tor and publish a v3 onion service with the Ed25519 key derived from the master key.
+- Exposes `Start(ctx, Config, impl)` which returns a server handle with `OnionID()` and `GRPC()` accessors.
+- TLS: Enforces TLS 1.3 with ONLY `X25519MLKEM768` in `CurvePreferences` (no fallback). Go 1.24+ provides this hybrid KEX.
+- Uses a self‑signed Ed25519 certificate for the TLS handshake; the onion layer provides origin authentication.
+
+Daemon entry (cmd/bbdaemon)
+
+- Reads the node password from `BB_PASSWORD`, derives the master key via `keys.DeriveMasterPriv`, and starts the Tor‑backed gRPC server on onion port 80.
+- The bbrpc implementation is currently a minimal stub; wire real handlers as they are implemented.
+
+Examples
+
+- The `examples/` directory contains reference snippets (bine usage, key derivation). Do not modify them; the production implementations now live under `internal/` as described above and may replace the need for the examples.
