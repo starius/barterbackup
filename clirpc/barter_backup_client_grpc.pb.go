@@ -19,7 +19,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	BarterBackupClient_HealthCheck_FullMethodName       = "/clirpc.BarterBackupClient/HealthCheck"
+	BarterBackupClient_LocalHealthCheck_FullMethodName  = "/clirpc.BarterBackupClient/LocalHealthCheck"
 	BarterBackupClient_Unlock_FullMethodName            = "/clirpc.BarterBackupClient/Unlock"
 	BarterBackupClient_ConnectPeer_FullMethodName       = "/clirpc.BarterBackupClient/ConnectPeer"
 	BarterBackupClient_ConnectedPeers_FullMethodName    = "/clirpc.BarterBackupClient/ConnectedPeers"
@@ -33,7 +33,7 @@ const (
 	BarterBackupClient_CheckContract_FullMethodName     = "/clirpc.BarterBackupClient/CheckContract"
 	BarterBackupClient_RecoverContent_FullMethodName    = "/clirpc.BarterBackupClient/RecoverContent"
 	BarterBackupClient_SetAeadKeyForPeer_FullMethodName = "/clirpc.BarterBackupClient/SetAeadKeyForPeer"
-	BarterBackupClient_Chat_FullMethodName              = "/clirpc.BarterBackupClient/Chat"
+	BarterBackupClient_CliChat_FullMethodName           = "/clirpc.BarterBackupClient/CliChat"
 )
 
 // BarterBackupClientClient is the client API for BarterBackupClient service.
@@ -50,8 +50,10 @@ const (
 //   - Content: A single finalized encrypted blob produced by the daemon from
 //     the current set of files. This is what gets backed up to peers.
 type BarterBackupClientClient interface {
-	// HealthCheck returns success when the server is healthy.
-	HealthCheck(ctx context.Context, in *HealthCheckRequest, opts ...grpc.CallOption) (*HealthCheckResponse, error)
+	// LocalHealthCheck returns success when the local daemon is healthy.
+	// Renamed from HealthCheck to avoid a method name collision with bbrpc
+	// on the shared Node implementation.
+	LocalHealthCheck(ctx context.Context, in *HealthCheckRequest, opts ...grpc.CallOption) (*HealthCheckResponse, error)
 	// Unlock sends the main password to the daemon. The password is used to
 	// derive the master secret key from which all other keys are derived,
 	// for encryption, onion service private key, and for authentication.
@@ -102,11 +104,13 @@ type BarterBackupClientClient interface {
 	// derived from the password is encrypted and added to the stored content
 	// so it will survive a node reset together with the main content.
 	SetAeadKeyForPeer(ctx context.Context, in *SetAeadKeyForPeerRequest, opts ...grpc.CallOption) (*SetAeadKeyForPeerResponse, error)
-	// Chat initiates a chat with a node. When the stream is closed, the
+	// CliChat initiates a chat with a node. When the stream is closed, the
 	// chat is ended. It uses a symmetrically encrypted chat if the AEAD key
 	// is set for the node. File transfers over the chat are passed through
 	// the stream.
-	Chat(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ChatAction, ChatEvent], error)
+	// Renamed from Chat to avoid a method name collision with bbrpc on the
+	// shared Node implementation.
+	CliChat(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ChatAction, ChatEvent], error)
 }
 
 type barterBackupClientClient struct {
@@ -117,10 +121,10 @@ func NewBarterBackupClientClient(cc grpc.ClientConnInterface) BarterBackupClient
 	return &barterBackupClientClient{cc}
 }
 
-func (c *barterBackupClientClient) HealthCheck(ctx context.Context, in *HealthCheckRequest, opts ...grpc.CallOption) (*HealthCheckResponse, error) {
+func (c *barterBackupClientClient) LocalHealthCheck(ctx context.Context, in *HealthCheckRequest, opts ...grpc.CallOption) (*HealthCheckResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(HealthCheckResponse)
-	err := c.cc.Invoke(ctx, BarterBackupClient_HealthCheck_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, BarterBackupClient_LocalHealthCheck_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -284,9 +288,9 @@ func (c *barterBackupClientClient) SetAeadKeyForPeer(ctx context.Context, in *Se
 	return out, nil
 }
 
-func (c *barterBackupClientClient) Chat(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ChatAction, ChatEvent], error) {
+func (c *barterBackupClientClient) CliChat(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ChatAction, ChatEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &BarterBackupClient_ServiceDesc.Streams[3], BarterBackupClient_Chat_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &BarterBackupClient_ServiceDesc.Streams[3], BarterBackupClient_CliChat_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +299,7 @@ func (c *barterBackupClientClient) Chat(ctx context.Context, opts ...grpc.CallOp
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type BarterBackupClient_ChatClient = grpc.BidiStreamingClient[ChatAction, ChatEvent]
+type BarterBackupClient_CliChatClient = grpc.BidiStreamingClient[ChatAction, ChatEvent]
 
 // BarterBackupClientServer is the server API for BarterBackupClient service.
 // All implementations must embed UnimplementedBarterBackupClientServer
@@ -311,8 +315,10 @@ type BarterBackupClient_ChatClient = grpc.BidiStreamingClient[ChatAction, ChatEv
 //   - Content: A single finalized encrypted blob produced by the daemon from
 //     the current set of files. This is what gets backed up to peers.
 type BarterBackupClientServer interface {
-	// HealthCheck returns success when the server is healthy.
-	HealthCheck(context.Context, *HealthCheckRequest) (*HealthCheckResponse, error)
+	// LocalHealthCheck returns success when the local daemon is healthy.
+	// Renamed from HealthCheck to avoid a method name collision with bbrpc
+	// on the shared Node implementation.
+	LocalHealthCheck(context.Context, *HealthCheckRequest) (*HealthCheckResponse, error)
 	// Unlock sends the main password to the daemon. The password is used to
 	// derive the master secret key from which all other keys are derived,
 	// for encryption, onion service private key, and for authentication.
@@ -363,11 +369,13 @@ type BarterBackupClientServer interface {
 	// derived from the password is encrypted and added to the stored content
 	// so it will survive a node reset together with the main content.
 	SetAeadKeyForPeer(context.Context, *SetAeadKeyForPeerRequest) (*SetAeadKeyForPeerResponse, error)
-	// Chat initiates a chat with a node. When the stream is closed, the
+	// CliChat initiates a chat with a node. When the stream is closed, the
 	// chat is ended. It uses a symmetrically encrypted chat if the AEAD key
 	// is set for the node. File transfers over the chat are passed through
 	// the stream.
-	Chat(grpc.BidiStreamingServer[ChatAction, ChatEvent]) error
+	// Renamed from Chat to avoid a method name collision with bbrpc on the
+	// shared Node implementation.
+	CliChat(grpc.BidiStreamingServer[ChatAction, ChatEvent]) error
 	mustEmbedUnimplementedBarterBackupClientServer()
 }
 
@@ -378,8 +386,8 @@ type BarterBackupClientServer interface {
 // pointer dereference when methods are called.
 type UnimplementedBarterBackupClientServer struct{}
 
-func (UnimplementedBarterBackupClientServer) HealthCheck(context.Context, *HealthCheckRequest) (*HealthCheckResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method HealthCheck not implemented")
+func (UnimplementedBarterBackupClientServer) LocalHealthCheck(context.Context, *HealthCheckRequest) (*HealthCheckResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method LocalHealthCheck not implemented")
 }
 func (UnimplementedBarterBackupClientServer) Unlock(context.Context, *UnlockRequest) (*UnlockResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Unlock not implemented")
@@ -420,8 +428,8 @@ func (UnimplementedBarterBackupClientServer) RecoverContent(*RecoverContentReque
 func (UnimplementedBarterBackupClientServer) SetAeadKeyForPeer(context.Context, *SetAeadKeyForPeerRequest) (*SetAeadKeyForPeerResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetAeadKeyForPeer not implemented")
 }
-func (UnimplementedBarterBackupClientServer) Chat(grpc.BidiStreamingServer[ChatAction, ChatEvent]) error {
-	return status.Errorf(codes.Unimplemented, "method Chat not implemented")
+func (UnimplementedBarterBackupClientServer) CliChat(grpc.BidiStreamingServer[ChatAction, ChatEvent]) error {
+	return status.Errorf(codes.Unimplemented, "method CliChat not implemented")
 }
 func (UnimplementedBarterBackupClientServer) mustEmbedUnimplementedBarterBackupClientServer() {}
 func (UnimplementedBarterBackupClientServer) testEmbeddedByValue()                            {}
@@ -444,20 +452,20 @@ func RegisterBarterBackupClientServer(s grpc.ServiceRegistrar, srv BarterBackupC
 	s.RegisterService(&BarterBackupClient_ServiceDesc, srv)
 }
 
-func _BarterBackupClient_HealthCheck_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _BarterBackupClient_LocalHealthCheck_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(HealthCheckRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(BarterBackupClientServer).HealthCheck(ctx, in)
+		return srv.(BarterBackupClientServer).LocalHealthCheck(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: BarterBackupClient_HealthCheck_FullMethodName,
+		FullMethod: BarterBackupClient_LocalHealthCheck_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(BarterBackupClientServer).HealthCheck(ctx, req.(*HealthCheckRequest))
+		return srv.(BarterBackupClientServer).LocalHealthCheck(ctx, req.(*HealthCheckRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -675,12 +683,12 @@ func _BarterBackupClient_SetAeadKeyForPeer_Handler(srv interface{}, ctx context.
 	return interceptor(ctx, in, info, handler)
 }
 
-func _BarterBackupClient_Chat_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(BarterBackupClientServer).Chat(&grpc.GenericServerStream[ChatAction, ChatEvent]{ServerStream: stream})
+func _BarterBackupClient_CliChat_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(BarterBackupClientServer).CliChat(&grpc.GenericServerStream[ChatAction, ChatEvent]{ServerStream: stream})
 }
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type BarterBackupClient_ChatServer = grpc.BidiStreamingServer[ChatAction, ChatEvent]
+type BarterBackupClient_CliChatServer = grpc.BidiStreamingServer[ChatAction, ChatEvent]
 
 // BarterBackupClient_ServiceDesc is the grpc.ServiceDesc for BarterBackupClient service.
 // It's only intended for direct use with grpc.RegisterService,
@@ -690,8 +698,8 @@ var BarterBackupClient_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*BarterBackupClientServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "HealthCheck",
-			Handler:    _BarterBackupClient_HealthCheck_Handler,
+			MethodName: "LocalHealthCheck",
+			Handler:    _BarterBackupClient_LocalHealthCheck_Handler,
 		},
 		{
 			MethodName: "Unlock",
@@ -751,8 +759,8 @@ var BarterBackupClient_ServiceDesc = grpc.ServiceDesc{
 			ServerStreams: true,
 		},
 		{
-			StreamName:    "Chat",
-			Handler:       _BarterBackupClient_Chat_Handler,
+			StreamName:    "CliChat",
+			Handler:       _BarterBackupClient_CliChat_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
 		},

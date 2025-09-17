@@ -37,6 +37,11 @@ Client API (clirpc)
 - Older SetContent/SetFiles and GetContent/GetFiles were replaced by the above
   to clarify “file” vs “content”.
 - Chat: Bidirectional stream is defined via `ChatAction` and `ChatEvent`.
+  RPC method name is `CliChat` (renamed from `Chat`) to avoid a name
+  collision with the bbrpc `Chat` method when both services are implemented on
+  `Node`.
+- Health check: RPC method name is `LocalHealthCheck` (renamed from
+  `HealthCheck`) to avoid a collision with bbrpc `HealthCheck` on `Node`.
 
 Stored metadata (storedpb)
 
@@ -76,6 +81,9 @@ Proto style rules
 Next steps for contributors
 
 - Regenerate Go stubs after .proto changes.
+- Run `make fmt` to normalize formatting (protos via `clang-format`, Go via
+  `go fmt`).
+- Run `make unit` to execute unit tests.
 - Update daemon and CLI implementations to the new SetFile/GetFile/ListFiles
   API.
 - Message schemas for ProposeContract*, CheckContract*, RecoverContent*, and
@@ -91,6 +99,23 @@ RPC generation
   directives in `go.mod` and installed in the Docker image via `go install`.
 - Subsequent runs only execute protoc; tools are preinstalled in the image.
 - Commit generated `.pb.go` files.
+
+Development workflow
+
+- Implement both bbrpc and clirpc services as methods on `internal/node.Node`.
+  To avoid Go method name collisions (no overloading), clirpc RPCs that collide
+  with bbrpc are renamed as follows:
+  - `HealthCheck` → `LocalHealthCheck`.
+  - `Chat` → `CliChat`.
+- Keep server and client RPC handlers in separate files under
+  `internal/node/` for clarity:
+  - bbrpc server methods: `internal/node/bbrpc_server.go`.
+  - clirpc server methods: `internal/node/clirpc_server.go` (create as you
+    implement clirpc service methods).
+- After proto edits:
+  - Run `make rpc`.
+  - Run `make fmt`.
+  - Run `make unit`.
 
 Go code style
 

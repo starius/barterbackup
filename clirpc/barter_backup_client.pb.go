@@ -2662,9 +2662,9 @@ const file_clirpc_barter_backup_client_proto_rawDesc = "" +
 	"\x11CHECKING_CONTENTS\x10\x05\x12 \n" +
 	"\x1cOUR_CONTENT_REVISION_MISSING\x10\x06\x12\x1c\n" +
 	"\x18INVALID_CONTENT_RETURNED\x10\a\x12\r\n" +
-	"\tCOMPLETED\x10\b2\xe1\b\n" +
-	"\x12BarterBackupClient\x12F\n" +
-	"\vHealthCheck\x12\x1a.clirpc.HealthCheckRequest\x1a\x1b.clirpc.HealthCheckResponse\x127\n" +
+	"\tCOMPLETED\x10\b2\xe9\b\n" +
+	"\x12BarterBackupClient\x12K\n" +
+	"\x10LocalHealthCheck\x12\x1a.clirpc.HealthCheckRequest\x1a\x1b.clirpc.HealthCheckResponse\x127\n" +
 	"\x06Unlock\x12\x15.clirpc.UnlockRequest\x1a\x16.clirpc.UnlockResponse\x12F\n" +
 	"\vConnectPeer\x12\x1a.clirpc.ConnectPeerRequest\x1a\x1b.clirpc.ConnectPeerResponse\x12O\n" +
 	"\x0eConnectedPeers\x12\x1d.clirpc.ConnectedPeersRequest\x1a\x1e.clirpc.ConnectedPeersResponse\x12:\n" +
@@ -2677,8 +2677,8 @@ const file_clirpc_barter_backup_client_proto_rawDesc = "" +
 	"\x0fProposeContract\x12\x1e.clirpc.ProposeContractRequest\x1a\x1d.clirpc.ProposeContractUpdate0\x01\x12L\n" +
 	"\rCheckContract\x12\x1c.clirpc.CheckContractRequest\x1a\x1b.clirpc.CheckContractUpdate0\x01\x12O\n" +
 	"\x0eRecoverContent\x12\x1d.clirpc.RecoverContentRequest\x1a\x1c.clirpc.RecoverContentUpdate0\x01\x12X\n" +
-	"\x11SetAeadKeyForPeer\x12 .clirpc.SetAeadKeyForPeerRequest\x1a!.clirpc.SetAeadKeyForPeerResponse\x121\n" +
-	"\x04Chat\x12\x12.clirpc.ChatAction\x1a\x11.clirpc.ChatEvent(\x010\x01B(Z&github.com/starius/barterbackup/clirpcb\x06proto3"
+	"\x11SetAeadKeyForPeer\x12 .clirpc.SetAeadKeyForPeerRequest\x1a!.clirpc.SetAeadKeyForPeerResponse\x124\n" +
+	"\aCliChat\x12\x12.clirpc.ChatAction\x1a\x11.clirpc.ChatEvent(\x010\x01B(Z&github.com/starius/barterbackup/clirpcb\x06proto3"
 
 var (
 	file_clirpc_barter_backup_client_proto_rawDescOnce sync.Once
@@ -2768,7 +2768,7 @@ var file_clirpc_barter_backup_client_proto_depIdxs = []int32{
 	42, // 23: clirpc.ChatEvent.file_offered:type_name -> clirpc.ChatFileOffered
 	43, // 24: clirpc.ChatEvent.closed:type_name -> clirpc.ChatClosed
 	44, // 25: clirpc.ChatEvent.error:type_name -> clirpc.ChatError
-	1,  // 26: clirpc.BarterBackupClient.HealthCheck:input_type -> clirpc.HealthCheckRequest
+	1,  // 26: clirpc.BarterBackupClient.LocalHealthCheck:input_type -> clirpc.HealthCheckRequest
 	3,  // 27: clirpc.BarterBackupClient.Unlock:input_type -> clirpc.UnlockRequest
 	6,  // 28: clirpc.BarterBackupClient.ConnectPeer:input_type -> clirpc.ConnectPeerRequest
 	8,  // 29: clirpc.BarterBackupClient.ConnectedPeers:input_type -> clirpc.ConnectedPeersRequest
@@ -2782,8 +2782,8 @@ var file_clirpc_barter_backup_client_proto_depIdxs = []int32{
 	28, // 37: clirpc.BarterBackupClient.CheckContract:input_type -> clirpc.CheckContractRequest
 	30, // 38: clirpc.BarterBackupClient.RecoverContent:input_type -> clirpc.RecoverContentRequest
 	32, // 39: clirpc.BarterBackupClient.SetAeadKeyForPeer:input_type -> clirpc.SetAeadKeyForPeerRequest
-	34, // 40: clirpc.BarterBackupClient.Chat:input_type -> clirpc.ChatAction
-	2,  // 41: clirpc.BarterBackupClient.HealthCheck:output_type -> clirpc.HealthCheckResponse
+	34, // 40: clirpc.BarterBackupClient.CliChat:input_type -> clirpc.ChatAction
+	2,  // 41: clirpc.BarterBackupClient.LocalHealthCheck:output_type -> clirpc.HealthCheckResponse
 	4,  // 42: clirpc.BarterBackupClient.Unlock:output_type -> clirpc.UnlockResponse
 	7,  // 43: clirpc.BarterBackupClient.ConnectPeer:output_type -> clirpc.ConnectPeerResponse
 	9,  // 44: clirpc.BarterBackupClient.ConnectedPeers:output_type -> clirpc.ConnectedPeersResponse
@@ -2797,7 +2797,7 @@ var file_clirpc_barter_backup_client_proto_depIdxs = []int32{
 	29, // 52: clirpc.BarterBackupClient.CheckContract:output_type -> clirpc.CheckContractUpdate
 	31, // 53: clirpc.BarterBackupClient.RecoverContent:output_type -> clirpc.RecoverContentUpdate
 	33, // 54: clirpc.BarterBackupClient.SetAeadKeyForPeer:output_type -> clirpc.SetAeadKeyForPeerResponse
-	35, // 55: clirpc.BarterBackupClient.Chat:output_type -> clirpc.ChatEvent
+	35, // 55: clirpc.BarterBackupClient.CliChat:output_type -> clirpc.ChatEvent
 	41, // [41:56] is the sub-list for method output_type
 	26, // [26:41] is the sub-list for method input_type
 	26, // [26:26] is the sub-list for extension type_name

@@ -14,9 +14,7 @@ import (
 	"github.com/starius/barterbackup/bbrpc"
 	"github.com/starius/barterbackup/internal/keys"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/status"
 )
 
 // grpcMaxMsg bounds the maximum gRPC message size we accept and send.
@@ -132,23 +130,9 @@ func (n *Node) Address() string {
 	return n.addr
 }
 
-// HealthCheck implements bbrpc.HealthCheck and returns an empty response to
-// indicate the server is healthy.
-func (n *Node) HealthCheck(ctx context.Context, _ *bbrpc.HealthCheckRequest) (*bbrpc.HealthCheckResponse, error) {
-	// Compute client onion from TLS client cert when available.
-	pub, err := ClientPubKeyFromContext(ctx)
-	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, "client certificate required")
-	}
-	id := torutil.OnionServiceIDFromV3PublicKey(torutiled25519.PublicKey(pub))
-	clientOnion := id + ".onion"
-	// Server onion is our address.
-	serverOnion := n.addr
-	return &bbrpc.HealthCheckResponse{
-		ClientOnion: clientOnion,
-		ServerOnion: serverOnion,
-	}, nil
-}
+// Server methods for bbrpc and client methods for clirpc are implemented
+// in dedicated files to avoid name collisions and keep responsibilities
+// separated. See bbrpc_server.go and clirpc_server.go.
 
 // DialPeer dials another node onion address and returns a bbrpc client and conn.
 func (n *Node) DialPeer(ctx context.Context, addr string) (bbrpc.BarterBackupServerClient, *grpc.ClientConn, error) {
