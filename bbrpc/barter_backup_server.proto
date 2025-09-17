@@ -48,7 +48,13 @@ service BarterBackupServer {
 message HealthCheckRequest {}
 
 // HealthCheckResponse is an empty health check response.
-message HealthCheckResponse {}
+message HealthCheckResponse {
+    // client_onion is the Tor onion hostname of the caller.
+    string client_onion = 1;
+
+    // server_onion is the Tor onion hostname of the server.
+    string server_onion = 2;
+}
 
 message Peer {
     bytes onion_pubkey = 1;

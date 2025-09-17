@@ -54,6 +54,14 @@ Server API (bbrpc)
 - Peer discovery, content revision sync, downloads, and chat remain as in the
   proto for now.
 - ChatRequest oneof tags are fixed: msg = 3, file = 4, stop = 5.
+- HealthCheck returns basic liveness and addresses:
+  - Request: `HealthCheckRequest {}` (empty).
+  - Response: `HealthCheckResponse { string client_onion; string server_onion; }`.
+  - Server populates `server_onion` from its own address and `client_onion`
+    by inferring the caller’s Ed25519 pubkey from the TLS context and
+    computing the Tor v3 onion hostname via bine/torutil.
+  - If the client certificate/public key cannot be determined, the server
+    returns `Unauthenticated`.
 
 Proto style rules
 
@@ -140,6 +148,7 @@ Node + Network
   - Computes onion address from the Ed25519 public key (bine/torutil v3 ID) and exposes it via `Address()`.
   - API: `New(seed string, net Network)`, `Start(ctx)`, `Stop()`, `Address()`, `DialPeer(ctx, addr)`.
   - Registers bbrpc server via the provided `Network` registrar.
+  - HealthCheck implementation returns `client_onion` and `server_onion` as described above.
   - Maintains a connection pool of gRPC `ClientConn` keyed by onion address, with idle eviction:
     - Reuses connections for repeated calls to the same peer.
     - Evicts and closes connections not used for 5 minutes (checked every minute).
@@ -166,6 +175,7 @@ Node + Network
   - Fully in‑memory with `grpc/test/bufconn`; no TCP usage (compatible with synctest).
   - Provides a raw `net.Conn` from the bufconn listener; Node builds gRPC/TLS on top.
   - Constructor: `netmock.NewMockNetwork()`. Implements `Close() error`.
+  - Useful for unit/integration tests (see `internal/node/node_mock_test.go`).
 
 gRPC limits
 

@@ -60,7 +60,11 @@ func (*HealthCheckRequest) Descriptor() ([]byte, []int) {
 
 // HealthCheckResponse is an empty health check response.
 type HealthCheckResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// client_onion is the Tor onion hostname of the caller.
+	ClientOnion string `protobuf:"bytes,1,opt,name=client_onion,json=clientOnion,proto3" json:"client_onion,omitempty"`
+	// server_onion is the Tor onion hostname of the server.
+	ServerOnion   string `protobuf:"bytes,2,opt,name=server_onion,json=serverOnion,proto3" json:"server_onion,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -93,6 +97,20 @@ func (x *HealthCheckResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use HealthCheckResponse.ProtoReflect.Descriptor instead.
 func (*HealthCheckResponse) Descriptor() ([]byte, []int) {
 	return file_bbrpc_barter_backup_server_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *HealthCheckResponse) GetClientOnion() string {
+	if x != nil {
+		return x.ClientOnion
+	}
+	return ""
+}
+
+func (x *HealthCheckResponse) GetServerOnion() string {
+	if x != nil {
+		return x.ServerOnion
+	}
+	return ""
 }
 
 type Peer struct {
@@ -1257,8 +1275,10 @@ var File_bbrpc_barter_backup_server_proto protoreflect.FileDescriptor
 const file_bbrpc_barter_backup_server_proto_rawDesc = "" +
 	"\n" +
 	" bbrpc/barter_backup_server.proto\x12\x05bbrpc\"\x14\n" +
-	"\x12HealthCheckRequest\"\x15\n" +
-	"\x13HealthCheckResponse\")\n" +
+	"\x12HealthCheckRequest\"[\n" +
+	"\x13HealthCheckResponse\x12!\n" +
+	"\fclient_onion\x18\x01 \x01(\tR\vclientOnion\x12!\n" +
+	"\fserver_onion\x18\x02 \x01(\tR\vserverOnion\")\n" +
 	"\x04Peer\x12!\n" +
 	"\fonion_pubkey\x18\x01 \x01(\fR\vonionPubkey\"8\n" +
 	"\x13PeerExchangeRequest\x12!\n" +
