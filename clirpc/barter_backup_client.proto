@@ -100,8 +100,14 @@ service BarterBackupClient {
 // HealthCheckRequest is an empty health check request.
 message HealthCheckRequest {}
 
-// HealthCheckResponse is an empty health check response.
-message HealthCheckResponse {}
+// HealthCheckResponse returns local daemon status information.
+message HealthCheckResponse {
+    // server_onion is the Tor onion hostname of the local daemon.
+    string server_onion = 1;
+
+    // uptime_seconds is the number of seconds since the daemon started.
+    int64 uptime_seconds = 2;
+}
 
 message UnlockRequest {
     // main_password is the main password used to derive the master secret.

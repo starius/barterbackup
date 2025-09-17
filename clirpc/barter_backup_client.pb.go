@@ -137,9 +137,13 @@ func (*HealthCheckRequest) Descriptor() ([]byte, []int) {
 	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{0}
 }
 
-// HealthCheckResponse is an empty health check response.
+// HealthCheckResponse returns local daemon status information.
 type HealthCheckResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// server_onion is the Tor onion hostname of the local daemon.
+	ServerOnion string `protobuf:"bytes,1,opt,name=server_onion,json=serverOnion,proto3" json:"server_onion,omitempty"`
+	// uptime_seconds is the number of seconds since the daemon started.
+	UptimeSeconds int64 `protobuf:"varint,2,opt,name=uptime_seconds,json=uptimeSeconds,proto3" json:"uptime_seconds,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -172,6 +176,20 @@ func (x *HealthCheckResponse) ProtoReflect() protoreflect.Message {
 // Deprecated: Use HealthCheckResponse.ProtoReflect.Descriptor instead.
 func (*HealthCheckResponse) Descriptor() ([]byte, []int) {
 	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *HealthCheckResponse) GetServerOnion() string {
+	if x != nil {
+		return x.ServerOnion
+	}
+	return ""
+}
+
+func (x *HealthCheckResponse) GetUptimeSeconds() int64 {
+	if x != nil {
+		return x.UptimeSeconds
+	}
+	return 0
 }
 
 type UnlockRequest struct {
@@ -2524,8 +2542,10 @@ var File_clirpc_barter_backup_client_proto protoreflect.FileDescriptor
 const file_clirpc_barter_backup_client_proto_rawDesc = "" +
 	"\n" +
 	"!clirpc/barter_backup_client.proto\x12\x06clirpc\"\x14\n" +
-	"\x12HealthCheckRequest\"\x15\n" +
-	"\x13HealthCheckResponse\"4\n" +
+	"\x12HealthCheckRequest\"_\n" +
+	"\x13HealthCheckResponse\x12!\n" +
+	"\fserver_onion\x18\x01 \x01(\tR\vserverOnion\x12%\n" +
+	"\x0euptime_seconds\x18\x02 \x01(\x03R\ruptimeSeconds\"4\n" +
 	"\rUnlockRequest\x12#\n" +
 	"\rmain_password\x18\x01 \x01(\tR\fmainPassword\"\x10\n" +
 	"\x0eUnlockResponse\"0\n" +

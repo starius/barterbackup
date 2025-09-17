@@ -42,6 +42,7 @@ Client API (clirpc)
   `Node`.
 - Health check: RPC method name is `LocalHealthCheck` (renamed from
   `HealthCheck`) to avoid a collision with bbrpc `HealthCheck` on `Node`.
+  Local health check returns `server_onion` and `uptime_seconds`.
 
 Stored metadata (storedpb)
 
@@ -112,6 +113,11 @@ Development workflow
   - bbrpc server methods: `internal/node/bbrpc_server.go`.
   - clirpc server methods: `internal/node/clirpc_server.go` (create as you
     implement clirpc service methods).
+- Register both services in `Node.Start`.
+- For now, tests may call clirpc methods directly on `Node`  without going
+  through gRPC. Peer-to-peer dials use the internal `dialPeer` method. The
+  internal peer connection helper is named `getPeerConn` (renamed from
+  `getConn`) to avoid confusion with any future CLI connectivity.
 - After proto edits:
   - Run `make rpc`.
   - Run `make fmt`.

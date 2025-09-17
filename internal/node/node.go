@@ -12,6 +12,7 @@ import (
 	torutil "github.com/cretz/bine/torutil"
 	torutiled25519 "github.com/cretz/bine/torutil/ed25519"
 	"github.com/starius/barterbackup/bbrpc"
+	"github.com/starius/barterbackup/clirpc"
 	"github.com/starius/barterbackup/internal/keys"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -28,6 +29,7 @@ const grpcMaxMsg = 16 * 1024
 // Network interface so we can swap Tor-backed and in-memory implementations.
 type Node struct {
 	bbrpc.UnimplementedBarterBackupServerServer
+	clirpc.UnimplementedBarterBackupClientServer
 
 	net        Network
 	masterPriv []byte
@@ -40,6 +42,8 @@ type Node struct {
 
 	evictStop chan struct{}
 	evictDone chan struct{}
+
+	startedAt time.Time
 }
 
 type pooledConn struct {
@@ -92,12 +96,15 @@ func (n *Node) Start(ctx context.Context) error {
 		grpc.MaxSendMsgSize(grpcMaxMsg),
 	)
 	bbrpc.RegisterBarterBackupServerServer(grpcSrv, n)
+	clirpc.RegisterBarterBackupClientServer(grpcSrv, n)
 
 	unregister, err := n.net.Register(ctx, n.addr, n.priv, grpcSrv)
 	if err != nil {
 		return err
 	}
 	n.stop = unregister
+
+	n.startedAt = time.Now()
 
 	// Start background eviction of idle connections.
 	n.startEvictor()
@@ -134,9 +141,10 @@ func (n *Node) Address() string {
 // in dedicated files to avoid name collisions and keep responsibilities
 // separated. See bbrpc_server.go and clirpc_server.go.
 
-// DialPeer dials another node onion address and returns a bbrpc client and conn.
-func (n *Node) DialPeer(ctx context.Context, addr string) (bbrpc.BarterBackupServerClient, *grpc.ClientConn, error) {
-	conn, err := n.getConn(ctx, addr)
+// dialPeer dials another node onion address and returns a bbrpc client and conn.
+// It is used internally by the node when talking to peers.
+func (n *Node) dialPeer(ctx context.Context, addr string) (bbrpc.BarterBackupServerClient, *grpc.ClientConn, error) {
+	conn, err := n.getPeerConn(ctx, addr)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -145,7 +153,9 @@ func (n *Node) DialPeer(ctx context.Context, addr string) (bbrpc.BarterBackupSer
 }
 
 // getConn returns a pooled gRPC ClientConn to addr or dials and caches one.
-func (n *Node) getConn(ctx context.Context, addr string) (*grpc.ClientConn, error) {
+// getPeerConn returns a pooled gRPC ClientConn to a peer onion address or
+// dials and caches one. This is used for peer-to-peer connections.
+func (n *Node) getPeerConn(ctx context.Context, addr string) (*grpc.ClientConn, error) {
 	// Fast path: existing connection in pool.
 	n.mu.RLock()
 	pc := n.conns[addr]

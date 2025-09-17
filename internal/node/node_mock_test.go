@@ -33,7 +33,7 @@ func TestHealthCheckWithMockNetwork(t *testing.T) {
 	t.Logf("node2 address: %v", n2.Address())
 
 	// n1 -> n2
-	c12, conn12, err := n1.DialPeer(ctx, n2.Address())
+	c12, conn12, err := n1.dialPeer(ctx, n2.Address())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn12.Close() })
 	r12, err := c12.HealthCheck(ctx, &bbrpc.HealthCheckRequest{})
@@ -42,7 +42,7 @@ func TestHealthCheckWithMockNetwork(t *testing.T) {
 	require.Equal(t, n2.Address(), r12.GetServerOnion())
 
 	// n2 -> n1
-	c21, conn21, err := n2.DialPeer(ctx, n1.Address())
+	c21, conn21, err := n2.dialPeer(ctx, n1.Address())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn21.Close() })
 	r21, err := c21.HealthCheck(ctx, &bbrpc.HealthCheckRequest{})
