@@ -5,13 +5,15 @@ Scope
 - This file guides agents working in this repository.
 - It documents terminology, API decisions, style rules, and open issues.
 
-Repo layout
+ Repo layout
 
 - clirpc: Local CLI ↔ daemon gRPC proto and generated stubs.
 - bbrpc: Public daemon ↔ peer gRPC proto and generated stubs.
 - storedpb: On‑disk metadata proto and generated stubs.
 - internal/keys: Key derivation utilities (memory‑hard master key, HKDF, Ed25519 from master).
-- internal/torserver: Tor‑backed gRPC server using bine and PQ‑hybrid TLS.
+- internal/network: P2P networking abstraction + implementations (Tor + in‑memory mock).
+- internal/node: Node orchestration (single BarterBackup instance using Network).
+- internal/torserver: Tor‑backed gRPC server using bine and PQ‑hybrid TLS. [legacy; superseded by internal/network]
 - cmd/bbdaemon: Minimal daemon wiring that starts the Tor‑backed gRPC server.
 - scripts: Helper scripts (e.g., RPC code generation).
 - Makefile, Dockerfile.rpc: Reproducible RPC generation with Docker.
@@ -90,6 +92,14 @@ Go code style
 - Run `go fmt ./...` to normalize formatting.
 - Don't inline short functions into a single line.
 - Don't inline short structs definitions and literals into a single line. Each field on a separate line.
+  - Applies to trivial getters/setters and constructors. Avoid one‑line anonymous funcs; expand to multi‑line blocks.
+- Expand goroutines/closures to multi-line bodies for readability.
+
+gRPC limits
+
+- To mitigate DoS from oversized messages, both server and client set 16 KiB limits:
+  - Server: `grpc.NewServer(..., grpc.MaxRecvMsgSize(16*1024), grpc.MaxSendMsgSize(16*1024))`.
+  - Client: `grpc.DialContext(..., grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(16*1024), grpc.MaxCallSendMsgSize(16*1024)))`.
 - If fields of a structs are commented, insert an empty line before a commented field.
 
 Testing
@@ -115,12 +125,58 @@ Keys and crypto (internal/keys)
 - DeriveKey(masterPriv, purpose, n) → []byte: HKDF‑SHA256 with domain separation label `purpose`.
 - DeriveEd25519FromMaster(masterPriv, "tor/onion/v3") → ed25519 keypair for the onion service.
 
-Tor gRPC server (internal/torserver)
+ Tor gRPC server (internal/torserver)
 
 - Uses bine to start Tor and publish a v3 onion service with the Ed25519 key derived from the master key.
 - Exposes `Start(ctx, Config, impl)` which returns a server handle with `OnionID()` and `GRPC()` accessors.
 - TLS: Enforces TLS 1.3 with ONLY `X25519MLKEM768` in `CurvePreferences` (no fallback). Go 1.24+ provides this hybrid KEX.
 - Uses a self‑signed Ed25519 certificate for the TLS handshake; the onion layer provides origin authentication.
+
+Node + Network
+
+- Node (internal/node)
+  - Represents a single BarterBackup instance (bbrpc now; clirpc in future).
+  - Derives identity from password via `keys.DeriveMasterPriv` and HKDF → Ed25519.
+  - Computes onion address from the Ed25519 public key (bine/torutil v3 ID) and exposes it via `Address()`.
+  - API: `New(seed string, net Network)`, `Start(ctx)`, `Stop()`, `Address()`, `DialPeer(ctx, addr)`.
+  - Registers bbrpc server via the provided `Network` registrar.
+  - Maintains a connection pool of gRPC `ClientConn` keyed by onion address, with idle eviction:
+    - Reuses connections for repeated calls to the same peer.
+    - Evicts and closes connections not used for 5 minutes (checked every minute).
+
+- Network (interface + impls)
+  - Interface: `internal/node/network.go` (TLS 1.3 with ONLY `X25519MLKEM768`).
+  - Implementations:
+    - TorNetwork at `internal/nettor/tor.go`.
+    - MockNetwork at `internal/netmock/mock.go`.
+  - Methods:
+    - `Register(ctx, addr, priv, srv *grpc.Server) (unregister, err)` — `addr` is the onion hostname (e.g., "xxx.onion"). Node constructs the gRPC server (with TLS) and passes it; Network opens transport and serves it.
+    - `Dial(ctx, addr) (net.Conn, error)` — Network opens a raw connection to `addr`. Node provides `grpc.WithContextDialer` and TLS.
+  - Constructors and lifecycle:
+    - `nettor.NewTorNetwork()` and `netmock.NewMockNetwork()` return instances.
+    - Both types implement `Close() error` (currently no-op) for future resource management.
+
+- TorNetwork (internal/nettor/tor.go)
+  - Real transport using bine/Tor v3 onion service from the node’s Ed25519 key.
+  - Starts Tor with a temporary data directory (permissions `0700`) and cleans it on unregister.
+  - Stores the Tor instance on Register and reuses it for Dial (no per‑dial Tor).
+  - Dial requires a `.onion` hostname (port optional; `:80` added if missing). TLS verification is handled in Node (client side).
+
+- MockNetwork (internal/netmock/mock.go)
+  - Fully in‑memory with `grpc/test/bufconn`; no TCP usage (compatible with synctest).
+  - Provides a raw `net.Conn` from the bufconn listener; Node builds gRPC/TLS on top.
+  - Constructor: `netmock.NewMockNetwork()`. Implements `Close() error`.
+
+gRPC limits
+
+- To mitigate DoS from oversized messages, both server and client set 16 KiB limits:
+  - Server: `grpc.NewServer(..., grpc.MaxRecvMsgSize(16*1024), grpc.MaxSendMsgSize(16*1024))`.
+  - Client: `grpc.DialContext(..., grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(16*1024), grpc.MaxCallSendMsgSize(16*1024)))`.
+  - Centralized as `grpcMaxMsg` in `internal/node/node.go` with rationale in godoc.
+
+Daemon (cmd/bbdaemon)
+
+- Uses `Node` with `TorNetwork`; reads `BB_PASSWORD`, starts node, logs address, waits for signal.
 
 Daemon entry (cmd/bbdaemon)
 
