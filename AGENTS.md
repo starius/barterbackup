@@ -11,10 +11,10 @@ Scope
 - bbrpc: Public daemon ↔ peer gRPC proto and generated stubs.
 - storedpb: On‑disk metadata proto and generated stubs.
 - internal/keys: Key derivation utilities (memory‑hard master key, HKDF, Ed25519 from master).
-- internal/network: P2P networking abstraction + implementations (Tor + in‑memory mock).
-- internal/node: Node orchestration (single BarterBackup instance using Network).
-- internal/torserver: Tor‑backed gRPC server using bine and PQ‑hybrid TLS. [legacy; superseded by internal/network]
-- cmd/bbdaemon: Minimal daemon wiring that starts the Tor‑backed gRPC server.
+- internal/bbnode: Node orchestration (single BarterBackup instance using Network).
+- internal/nettor: Tor transport (bine) implementation of the Network interface.
+- internal/netmock: In‑memory transport for tests.
+- cmd/bbd: Daemon entry and app.
 - scripts: Helper scripts (e.g., RPC code generation).
 - Makefile, Dockerfile.rpc: Reproducible RPC generation with Docker.
 
@@ -103,29 +103,17 @@ RPC generation
 
 Development workflow
 
-- Implement both bbrpc and clirpc services as methods on `internal/node.Node`.
-  To avoid Go method name collisions (no overloading), clirpc RPCs that collide
-  with bbrpc are renamed as follows:
-  - `HealthCheck` → `LocalHealthCheck`.
-  - `Chat` → `CliChat`.
-- Keep server and client RPC handlers in separate files under
-  `internal/node/` for clarity:
-  - bbrpc server methods: `internal/node/bbrpc_server.go`.
-  - clirpc server methods: `internal/node/clirpc_server.go` (create as you
-    implement clirpc service methods).
+- Implement both bbrpc and clirpc services as methods on `internal/bbnode.Node`.
+  - To avoid Go method name collisions, clirpc RPCs that would collide with bbrpc are renamed: `LocalHealthCheck`, `CliChat`.
+- Keep server handlers in separate files (`internal/bbnode/bbrpc_server.go`, `internal/bbnode/clirpc_server.go`).
 - Register both services in `Node.Start`.
-- For now, tests may call clirpc methods directly on `Node`  without going
-  through gRPC. Peer-to-peer dials use the internal `dialPeer` method. The
-  internal peer connection helper is named `getPeerConn` (renamed from
-  `getConn`) to avoid confusion with any future CLI connectivity.
-- After proto edits:
-  - Run `make rpc`.
-  - Run `make fmt`.
-  - Run `make unit`.
+- Peer-to-peer dials use the internal `dialPeer` method.
+- After proto edits: `make rpc`, `make fmt`, `make unit`.
 
 Go code style
 
-- Imports are grouped into exactly two blocks: standard library, then everything else (including this repo).
+- Imports are grouped into exactly two blocks: standard library, then everything else.
+- Avoid redundant import aliasing (don’t alias a package to its own name) except in generated code.
 - Insert a single empty line before any `return` that follows other code at the same indentation level (not immediately after `{`).
 - No trailing whitespace or tabs on otherwise empty lines.
 - Run `go fmt ./...` to normalize formatting.
@@ -136,9 +124,11 @@ Go code style
 
 gRPC limits
 
-- To mitigate DoS from oversized messages, both server and client set 16 KiB limits:
+- P2P only: To mitigate DoS from oversized messages in peer-to-peer traffic, both P2P server and client use a 16 KiB limit.
   - Server: `grpc.NewServer(..., grpc.MaxRecvMsgSize(16*1024), grpc.MaxSendMsgSize(16*1024))`.
   - Client: `grpc.DialContext(..., grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(16*1024), grpc.MaxCallSendMsgSize(16*1024)))`.
+- Centralized as public constant `GRPCMaxMsgSize` in `bbrpc/consts.go`.
+- Local CLI ↔ daemon gRPC does not apply these limits.
 - If fields of a structs are commented, insert an empty line before a commented field.
 
 Testing
@@ -150,9 +140,20 @@ Testing
 - For deterministic cryptographic outputs, store expected values as hex strings.
   - If unknown initially, leave empty, run tests to see the actual hex in the failure message, and paste into the table.
 
+- gRPC/TLS tests: prefer `bufconn` and resilient assertions.
+  - Use `google.golang.org/grpc/test/bufconn` to avoid real networking.
+  - Wrap negative-path gRPC dials with small timeouts and
+    `grpc.WithReturnConnectionError()` to fail fast (optional).
+  - When creating mismatch scenarios, it can be enough to reuse a test body
+    and only swap one half of a keypair (e.g., mismatch server pub vs. priv,
+    or use a different client private key) to guarantee failure.
+  - Use `testing/synctest.Test(t, func(t *testing.T){...})` for time-based
+    control and to avoid long real sleeps; keep timeouts small (hundreds of
+    milliseconds) so negatives do not stall for seconds.
+
 Build and install
 
-- Install daemon: `make install` (sets `CGO_ENABLED=0` and runs `go install ./cmd/bbdaemon`).
+- Install daemon and CLI: `make install` (installs `./cmd/bbd` and `./cmd/bbcli`).
 
 Proto updates
 
@@ -164,16 +165,14 @@ Keys and crypto (internal/keys)
 - DeriveKey(masterPriv, purpose, n) → []byte: HKDF‑SHA256 with domain separation label `purpose`.
 - DeriveEd25519FromMaster(masterPriv, "tor/onion/v3") → ed25519 keypair for the onion service.
 
- Tor gRPC server (internal/torserver)
+ Tor transport (internal/nettor)
 
 - Uses bine to start Tor and publish a v3 onion service with the Ed25519 key derived from the master key.
-- Exposes `Start(ctx, Config, impl)` which returns a server handle with `OnionID()` and `GRPC()` accessors.
-- TLS: Enforces TLS 1.3 with ONLY `X25519MLKEM768` in `CurvePreferences` (no fallback). Go 1.24+ provides this hybrid KEX.
-- Uses a self‑signed Ed25519 certificate for the TLS handshake; the onion layer provides origin authentication.
+- bbnode layer enforces TLS 1.3 with ONLY `X25519MLKEM768`.
 
 Node + Network
 
-- Node (internal/node)
+- Node (internal/bbnode)
   - Represents a single BarterBackup instance (bbrpc now; clirpc in future).
   - Derives identity from password via `keys.DeriveMasterPriv` and HKDF → Ed25519.
   - Computes onion address from the Ed25519 public key (bine/torutil v3 ID) and exposes it via `Address()`.
@@ -208,21 +207,33 @@ Node + Network
   - Constructor: `netmock.NewMockNetwork()`. Implements `Close() error`.
   - Useful for unit/integration tests (see `internal/node/node_mock_test.go`).
 
-gRPC limits
+CLI and Daemon Apps
 
-- To mitigate DoS from oversized messages, both server and client set 16 KiB limits:
-  - Server: `grpc.NewServer(..., grpc.MaxRecvMsgSize(16*1024), grpc.MaxSendMsgSize(16*1024))`.
-  - Client: `grpc.DialContext(..., grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(16*1024), grpc.MaxCallSendMsgSize(16*1024)))`.
-  - Centralized as `grpcMaxMsg` in `internal/node/node.go` with rationale in godoc.
+- Daemon app (`cmd/bbd/bbdapp`):
+  - Public API: `type Config`, `Parse(opts...)`, `Run(ctx, cfg)`.
+  - Parse options: `WithOSArgs()` or `WithArgs([]string)`; uses go-flags (flags.Default).
+  - Data layout: `DataDir/cli-keys` (ephemeral, recreated on start), `DataDir/tor` (persistent for Tor).
+  - Unlock flow: serves only local clirpc on start; `Unlock` RPC starts Tor + bbnode with the provided password and logs node onion.
+  - Local clirpc security: TLS 1.3 + `X25519MLKEM768`, long‑lived (10y) self‑signed certs (server + client), server pins client cert, client pins `server.pub`.
+  - Locking: `cli-keys/.lock` via `github.com/starius/flock`; keys and dir removed on shutdown.
+- CLI app (`cmd/bbcli/bbcliapp`):
+  - Public API: `Run(ctx, opts...)`; uses go-flags (flags.Default) with Parser.CommandHandler.
+  - CommandHandler opens the connection after parsing common flags and before Execute; client is stored privately in runtime.
+  - Subcommands live in `cmd_<name>.go`:
+    - `healthcheck`: prints server onion and human‑readable uptime.
+    - `unlock`: secure password entry or `--password-file`, then clirpc `Unlock`.
+  - Defaults: `BBCLI_CLI_KEYS_DIR` points to `~/.barterbackup/cli-keys`.
+- Mains are minimal and use `signal.NotifyContext` for cancellation.
 
-Daemon (cmd/bbdaemon)
+Logging
 
-- Uses `Node` with `TorNetwork`; reads `BB_PASSWORD`, starts node, logs address, waits for signal.
+- bbd logs all significant/long‑running steps with timestamps: data dir setup, cli‑keys creation/removal, local gRPC bind/serve, unlock/start of node, shutdown, and any gRPC Serve errors.
+- Tor layer logs whether the Tor data dir is created or reused and logs onion service startup.
 
-Daemon entry (cmd/bbdaemon)
+Environment prefixes
 
-- Reads the node password from `BB_PASSWORD`, derives the master key via `keys.DeriveMasterPriv`, and starts the Tor‑backed gRPC server on onion port 80.
-- The bbrpc implementation is currently a minimal stub; wire real handlers as they are implemented.
+- Daemon env prefix: `BBD_` (e.g., `BBD_DATA_DIR`, `BBD_CLI_ADDR`).
+- CLI env prefix: `BBCLI_` (e.g., `BBCLI_DAEMON_ADDR`, `BBCLI_CLI_KEYS_DIR`).
 
 Examples
 

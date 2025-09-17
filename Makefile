@@ -4,7 +4,9 @@ RPC_IMAGE ?= barterbackup-rpc:bookworm
 
 # Install the daemon binary.
 install:
-	CGO_ENABLED=0 go install ./cmd/bbdaemon
+	CGO_ENABLED=0 go install ./cmd/bbd
+	CGO_ENABLED=0 go install ./cmd/bbcli
+
 
 unit:
 	CGO_ENABLED=0 go test ./...

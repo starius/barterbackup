@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"strings"
@@ -16,30 +17,38 @@ import (
 // TorNetwork is a Network implementation backed by Tor (bine).
 type TorNetwork struct {
 	t       *tor.Tor
-	baseDir string
+	dataDir string
 }
 
 // NewTorNetwork creates a Tor-backed network transport.
-func NewTorNetwork() *TorNetwork {
-	return &TorNetwork{}
-}
+func NewTorNetwork(dataDir string) *TorNetwork { return &TorNetwork{dataDir: dataDir} }
 
 // Close releases resources. No-op for now.
-func (tNet *TorNetwork) Close() error { return nil }
+func (tNet *TorNetwork) Close() error {
+	return nil
+}
 
 // Register starts a Tor onion service and serves the provided gRPC registrar.
 func (tNet *TorNetwork) Register(ctx context.Context, addr string,
 	priv ed25519.PrivateKey, srv *grpc.Server) (func() error, error) {
 
-	baseDir, err := os.MkdirTemp("", "bb-tor-")
-	if err != nil {
+	if tNet.dataDir == "" {
+		return nil, fmt.Errorf("tor data dir not set")
+	}
+	// Log whether we reuse or create Tor directory.
+	_, statErr := os.Stat(tNet.dataDir)
+	existed := statErr == nil
+	if err := os.MkdirAll(tNet.dataDir, 0o700); err != nil {
 		return nil, err
 	}
-	_ = os.Chmod(baseDir, 0o700)
+	if existed {
+		log.Printf("bbd: Tor data dir: %s (reuse)", tNet.dataDir)
+	} else {
+		log.Printf("bbd: Tor data dir: %s (created)", tNet.dataDir)
+	}
 
-	t, err := tor.Start(ctx, &tor.StartConf{TempDataDirBase: baseDir})
+	t, err := tor.Start(ctx, &tor.StartConf{DataDir: tNet.dataDir})
 	if err != nil {
-		_ = os.RemoveAll(baseDir)
 		return nil, err
 	}
 
@@ -51,25 +60,18 @@ func (tNet *TorNetwork) Register(ctx context.Context, addr string,
 	if err != nil {
 		cancel()
 		_ = t.Close()
-		_ = os.RemoveAll(baseDir)
 		return nil, err
 	}
+	_, lport, _ := net.SplitHostPort(onion.LocalListener.Addr().String())
+	log.Printf("bbd: Tor onion service started (remote port 80, local port %s)", lport)
 
 	// Serve provided gRPC server on the onion listener.
 	go func() { _ = srv.Serve(onion) }()
 
-	unregister := func() error {
-		srv.Stop()
-		_ = onion.Close()
-		cancel()
-		err := t.Close()
-		_ = os.RemoveAll(baseDir)
-		return err
-	}
+	unregister := func() error { srv.Stop(); _ = onion.Close(); cancel(); return t.Close() }
 
 	// store tor for reuse in Dial
 	tNet.t = t
-	tNet.baseDir = baseDir
 
 	return unregister, nil
 }

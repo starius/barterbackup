@@ -1,4 +1,4 @@
-package node
+package bbnode
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	torutil "github.com/cretz/bine/torutil"
+	"github.com/cretz/bine/torutil"
 	torutiled25519 "github.com/cretz/bine/torutil/ed25519"
 	"github.com/starius/barterbackup/bbrpc"
 	"github.com/starius/barterbackup/clirpc"
@@ -17,12 +17,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
-
-// grpcMaxMsg bounds the maximum gRPC message size we accept and send.
-// This small limit (16 KiB) is a simple DoS mitigation to prevent peers from
-// forcing large allocations or bandwidth usage with oversized messages.
-// Increase carefully if larger messages become necessary.
-const grpcMaxMsg = 16 * 1024
 
 // Node represents a single BarterBackup node that serves both bbrpc (P2P)
 // and clirpc (local) APIs. Networking to other nodes is abstracted by the
@@ -92,8 +86,8 @@ func (n *Node) Start(ctx context.Context) error {
 	}
 	grpcSrv := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(srvTLS)),
-		grpc.MaxRecvMsgSize(grpcMaxMsg),
-		grpc.MaxSendMsgSize(grpcMaxMsg),
+		grpc.MaxRecvMsgSize(bbrpc.GRPCMaxMsgSize),
+		grpc.MaxSendMsgSize(bbrpc.GRPCMaxMsgSize),
 	)
 	bbrpc.RegisterBarterBackupServerServer(grpcSrv, n)
 	clirpc.RegisterBarterBackupClientServer(grpcSrv, n)
@@ -193,8 +187,8 @@ func (n *Node) getPeerConn(ctx context.Context, addr string) (*grpc.ClientConn, 
 		grpc.WithContextDialer(dialer),
 		grpc.WithTransportCredentials(credentials.NewTLS(clientTLS)),
 		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(grpcMaxMsg),
-			grpc.MaxCallSendMsgSize(grpcMaxMsg),
+			grpc.MaxCallRecvMsgSize(bbrpc.GRPCMaxMsgSize),
+			grpc.MaxCallSendMsgSize(bbrpc.GRPCMaxMsgSize),
 		),
 	)
 	if err != nil {
