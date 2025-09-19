@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "crates/protos",
+    "crates/keys",
+    "crates/node",
+    "crates/netmock",
+    "crates/nettor",
+    "cmd/bbd",
+    "cmd/bbcli",
+]
+
+resolver = "2"
+
+# Build the lightweight crates by default to avoid requiring `protoc`.
+# Full build: `cargo build --workspace` after generating protos.
+default-members = [
+    "crates/keys",
+]

@@ -1,0 +1,12 @@
+[package]
+name = "bbcli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tonic = { version = "0.11", features = ["transport"] }
+protos = { path = "../../crates/protos" }
+

@@ -1,0 +1,14 @@
+[package]
+name = "netmock"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "netmock"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tonic = { version = "0.11", features = ["transport"] }
+anyhow = "1"
+
