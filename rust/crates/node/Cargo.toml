@@ -14,8 +14,9 @@ tonic = { version = "0.11", features = ["transport"] }
 protos = { path = "../protos" }
 keys = { path = "../keys" }
 sha2 = "0.10"
-torut = { version = "0.2.1" }
 futures = "0.3"
+ed25519-dalek = "1"
+hex = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

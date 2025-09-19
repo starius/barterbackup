@@ -1,17 +1,14 @@
 //! Generated protobuf modules and tonic services for BarterBackup.
-//!
-//! For reliable builds without requiring `protoc` on the host, we commit the
-//! generated Rust code in `src/generated/`. If you want to re-generate, run
-//! the helper under `tools/proto-gen` or enable the `gen` feature for this crate.
+//! Compiled at build time using tonic-build + vendored protoc.
 
 pub mod bbrpc {
-    include!("generated/bbrpc.rs");
+    tonic::include_proto!("bbrpc");
 }
 
 pub mod clirpc {
-    include!("generated/clirpc.rs");
+    tonic::include_proto!("clirpc");
 }
 
 pub mod storedpb {
-    include!("generated/storedpb.rs");
+    tonic::include_proto!("storedpb");
 }

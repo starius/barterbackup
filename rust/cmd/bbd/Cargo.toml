@@ -5,12 +5,11 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 node = { path = "../../crates/node" }
 protos = { path = "../../crates/protos" }
 tonic = { version = "0.11", features = ["transport"] }
-tokio-stream = "0.1"
-
+tokio-stream = { version = "0.1", features = ["net"] }
