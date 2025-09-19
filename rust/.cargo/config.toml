@@ -1,0 +1,10 @@
+[target.x86_64-unknown-linux-musl]
+# Prefer the canonical cross-compiler name used by Nix and many distros.
+# If you use Debian/Ubuntu musl-tools, you can override with
+#   CC_x86_64_unknown_linux_musl=musl-gcc
+linker = "x86_64-unknown-linux-musl-gcc"
+# Optionally, also set `ar` to match the target toolchain (helps on Nix):
+ar = "x86_64-unknown-linux-musl-ar"
+
+# Example: build static binaries for Linux (musl):
+#   cargo build --release --target x86_64-unknown-linux-musl -p bbd -p bbcli
