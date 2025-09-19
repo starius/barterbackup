@@ -7,5 +7,8 @@ edition = "2021"
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-tonic = { version = "0.11", features = ["transport"] }
+tonic = { version = "0.11", features = ["transport", "tls"] }
 protos = { path = "../../crates/protos" }
+clitls = { path = "../../crates/clitls" }
+dirs = "5"
+rustls = "0.21"

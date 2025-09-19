@@ -3,6 +3,7 @@ members = [
     "crates/protos",
     "crates/keys",
     "crates/node",
+    "crates/clitls",
     "crates/netmock",
     "crates/nettor",
     "cmd/bbd",

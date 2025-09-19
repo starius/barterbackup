@@ -1,4 +1,20 @@
-.PHONY: build
+# Simple helpers for the Rust workspace.
 
+CARGO ?= cargo
+
+.PHONY: unit build fmt clean
+
+# Run all unit tests in the Rust workspace.
+unit:
+	$(CARGO) test -p keys -p clitls -p node --all-features
+
+# Build the whole workspace in debug mode.
 build:
-	cargo build --release --target x86_64-unknown-linux-musl -p bbd -p bbcli
+	$(CARGO) build --workspace
+
+# Format (if rustfmt is available).
+fmt:
+	$(CARGO) fmt --all || true
+
+clean:
+	$(CARGO) clean

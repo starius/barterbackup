@@ -1,0 +1,27 @@
+[package]
+name = "clitls"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "clitls"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+ed25519-dalek = "1"
+pem = "3"
+rand = "0.7"
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
+rcgen = { version = "0.11", default-features = false, features = ["pem"] }
+x509-parser = "0.16"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tonic = { version = "0.11", features = ["transport", "tls"] }
+protos = { path = "../protos" }
+tokio-stream = { version = "0.1", features = ["net"] }
+pkcs8 = { version = "0.10", features = ["std"] }
+
+[dev-dependencies]
+anyhow = "1"
+tempfile = "3"
+futures = "0.3"

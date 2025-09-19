@@ -2,6 +2,10 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
 use protos::clirpc::HealthCheckRequest;
+use clitls::{read_keys, build_client_tls};
+use tonic::transport::ClientTlsConfig;
+use std::sync::Arc;
+use dirs::home_dir;
 
 #[derive(Parser, Debug)]
 #[command(name = "bbcli", about = "BarterBackup CLI (Rust prototype)")]
@@ -30,7 +34,15 @@ async fn main() -> Result<()> {
 }
 
 async fn healthcheck(addr: &str) -> Result<()> {
+    // TLS config from ~/.barterbackup/cli-keys (or override via env BBCLI_CLI_KEYS_DIR)
+    let keys_dir = std::env::var("BBCLI_CLI_KEYS_DIR").ok().unwrap_or_else(|| {
+        home_dir().map(|p| p.join(".barterbackup/cli-keys")).unwrap().display().to_string()
+    });
+    let (server_pub, client_priv) = read_keys(&keys_dir)?;
+    let cli_tls = build_client_tls(&server_pub, &client_priv)?;
+
     let channel = tonic::transport::Endpoint::from_shared(addr.to_string())?
+        .tls_config(ClientTlsConfig::new().rustls_client_config(Arc::new(cli_tls)))?
         .connect()
         .await?;
     let mut client = BarterBackupClientClient::new(channel);
@@ -39,4 +51,3 @@ async fn healthcheck(addr: &str) -> Result<()> {
     println!("uptime_seconds: {}", resp.uptime_seconds);
     Ok(())
 }
-
