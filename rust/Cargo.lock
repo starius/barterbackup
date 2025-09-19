@@ -748,7 +748,8 @@ dependencies = [
  "protos",
  "rand 0.7.3",
  "rcgen",
- "rustls 0.21.12",
+ "rustls 0.23.32",
+ "rustls-post-quantum",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -2297,7 +2298,7 @@ dependencies = [
  "anyhow",
  "arti-client",
  "futures",
- "rustls 0.23.31",
+ "rustls 0.23.32",
  "tokio",
  "tokio-stream",
  "tor-config",
@@ -3289,9 +3290,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.31"
+version = "0.23.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0ebcbd2f03de0fc1122ad9bb24b127a5a6cd51d72604a3f3c50ac459762b6cc"
+checksum = "cd3c25631629d034ce7cd9940adc9d45762d46de2b0f57193c4443b92c6d4d40"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -3318,6 +3319,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "229a4a4c221013e7e1f1a043678c5cc39fe5171437c88fb47151a21e6f5b5c79"
 dependencies = [
  "zeroize",
+]
+
+[[package]]
+name = "rustls-post-quantum"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "953887a349c27f200ab6e672ebfeed24a1af50a14794536b53be5d0acc2d4f2c"
+dependencies = [
+ "rustls 0.23.32",
+ "rustls-webpki 0.103.6",
 ]
 
 [[package]]
