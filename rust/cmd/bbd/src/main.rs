@@ -1,14 +1,16 @@
 use anyhow::Result;
 use clap::Parser;
+use futures_util::stream::StreamExt;
 use node::{CliService, Node};
 use protos::clirpc::barter_backup_client_server::BarterBackupClientServer;
 use tokio_stream::wrappers::TcpListenerStream;
-use tracing::{info, Level};
+use tracing::{error, info, Level};
 use tracing_subscriber::EnvFilter;
 use clitls::{generate_ed25519, write_keys, build_server_tls};
-use tonic::transport::ServerTlsConfig;
 use std::sync::Arc;
 use dirs::home_dir;
+use tokio_rustls::server::TlsStream;
+use tokio::net::TcpStream;
 
 #[derive(Parser, Debug)]
 #[command(name = "bbd", about = "BarterBackup daemon (Rust prototype)")]
@@ -39,7 +41,6 @@ async fn main() -> Result<()> {
 
     let cli_listener = tokio::net::TcpListener::bind(&args.cli_addr).await?;
     let cli_addr = cli_listener.local_addr()?;
-    let cli_stream = TcpListenerStream::new(cli_listener);
 
     // Prepare TLS: generate server+client keys and write server.pub/client.key
     let (server_pub, server_priv) = generate_ed25519()?;
@@ -52,10 +53,30 @@ async fn main() -> Result<()> {
 
     let cli_svc = CliService::new(node.clone());
     info!(%cli_addr, keys_dir=%keys_dir, "Starting local clirpc server (TLS, client pinned)");
+
+    let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(srv_tls));
+    let incoming = TcpListenerStream::new(cli_listener).filter_map(|s| {
+        let tls_acceptor2 = tls_acceptor.clone();
+            async move {
+        match s {
+            Ok(socket) => match tls_acceptor2.accept(socket).await {
+                Ok(stream) => Some(Ok::<TlsStream<TcpStream>, std::io::Error>(stream)),
+                Err(e) => {
+                    error!("failed to perform tls handshake: {e}");
+                    None
+                }
+            },
+            Err(e) => {
+                error!("tcp accept error: {e}");
+                None
+            }
+        }
+            }
+    });
+
     tonic::transport::Server::builder()
-        .tls_config(ServerTlsConfig::new().rustls_server_config(Arc::new(srv_tls)))?
         .add_service(BarterBackupClientServer::new(cli_svc))
-        .serve_with_incoming(cli_stream)
+        .serve_with_incoming(incoming)
         .await?;
 
     Ok(())

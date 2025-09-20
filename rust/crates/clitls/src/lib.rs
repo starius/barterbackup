@@ -226,11 +226,13 @@ mod tests {
     use std::sync::Arc;
     use rustls::crypto::aws_lc_rs;
     use tonic::{Request, Status};
-    use tonic::transport::{Server, ServerTlsConfig, ClientTlsConfig, Endpoint};
+    use tonic::transport::{Server, Endpoint};
     use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
     use protos::clirpc::barter_backup_client_server::{BarterBackupClient, BarterBackupClientServer};
     use protos::clirpc::HealthCheckRequest;
     use tokio_stream::wrappers::TcpListenerStream;
+    use futures_util::stream::StreamExt;
+    use tonic_rustls::TlsConnector;
 
 
     #[derive(Default)]
@@ -281,16 +283,33 @@ mod tests {
 
     // Helper: start a PQ-only TLS clirpc server on localhost and return address.
     async fn start_pq_server(expected_client_pub: PublicKey, server_priv: SecretKey) -> Result<(String, ServerHandle)> {
-        let cfg = Arc::new(build_server_tls(&expected_client_pub, &server_priv)?);
+        let cfg = build_server_tls(&expected_client_pub, &server_priv)?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
-        let tls = ServerTlsConfig::new().rustls_server_config(cfg)?;
+        let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
         let svc = BarterBackupClientServer::new(Hc::default());
+
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener).filter_map(|s| async move {
+            match s {
+                Ok(socket) => match tls_acceptor.accept(socket).await {
+                    Ok(stream) => Some(Ok(stream)),
+                    Err(e) => {
+                        // Log the error, but don't panic
+                        eprintln!("tls accept error: {}", e);
+                        None
+                    }
+                },
+                Err(e) => {
+                    eprintln!("tcp accept error: {}", e);
+                    None
+                }
+            }
+        });
+
         let handle = tokio::spawn(async move {
             Server::builder()
-                .tls_config(tls).unwrap()
                 .add_service(svc)
-                .serve_with_incoming(TcpListenerStream::new(listener))
+                .serve_with_incoming(incoming)
                 .await
         });
         Ok((format!("https://{}", addr), ServerHandle(handle)))
@@ -320,8 +339,9 @@ mod tests {
         let (addr, _h) = start_pq_server(client_pub, server_priv).await?;
 
         let bad_cfg = x25519_only_client_config(&server_pub, &client_priv)?;
+        let tls = TlsConnector::new(bad_cfg);
         let endpoint = Endpoint::from_shared(addr)?
-            .tls_config(ClientTlsConfig::new().rustls_client_config(Arc::new(bad_cfg)))?;
+            .tls_connector(tls)?;
         let res = endpoint.connect().await;
         assert!(res.is_err(), "X25519-only client must not connect to PQ-only server");
         Ok(())
@@ -371,20 +391,35 @@ mod tests {
         let srv_cfg = x25519_only_server_config(&client_pub, &server_priv)?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
-        let tls = ServerTlsConfig::new().rustls_server_config(Arc::new(srv_cfg))?;
+        let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(srv_cfg));
         let svc = BarterBackupClientServer::new(Hc::default());
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener).filter_map(|s| async move {
+            match s {
+                Ok(socket) => match tls_acceptor.accept(socket).await {
+                    Ok(stream) => Some(Ok(stream)),
+                    Err(e) => {
+                        eprintln!("tls accept error: {}", e);
+                        None
+                    }
+                },
+                Err(e) => {
+                    eprintln!("tcp accept error: {}", e);
+                    None
+                }
+            }
+        });
         let _h = tokio::spawn(async move {
             Server::builder()
-                .tls_config(tls).unwrap()
                 .add_service(svc)
-                .serve_with_incoming(TcpListenerStream::new(listener))
+                .serve_with_incoming(incoming)
                 .await
         });
 
         // PQ-only client should fail to connect
         let good_cfg = build_client_tls(&server_pub, &client_priv)?;
+        let tls = TlsConnector::new(good_cfg);
         let endpoint = Endpoint::from_shared(format!("https://{}", addr))?
-            .tls_config(ClientTlsConfig::new().rustls_client_config(Arc::new(good_cfg)))?;
+            .tls_connector(tls)?;
         let res = endpoint.connect().await;
         assert!(res.is_err(), "PQ-only client must not connect to X25519-only server");
         Ok(())
@@ -397,8 +432,9 @@ mod tests {
         let (client_pub, client_priv) = generate_ed25519()?;
         let (addr, _h) = start_pq_server(client_pub, server_priv).await?;
         let good_cfg = build_client_tls(&server_pub, &client_priv)?;
+        let tls = TlsConnector::new(good_cfg);
         let channel = Endpoint::from_shared(addr)?
-            .tls_config(ClientTlsConfig::new().rustls_client_config(Arc::new(good_cfg)))?
+            .tls_connector(tls)?
             .connect().await?;
         let mut cli = BarterBackupClientClient::new(channel);
         let _ = cli.local_health_check(HealthCheckRequest{}).await; // Will likely fail due to dummy svc, but handshake succeeded.

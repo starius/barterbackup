@@ -15,4 +15,7 @@ tonic = { version = "0.14.2", features = ["transport", "tls-aws-lc"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 clitls = { path = "../../crates/clitls" }
 dirs = "5"
+futures-util = "0.3"
+tokio-rustls = "0.26"
+rustls = { version = "0.23.32", features = ["aws-lc-rs"] }
  

@@ -8,6 +8,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tonic = { version = "0.14.2", features = ["transport", "tls-aws-lc"] }
+tonic-rustls = "0.2.0"
 protos = { path = "../../crates/protos" }
 clitls = { path = "../../crates/clitls" }
 dirs = "5"

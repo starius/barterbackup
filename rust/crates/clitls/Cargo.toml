@@ -24,8 +24,9 @@ pkcs8 = { version = "0.10", features = ["std"] }
 anyhow = "1"
 tempfile = "3"
 futures = "0.3"
-tokio-rustls = "0.25"
+tokio-rustls = "0.26"
 tonic = { version = "0.14.2", features = ["transport", "tls-aws-lc"] }
+tonic-rustls = "0.2.0"
 tokio-stream = { version = "0.1", features = ["net"] }
 
 [features]
