@@ -10,7 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
-tonic = { version = "0.11", features = ["transport"] }
+tonic = { version = "0.14.2", features = ["transport"] }
 protos = { path = "../protos" }
 keys = { path = "../keys" }
 sha2 = "0.10"
@@ -22,4 +22,4 @@ hex = "0.4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 protos = { path = "../protos" }
 anyhow = "1"
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["net"] }

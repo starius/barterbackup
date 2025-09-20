@@ -24,7 +24,6 @@ use rustls::crypto::CryptoProvider;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use tonic::transport::{ClientTlsConfig, ServerTlsConfig};
 
 /// Ed25519 algorithm OID in dotted form 1.3.101.112.
 const ED25519_OID: &[u64] = &[1, 3, 101, 112];
@@ -64,11 +63,9 @@ pub fn read_keys(dir: impl AsRef<Path>) -> Result<(PublicKey, SecretKey)> {
 
 /// Build a rustls ServerConfig that pins a specific client public key and serves with a self-signed Ed25519 cert.
 pub fn build_server_tls(expected_client_pub: &PublicKey, server_priv: &SecretKey) -> Result<ServerConfig> {
-    // Install PQ-only provider (X25519+ML-KEM-768).
+    // PQ-only provider (X25519+ML-KEM-768).
     let mut provider: CryptoProvider = rustls_post_quantum::provider();
     provider.kx_groups = vec![rustls_post_quantum::X25519MLKEM768];
-    let _ = provider.install_default();
-
     let (server_cert, server_key) = self_signed_cert(server_priv, true)?;
     // Custom client verifier: pin ed25519 pubkey
     #[derive(Debug)]
@@ -94,7 +91,8 @@ pub fn build_server_tls(expected_client_pub: &PublicKey, server_priv: &SecretKey
         fn supported_verify_schemes(&self) -> Vec<SignatureScheme> { vec![SignatureScheme::ED25519] }
     }
     let verifier = Arc::new(PinClient { expected: expected_client_pub.to_bytes(), subjects: vec![] });
-    let mut cfg = rustls::ServerConfig::builder_with_protocol_versions(&[&TLS13])
+    let mut cfg = rustls::ServerConfig::builder_with_provider(provider.into())
+        .with_protocol_versions(&[&TLS13])?
         .with_client_cert_verifier(verifier)
         .with_single_cert(vec![server_cert], server_key)
         .map_err(|e| anyhow!("server cert: {e}"))?;
@@ -104,14 +102,13 @@ pub fn build_server_tls(expected_client_pub: &PublicKey, server_priv: &SecretKey
 
 /// Build a rustls ClientConfig that pins the server public key.
 pub fn build_client_tls(expected_server_pub: &PublicKey, client_priv: &SecretKey) -> Result<ClientConfig> {
-    // Install PQ-only provider.
+    // PQ-only provider.
     let mut provider: CryptoProvider = rustls_post_quantum::provider();
     provider.kx_groups = vec![rustls_post_quantum::X25519MLKEM768];
-    let _ = provider.install_default();
-
     // Client self-signed cert (for mTLS)
     let (client_cert, client_key) = self_signed_cert(client_priv, false)?;
-    let mut cfg = rustls::ClientConfig::builder_with_protocol_versions(&[&TLS13])
+    let mut cfg = rustls::ClientConfig::builder_with_provider(provider.into())
+        .with_protocol_versions(&[&TLS13])?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PinServer { expected: expected_server_pub.to_bytes() }))
         .with_client_auth_cert(vec![client_cert], client_key)
@@ -226,15 +223,22 @@ impl ServerCertVerifier for PinServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protos::clirpc::{barter_backup_client_server::{BarterBackupClient, BarterBackupClientServer}, HealthCheckRequest, HealthCheckResponse};
+    use std::sync::Arc;
+    use rustls::crypto::aws_lc_rs;
     use tonic::{Request, Status};
+    use tonic::transport::{Server, ServerTlsConfig, ClientTlsConfig, Endpoint};
+    use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
+    use protos::clirpc::barter_backup_client_server::{BarterBackupClient, BarterBackupClientServer};
+    use protos::clirpc::HealthCheckRequest;
+    use tokio_stream::wrappers::TcpListenerStream;
+
 
     #[derive(Default)]
     struct Hc;
     #[tonic::async_trait]
     impl BarterBackupClient for Hc {
-        async fn local_health_check(&self, _req: Request<HealthCheckRequest>) -> std::result::Result<tonic::Response<HealthCheckResponse>, Status> {
-            Ok(tonic::Response::new(HealthCheckResponse { server_onion: "".into(), uptime_seconds: 1 }))
+        async fn local_health_check(&self, _req: Request<HealthCheckRequest>) -> std::result::Result<tonic::Response<protos::clirpc::HealthCheckResponse>, Status> {
+            Ok(tonic::Response::new(protos::clirpc::HealthCheckResponse { server_onion: "".into(), uptime_seconds: 1 }))
         }
         type ProposeContractStream = std::pin::Pin<Box<dyn futures::Stream<Item = std::result::Result<protos::clirpc::ProposeContractUpdate, Status>> + Send + 'static>>;
         type CheckContractStream = std::pin::Pin<Box<dyn futures::Stream<Item = std::result::Result<protos::clirpc::CheckContractUpdate, Status>> + Send + 'static>>;
@@ -272,6 +276,132 @@ mod tests {
         let (sp, cp) = read_keys(dir.path())?;
         assert_eq!(sp, server_pub);
         assert_eq!(cp.to_bytes(), client_priv.to_bytes());
+        Ok(())
+    }
+
+    // Helper: start a PQ-only TLS clirpc server on localhost and return address.
+    async fn start_pq_server(expected_client_pub: PublicKey, server_priv: SecretKey) -> Result<(String, ServerHandle)> {
+        let cfg = Arc::new(build_server_tls(&expected_client_pub, &server_priv)?);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let tls = ServerTlsConfig::new().rustls_server_config(cfg)?;
+        let svc = BarterBackupClientServer::new(Hc::default());
+        let handle = tokio::spawn(async move {
+            Server::builder()
+                .tls_config(tls).unwrap()
+                .add_service(svc)
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+        });
+        Ok((format!("https://{}", addr), ServerHandle(handle)))
+    }
+
+    struct ServerHandle(tokio::task::JoinHandle<Result<(), tonic::transport::Error>>);
+
+    // Client with classical X25519-only provider (no PQ).
+    fn x25519_only_client_config(server_pub: &PublicKey, client_priv: &SecretKey) -> Result<rustls::ClientConfig> {
+        let mut provider = aws_lc_rs::default_provider();
+        provider.kx_groups = vec![aws_lc_rs::kx_group::X25519];
+        let (client_cert, client_key) = self_signed_cert(client_priv, false)?;
+        let cfg = rustls::ClientConfig::builder_with_provider(provider.into())
+            .with_protocol_versions(&[&TLS13])?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(PinServer { expected: server_pub.to_bytes() }))
+            .with_client_auth_cert(vec![client_cert], client_key)
+            .map_err(|e| anyhow!("client cert: {e}"))?;
+        Ok(cfg)
+    }
+
+    #[cfg(feature = "pq_tls_tests")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pq_server_vs_x25519_client_fails() -> Result<()> {
+        let (server_pub, server_priv) = generate_ed25519()?;
+        let (client_pub, client_priv) = generate_ed25519()?;
+        let (addr, _h) = start_pq_server(client_pub, server_priv).await?;
+
+        let bad_cfg = x25519_only_client_config(&server_pub, &client_priv)?;
+        let endpoint = Endpoint::from_shared(addr)?
+            .tls_config(ClientTlsConfig::new().rustls_client_config(Arc::new(bad_cfg)))?;
+        let res = endpoint.connect().await;
+        assert!(res.is_err(), "X25519-only client must not connect to PQ-only server");
+        Ok(())
+    }
+
+    // Server with classical X25519-only provider.
+    fn x25519_only_server_config(expected_client_pub: &PublicKey, _server_priv: &SecretKey) -> Result<rustls::ServerConfig> {
+        let mut provider = aws_lc_rs::default_provider();
+        provider.kx_groups = vec![&aws_lc_rs::kx_group::X25519];
+        // Generate a self-signed cert for the server
+        let (_pub, tmp_priv) = generate_ed25519()?;
+        let (cert, key) = self_signed_cert(&tmp_priv, true)?;
+        // Custom verifier pinning client pub
+        #[derive(Debug)]
+        struct PinClient { expected: [u8; 32], subjects: Vec<DistinguishedName> }
+        impl ClientCertVerifier for PinClient {
+            fn offer_client_auth(&self) -> bool { true }
+            fn client_auth_mandatory(&self) -> bool { true }
+            fn root_hint_subjects(&self) -> &[DistinguishedName] { &self.subjects }
+            fn verify_client_cert(&self, end_entity: &CertificateDer<'_>, _intermediates: &[CertificateDer<'_>], _now: UnixTime) -> Result<ClientCertVerified, rustls::Error> {
+                let (_, parsed) = x509_parser::parse_x509_certificate(end_entity.as_ref()).map_err(|_| rustls::Error::General("bad client cert".into()))?;
+                let spki = parsed.tbs_certificate.subject_pki;
+                if spki.algorithm.algorithm.to_id_string() != "1.3.101.112" { return Err(rustls::Error::General("client cert not ed25519".into())); }
+                if spki.subject_public_key.data.as_ref() != self.expected { return Err(rustls::Error::General("unauthorized client cert".into())); }
+                Ok(ClientCertVerified::assertion())
+            }
+            fn verify_tls12_signature(&self, _m:&[u8], _c:&CertificateDer<'_>, _d:&DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> { Ok(HandshakeSignatureValid::assertion()) }
+            fn verify_tls13_signature(&self, _m:&[u8], _c:&CertificateDer<'_>, _d:&DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error> { Ok(HandshakeSignatureValid::assertion()) }
+            fn supported_verify_schemes(&self) -> Vec<SignatureScheme> { vec![SignatureScheme::ED25519] }
+        }
+        let verifier = Arc::new(PinClient { expected: expected_client_pub.to_bytes(), subjects: vec![] });
+        let cfg = rustls::ServerConfig::builder_with_provider(provider.into())
+            .with_protocol_versions(&[&TLS13])?
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(vec![cert], key)
+            .map_err(|e| anyhow!("server cert: {e}"))?;
+        Ok(cfg)
+    }
+
+    #[cfg(feature = "pq_tls_tests")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pq_client_vs_x25519_server_fails() -> Result<()> {
+        let (server_pub, server_priv) = generate_ed25519()?;
+        let (client_pub, client_priv) = generate_ed25519()?;
+
+        // Start X25519-only server
+        let srv_cfg = x25519_only_server_config(&client_pub, &server_priv)?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let tls = ServerTlsConfig::new().rustls_server_config(Arc::new(srv_cfg))?;
+        let svc = BarterBackupClientServer::new(Hc::default());
+        let _h = tokio::spawn(async move {
+            Server::builder()
+                .tls_config(tls).unwrap()
+                .add_service(svc)
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+        });
+
+        // PQ-only client should fail to connect
+        let good_cfg = build_client_tls(&server_pub, &client_priv)?;
+        let endpoint = Endpoint::from_shared(format!("https://{}", addr))?
+            .tls_config(ClientTlsConfig::new().rustls_client_config(Arc::new(good_cfg)))?;
+        let res = endpoint.connect().await;
+        assert!(res.is_err(), "PQ-only client must not connect to X25519-only server");
+        Ok(())
+    }
+
+    #[cfg(feature = "pq_tls_tests")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pq_client_and_server_succeed() -> Result<()> {
+        let (server_pub, server_priv) = generate_ed25519()?;
+        let (client_pub, client_priv) = generate_ed25519()?;
+        let (addr, _h) = start_pq_server(client_pub, server_priv).await?;
+        let good_cfg = build_client_tls(&server_pub, &client_priv)?;
+        let channel = Endpoint::from_shared(addr)?
+            .tls_config(ClientTlsConfig::new().rustls_client_config(Arc::new(good_cfg)))?
+            .connect().await?;
+        let mut cli = BarterBackupClientClient::new(channel);
+        let _ = cli.local_health_check(HealthCheckRequest{}).await; // Will likely fail due to dummy svc, but handshake succeeded.
         Ok(())
     }
 }

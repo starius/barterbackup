@@ -6,11 +6,11 @@ CARGO ?= cargo
 
 # Run all unit tests in the Rust workspace.
 unit:
-	$(CARGO) test -p keys -p clitls -p node --all-features
+	PATH=/home/user/nix/result-apps/bin:$$PATH $(CARGO) test -p keys -p clitls -p node --all-features
 
 # Build the whole workspace in debug mode.
 build:
-	$(CARGO) build --workspace
+	PATH=/home/user/nix/result-apps/bin:$$PATH $(CARGO) build --release -p bbd -p bbcli
 
 # Format (if rustfmt is available).
 fmt:

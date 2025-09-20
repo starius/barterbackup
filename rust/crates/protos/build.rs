@@ -3,21 +3,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protoc_path = protoc_bin_vendored::protoc_bin_path()?;
     std::env::set_var("PROTOC", protoc_path);
 
-    tonic_build::configure()
-        .protoc_arg("--experimental_allow_proto3_optional")
-        // Keep file and message names as in Go; package names match.
-        .compile(
-            &[
-                "../../../bbrpc/barter_backup_server.proto",
-                "../../../clirpc/barter_backup_client.proto",
-                "../../../storedpb/stored.proto",
-            ],
-            &[
-                "../../../bbrpc",
-                "../../../clirpc",
-                "../../../storedpb",
-            ],
-        )?;
-
+    // Compile protos with tonic-prost-build (tonic 0.14).
+    tonic_prost_build::configure()
+        .build_server(true)
+        .compile_protos(
+        &[
+            "../../../bbrpc/barter_backup_server.proto",
+            "../../../clirpc/barter_backup_client.proto",
+            "../../../storedpb/stored.proto",
+        ],
+        &[
+            "../../../bbrpc",
+            "../../../clirpc",
+            "../../../storedpb",
+        ],
+    )?;
     Ok(())
 }

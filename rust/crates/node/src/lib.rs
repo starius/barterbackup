@@ -69,15 +69,15 @@ impl CliService {
 
 #[tonic::async_trait]
 impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
-    type ProposeContractStream = Pin<Box<dyn Stream<Item = Result<clirpc::ProposeContractUpdate, Status>> + Send + 'static>>;
-    type CheckContractStream = Pin<Box<dyn Stream<Item = Result<clirpc::CheckContractUpdate, Status>> + Send + 'static>>;
-    type RecoverContentStream = Pin<Box<dyn Stream<Item = Result<clirpc::RecoverContentUpdate, Status>> + Send + 'static>>;
-    type CliChatStream = Pin<Box<dyn Stream<Item = Result<clirpc::ChatEvent, Status>> + Send + 'static>>;
+    type ProposeContractStream = Pin<Box<dyn Stream<Item = Result<clirpc::ProposeContractUpdate, tonic::Status>> + Send + 'static>>;
+    type CheckContractStream = Pin<Box<dyn Stream<Item = Result<clirpc::CheckContractUpdate, tonic::Status>> + Send + 'static>>;
+    type RecoverContentStream = Pin<Box<dyn Stream<Item = Result<clirpc::RecoverContentUpdate, tonic::Status>> + Send + 'static>>;
+    type CliChatStream = Pin<Box<dyn Stream<Item = Result<clirpc::ChatEvent, tonic::Status>> + Send + 'static>>;
 
     async fn local_health_check(
         &self,
-        _req: Request<clirpc::HealthCheckRequest>,
-    ) -> Result<Response<clirpc::HealthCheckResponse>, Status> {
+        _req: tonic::Request<clirpc::HealthCheckRequest>,
+    ) -> Result<tonic::Response<clirpc::HealthCheckResponse>, tonic::Status> {
         let uptime = self.node.uptime_seconds();
         Ok(Response::new(clirpc::HealthCheckResponse {
             server_onion: self.node.address().to_string(),
@@ -87,102 +87,102 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
 
     async fn unlock(
         &self,
-        _request: Request<clirpc::UnlockRequest>,
-    ) -> Result<Response<clirpc::UnlockResponse>, Status> {
+        _request: tonic::Request<clirpc::UnlockRequest>,
+    ) -> Result<tonic::Response<clirpc::UnlockResponse>, tonic::Status> {
         Err(Status::unimplemented("Unlock not implemented in prototype"))
     }
 
     async fn connect_peer(
         &self,
-        _request: Request<clirpc::ConnectPeerRequest>,
-    ) -> Result<Response<clirpc::ConnectPeerResponse>, Status> {
+        _request: tonic::Request<clirpc::ConnectPeerRequest>,
+    ) -> Result<tonic::Response<clirpc::ConnectPeerResponse>, tonic::Status> {
         Err(Status::unimplemented("ConnectPeer not implemented in prototype"))
     }
 
     async fn connected_peers(
         &self,
-        _request: Request<clirpc::ConnectedPeersRequest>,
-    ) -> Result<Response<clirpc::ConnectedPeersResponse>, Status> {
+        _request: tonic::Request<clirpc::ConnectedPeersRequest>,
+    ) -> Result<tonic::Response<clirpc::ConnectedPeersResponse>, tonic::Status> {
         Err(Status::unimplemented("ConnectedPeers not implemented in prototype"))
     }
 
     async fn set_file(
         &self,
-        _request: Request<clirpc::SetFileRequest>,
-    ) -> Result<Response<clirpc::SetFileResponse>, Status> {
+        _request: tonic::Request<clirpc::SetFileRequest>,
+    ) -> Result<tonic::Response<clirpc::SetFileResponse>, tonic::Status> {
         Err(Status::unimplemented("SetFile not implemented in prototype"))
     }
 
     async fn get_file(
         &self,
-        _request: Request<clirpc::GetFileRequest>,
-    ) -> Result<Response<clirpc::GetFileResponse>, Status> {
+        _request: tonic::Request<clirpc::GetFileRequest>,
+    ) -> Result<tonic::Response<clirpc::GetFileResponse>, tonic::Status> {
         Err(Status::unimplemented("GetFile not implemented in prototype"))
     }
 
     async fn list_files(
         &self,
-        _request: Request<clirpc::ListFilesRequest>,
-    ) -> Result<Response<clirpc::ListFilesResponse>, Status> {
+        _request: tonic::Request<clirpc::ListFilesRequest>,
+    ) -> Result<tonic::Response<clirpc::ListFilesResponse>, tonic::Status> {
         Err(Status::unimplemented("ListFiles not implemented in prototype"))
     }
 
     async fn set_storage_config(
         &self,
-        _request: Request<clirpc::SetStorageConfigRequest>,
-    ) -> Result<Response<clirpc::SetStorageConfigResponse>, Status> {
+        _request: tonic::Request<clirpc::SetStorageConfigRequest>,
+    ) -> Result<tonic::Response<clirpc::SetStorageConfigResponse>, tonic::Status> {
         Err(Status::unimplemented("SetStorageConfig not implemented in prototype"))
     }
 
     async fn get_storage_config(
         &self,
-        _request: Request<clirpc::GetStorageConfigRequest>,
-    ) -> Result<Response<clirpc::GetStorageConfigResponse>, Status> {
+        _request: tonic::Request<clirpc::GetStorageConfigRequest>,
+    ) -> Result<tonic::Response<clirpc::GetStorageConfigResponse>, tonic::Status> {
         Err(Status::unimplemented("GetStorageConfig not implemented in prototype"))
     }
 
     async fn get_contracts(
         &self,
-        _request: Request<clirpc::GetContractsRequest>,
-    ) -> Result<Response<clirpc::GetContractsResponse>, Status> {
+        _request: tonic::Request<clirpc::GetContractsRequest>,
+    ) -> Result<tonic::Response<clirpc::GetContractsResponse>, tonic::Status> {
         Err(Status::unimplemented("GetContracts not implemented in prototype"))
     }
 
     async fn propose_contract(
         &self,
-        _request: Request<clirpc::ProposeContractRequest>,
-    ) -> Result<Response<Self::ProposeContractStream>, Status> {
+        _request: tonic::Request<clirpc::ProposeContractRequest>,
+    ) -> Result<tonic::Response<Self::ProposeContractStream>, tonic::Status> {
         let s = stream::empty();
         Ok(Response::new(Box::pin(s)))
     }
 
     async fn check_contract(
         &self,
-        _request: Request<clirpc::CheckContractRequest>,
-    ) -> Result<Response<Self::CheckContractStream>, Status> {
+        _request: tonic::Request<clirpc::CheckContractRequest>,
+    ) -> Result<tonic::Response<Self::CheckContractStream>, tonic::Status> {
         let s = stream::empty();
         Ok(Response::new(Box::pin(s)))
     }
 
     async fn recover_content(
         &self,
-        _request: Request<clirpc::RecoverContentRequest>,
-    ) -> Result<Response<Self::RecoverContentStream>, Status> {
+        _request: tonic::Request<clirpc::RecoverContentRequest>,
+    ) -> Result<tonic::Response<Self::RecoverContentStream>, tonic::Status> {
         let s = stream::empty();
         Ok(Response::new(Box::pin(s)))
     }
 
     async fn set_aead_key_for_peer(
         &self,
-        _request: Request<clirpc::SetAeadKeyForPeerRequest>,
-    ) -> Result<Response<clirpc::SetAeadKeyForPeerResponse>, Status> {
+        _request: tonic::Request<clirpc::SetAeadKeyForPeerRequest>,
+    ) -> Result<tonic::Response<clirpc::SetAeadKeyForPeerResponse>, tonic::Status> {
         Err(Status::unimplemented("SetAeadKeyForPeer not implemented in prototype"))
     }
 
     async fn cli_chat(
         &self,
-        _request: Request<tonic::Streaming<clirpc::ChatAction>>,
-    ) -> Result<Response<Self::CliChatStream>, Status> {
+        _request: tonic::Request<tonic::Streaming<clirpc::ChatAction>>,
+    ) -> Result<tonic::Response<Self::CliChatStream>, tonic::Status> {
         let s = stream::empty();
         Ok(Response::new(Box::pin(s)))
     }
@@ -202,8 +202,8 @@ impl P2pService {
 impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
     async fn health_check(
         &self,
-        _req: Request<bbrpc::HealthCheckRequest>,
-    ) -> Result<Response<bbrpc::HealthCheckResponse>, Status> {
+        _req: tonic::Request<bbrpc::HealthCheckRequest>,
+    ) -> Result<tonic::Response<bbrpc::HealthCheckResponse>, tonic::Status> {
         // In Go, client_onion is inferred from the TLS client cert.
         // Here we leave it empty for now and return only server_onion.
         // TODO: When using rustls with client auth, plumb the peer cert via extensions
@@ -216,50 +216,50 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
 
     async fn peer_exchange(
         &self,
-        _request: Request<bbrpc::PeerExchangeRequest>,
-    ) -> Result<Response<bbrpc::PeerExchangeResponse>, Status> {
+        _request: tonic::Request<bbrpc::PeerExchangeRequest>,
+    ) -> Result<tonic::Response<bbrpc::PeerExchangeResponse>, tonic::Status> {
         Err(Status::unimplemented("PeerExchange not implemented in prototype"))
     }
 
     async fn get_content_revision(
         &self,
-        _request: Request<bbrpc::GetContentRevisionRequest>,
-    ) -> Result<Response<bbrpc::GetContentRevisionResponse>, Status> {
+        _request: tonic::Request<bbrpc::GetContentRevisionRequest>,
+    ) -> Result<tonic::Response<bbrpc::GetContentRevisionResponse>, tonic::Status> {
         Err(Status::unimplemented("GetContentRevision not implemented in prototype"))
     }
 
     async fn set_content_revision(
         &self,
-        _request: Request<bbrpc::SetContentRevisionRequest>,
-    ) -> Result<Response<bbrpc::SetContentRevisionResponse>, Status> {
+        _request: tonic::Request<bbrpc::SetContentRevisionRequest>,
+    ) -> Result<tonic::Response<bbrpc::SetContentRevisionResponse>, tonic::Status> {
         Err(Status::unimplemented("SetContentRevision not implemented in prototype"))
     }
 
     async fn download(
         &self,
-        _request: Request<bbrpc::DownloadRequest>,
-    ) -> Result<Response<bbrpc::DownloadResponse>, Status> {
+        _request: tonic::Request<bbrpc::DownloadRequest>,
+    ) -> Result<tonic::Response<bbrpc::DownloadResponse>, tonic::Status> {
         Err(Status::unimplemented("Download not implemented in prototype"))
     }
 
     async fn encrypted_download(
         &self,
-        _request: Request<bbrpc::EncryptedDownloadRequest>,
-    ) -> Result<Response<bbrpc::EncryptedDownloadResponse>, Status> {
+        _request: tonic::Request<bbrpc::EncryptedDownloadRequest>,
+    ) -> Result<tonic::Response<bbrpc::EncryptedDownloadResponse>, tonic::Status> {
         Err(Status::unimplemented("EncryptedDownload not implemented in prototype"))
     }
 
     async fn chat(
         &self,
-        _request: Request<bbrpc::ChatRequest>,
-    ) -> Result<Response<bbrpc::ChatResponse>, Status> {
+        _request: tonic::Request<bbrpc::ChatRequest>,
+    ) -> Result<tonic::Response<bbrpc::ChatResponse>, tonic::Status> {
         Err(Status::unimplemented("Chat not implemented in prototype"))
     }
 
     async fn encrypted_chat(
         &self,
-        _request: Request<bbrpc::EncryptedChatRequest>,
-    ) -> Result<Response<bbrpc::EncryptedChatResponse>, Status> {
+        _request: tonic::Request<bbrpc::EncryptedChatRequest>,
+    ) -> Result<tonic::Response<bbrpc::EncryptedChatResponse>, tonic::Status> {
         Err(Status::unimplemented("EncryptedChat not implemented in prototype"))
     }
 }
