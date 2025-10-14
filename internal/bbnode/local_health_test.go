@@ -19,7 +19,8 @@ func TestLocalHealthCheck_UptimeAndOnion(t *testing.T) {
 		defer cancel()
 
 		netw := netmock.NewMockNetwork()
-		n, err := New("password", netw)
+		dir := t.TempDir()
+		n, err := New("password", netw, dir)
 		require.NoError(t, err)
 
 		require.NoError(t, n.Start(ctx))

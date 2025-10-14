@@ -19,9 +19,11 @@ func TestHealthCheckWithMockNetwork(t *testing.T) {
 	mock := netmock.NewMockNetwork()
 	t.Cleanup(func() { _ = mock.Close() })
 
-	n1, err := New("pw1", mock)
+	dir1 := t.TempDir()
+	n1, err := New("pw1", mock, dir1)
 	require.NoError(t, err)
-	n2, err := New("pw2", mock)
+	dir2 := t.TempDir()
+	n2, err := New("pw2", mock, dir2)
 	require.NoError(t, err)
 
 	require.NoError(t, n1.Start(ctx))

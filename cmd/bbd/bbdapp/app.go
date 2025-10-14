@@ -238,9 +238,10 @@ func (s *cliService) Unlock(ctx context.Context, req *clirpc.UnlockRequest) (*cl
 	dataDir := s.dataDir
 	go func(pw string) {
 		torDir := filepath.Join(dataDir, "tor")
+		storageDir := filepath.Join(dataDir, "local")
 		log.Printf("bbd: unlocking and starting P2P node (tor dir: %s)", torDir)
 		netw := nettor.NewTorNetwork(torDir)
-		node, err := bbnode.New(pw, netw)
+		node, err := bbnode.New(pw, netw, storageDir)
 		if err != nil {
 			log.Printf("bbd: create node failed: %v", err)
 			return

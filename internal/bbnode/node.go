@@ -37,6 +37,8 @@ type Node struct {
 	evictStop chan struct{}
 	evictDone chan struct{}
 
+	store *localStore
+
 	startedAt time.Time
 }
 
@@ -45,8 +47,9 @@ type pooledConn struct {
 	lastUsed time.Time
 }
 
-// New creates a Node from a user-provided password/seed and a Network.
-func New(seed string, netw Network) (*Node, error) {
+// New creates a Node from a user-provided password/seed, storage directory,
+// and a Network implementation.
+func New(seed string, netw Network, storageDir string) (*Node, error) {
 	if netw == nil {
 		return nil, errors.New("network is nil")
 	}
@@ -59,12 +62,18 @@ func New(seed string, netw Network) (*Node, error) {
 	onionID := torutil.OnionServiceIDFromV3PublicKey(torutiled25519.PublicKey(pub))
 	addr := onionID + ".onion"
 
+	store, err := newLocalStore(storageDir, master)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Node{
 		net:        netw,
 		masterPriv: master,
 		priv:       priv,
 		addr:       addr,
 		conns:      make(map[string]*pooledConn),
+		store:      store,
 	}, nil
 }
 
