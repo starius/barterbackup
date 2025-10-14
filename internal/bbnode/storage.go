@@ -31,9 +31,8 @@ const (
 )
 
 var (
-	errFileNotFound    = errors.New("file not found")
-	errStorageStopped  = errors.New("storage stopped")
-	errStorageNotReady = errors.New("storage not started")
+	errFileNotFound   = errors.New("file not found")
+	errStorageStopped = errors.New("storage stopped")
 )
 
 type storageLoop struct {

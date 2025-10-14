@@ -103,8 +103,6 @@ func mapStorageError(err error) error {
 	switch {
 	case errors.Is(err, errFileNotFound):
 		return status.Error(codes.NotFound, "file not found")
-	case errors.Is(err, errStorageNotReady):
-		return status.Error(codes.FailedPrecondition, "storage not ready")
 	case errors.Is(err, errStorageStopped):
 		return status.Error(codes.Unavailable, "storage stopped")
 	default:
