@@ -37,7 +37,7 @@ type Node struct {
 	evictStop chan struct{}
 	evictDone chan struct{}
 
-	store *localStore
+	store *storageLoop
 
 	startedAt time.Time
 }
@@ -62,7 +62,7 @@ func New(seed string, netw Network, storageDir string) (*Node, error) {
 	onionID := torutil.OnionServiceIDFromV3PublicKey(torutiled25519.PublicKey(pub))
 	addr := onionID + ".onion"
 
-	store, err := newLocalStore(storageDir, master)
+	store, err := newStorageLoop(storageDir, master)
 	if err != nil {
 		return nil, err
 	}
@@ -82,9 +82,12 @@ func (n *Node) Start(ctx context.Context) error {
 	if n.stop != nil {
 		return errors.New("already started")
 	}
+	n.store.Start()
+
 	// Build server TLS config and gRPC server.
 	cert, err := selfSignedEd25519Cert(n.priv)
 	if err != nil {
+		n.store.Stop()
 		return err
 	}
 	srvTLS := &tls.Config{
@@ -103,6 +106,7 @@ func (n *Node) Start(ctx context.Context) error {
 
 	unregister, err := n.net.Register(ctx, n.addr, n.priv, grpcSrv)
 	if err != nil {
+		n.store.Stop()
 		return err
 	}
 	n.stop = unregister
@@ -118,6 +122,7 @@ func (n *Node) Start(ctx context.Context) error {
 // Stop unregisters the node from the network and stops serving.
 func (n *Node) Stop() error {
 	if n.stop == nil {
+		n.store.Stop()
 		return nil
 	}
 	n.stopEvictor()
@@ -131,6 +136,8 @@ func (n *Node) Stop() error {
 		delete(n.conns, a)
 	}
 	n.mu.Unlock()
+
+	n.store.Stop()
 
 	return err
 }

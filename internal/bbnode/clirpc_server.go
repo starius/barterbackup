@@ -43,8 +43,8 @@ func (n *Node) SetFile(ctx context.Context, req *clirpc.SetFileRequest) (*clirpc
 	if name == "" {
 		return nil, status.Error(codes.InvalidArgument, "file name is required")
 	}
-	if err := n.store.SetFile(name, data); err != nil {
-		return nil, status.Errorf(codes.Internal, "store file: %v", err)
+	if err := n.store.SetFile(ctx, name, data); err != nil {
+		return nil, mapStorageError(err)
 	}
 	return &clirpc.SetFileResponse{}, nil
 }
@@ -61,12 +61,9 @@ func (n *Node) GetFile(ctx context.Context, req *clirpc.GetFileRequest) (*clirpc
 	if req == nil || req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "file name is required")
 	}
-	data, err := n.store.GetFile(req.GetName())
+	data, err := n.store.GetFile(ctx, req.GetName())
 	if err != nil {
-		if errors.Is(err, errFileNotFound) {
-			return nil, status.Error(codes.NotFound, "file not found")
-		}
-		return nil, status.Errorf(codes.Internal, "load file: %v", err)
+		return nil, mapStorageError(err)
 	}
 	return &clirpc.GetFileResponse{
 		File: &clirpc.File{
@@ -85,6 +82,32 @@ func (n *Node) ListFiles(ctx context.Context, _ *clirpc.ListFilesRequest) (*clir
 		}
 		return nil, ctx.Err()
 	}
-	names := n.store.ListFiles()
+	names, err := n.store.ListFiles(ctx)
+	if err != nil {
+		return nil, mapStorageError(err)
+	}
 	return &clirpc.ListFilesResponse{Name: names}, nil
+}
+
+func mapStorageError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		st := status.FromContextError(err)
+		if st != nil {
+			return st.Err()
+		}
+		return err
+	}
+	switch {
+	case errors.Is(err, errFileNotFound):
+		return status.Error(codes.NotFound, "file not found")
+	case errors.Is(err, errStorageNotReady):
+		return status.Error(codes.FailedPrecondition, "storage not ready")
+	case errors.Is(err, errStorageStopped):
+		return status.Error(codes.Unavailable, "storage stopped")
+	default:
+		return status.Errorf(codes.Internal, "storage error: %v", err)
+	}
 }

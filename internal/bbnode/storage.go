@@ -2,6 +2,7 @@ package bbnode
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/starius/barterbackup/internal/keys"
@@ -30,12 +32,197 @@ const (
 )
 
 var (
-	errFileNotFound = errors.New("file not found")
+	errFileNotFound    = errors.New("file not found")
+	errStorageStopped  = errors.New("storage stopped")
+	errStorageNotReady = errors.New("storage not started")
 )
 
-type localStore struct {
-	mu sync.RWMutex
+type storageRequestKind int
 
+const (
+	storageRequestSet storageRequestKind = iota
+	storageRequestGet
+	storageRequestList
+)
+
+type storageRequest struct {
+	kind   storageRequestKind
+	name   string
+	data   []byte
+	resp   chan<- storageResponse
+	cancel <-chan struct{}
+}
+
+type storageResponse struct {
+	data  []byte
+	names []string
+	err   error
+}
+
+type storageLoop struct {
+	reqCh  chan storageRequest
+	stopCh chan struct{}
+	doneCh chan struct{}
+
+	started atomic.Bool
+
+	startOnce sync.Once
+	stopOnce  sync.Once
+
+	state *localStore
+}
+
+func newStorageLoop(dir string, master []byte) (*storageLoop, error) {
+	state, err := newLocalStore(dir, master)
+	if err != nil {
+		return nil, err
+	}
+	return &storageLoop{
+		reqCh:  make(chan storageRequest),
+		stopCh: make(chan struct{}),
+		doneCh: make(chan struct{}),
+		state:  state,
+	}, nil
+}
+
+func (s *storageLoop) Start() {
+	s.startOnce.Do(func() {
+		s.started.Store(true)
+		go s.run()
+	})
+}
+
+func (s *storageLoop) Stop() {
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+		if s.started.Load() {
+			<-s.doneCh
+		} else {
+			close(s.doneCh)
+		}
+	})
+}
+
+func (s *storageLoop) run() {
+	defer close(s.doneCh)
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case req := <-s.reqCh:
+			s.handleRequest(req)
+		}
+	}
+}
+
+func (s *storageLoop) handleRequest(req storageRequest) {
+	var resp storageResponse
+	switch req.kind {
+	case storageRequestSet:
+		resp.err = s.state.setFile(req.name, req.data)
+	case storageRequestGet:
+		resp.data, resp.err = s.state.getFile(req.name)
+	case storageRequestList:
+		resp.names = s.state.listFiles()
+	default:
+		resp.err = errors.New("unknown storage request")
+	}
+	s.respond(req, resp)
+}
+
+func (s *storageLoop) respond(req storageRequest, resp storageResponse) {
+	if req.resp == nil {
+		return
+	}
+	select {
+	case <-req.cancel:
+		return
+	case <-s.stopCh:
+		return
+	case req.resp <- resp:
+	}
+}
+
+func (s *storageLoop) enqueue(ctx context.Context, req storageRequest) error {
+	if !s.started.Load() {
+		return errStorageNotReady
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.doneCh:
+		return errStorageStopped
+	case s.reqCh <- req:
+		return nil
+	}
+}
+
+func (s *storageLoop) await(ctx context.Context, respCh <-chan storageResponse) (storageResponse, error) {
+	select {
+	case <-ctx.Done():
+		return storageResponse{}, ctx.Err()
+	case <-s.doneCh:
+		return storageResponse{}, errStorageStopped
+	case resp := <-respCh:
+		return resp, nil
+	}
+}
+
+func (s *storageLoop) SetFile(ctx context.Context, name string, data []byte) error {
+	respCh := make(chan storageResponse)
+	req := storageRequest{
+		kind:   storageRequestSet,
+		name:   name,
+		data:   append([]byte(nil), data...),
+		resp:   respCh,
+		cancel: ctx.Done(),
+	}
+	if err := s.enqueue(ctx, req); err != nil {
+		return err
+	}
+	resp, err := s.await(ctx, respCh)
+	if err != nil {
+		return err
+	}
+	return resp.err
+}
+
+func (s *storageLoop) GetFile(ctx context.Context, name string) ([]byte, error) {
+	respCh := make(chan storageResponse)
+	req := storageRequest{
+		kind:   storageRequestGet,
+		name:   name,
+		resp:   respCh,
+		cancel: ctx.Done(),
+	}
+	if err := s.enqueue(ctx, req); err != nil {
+		return nil, err
+	}
+	resp, err := s.await(ctx, respCh)
+	if err != nil {
+		return nil, err
+	}
+	return resp.data, resp.err
+}
+
+func (s *storageLoop) ListFiles(ctx context.Context) ([]string, error) {
+	respCh := make(chan storageResponse)
+	req := storageRequest{
+		kind:   storageRequestList,
+		resp:   respCh,
+		cancel: ctx.Done(),
+	}
+	if err := s.enqueue(ctx, req); err != nil {
+		return nil, err
+	}
+	resp, err := s.await(ctx, respCh)
+	if err != nil {
+		return nil, err
+	}
+	return resp.names, resp.err
+}
+
+type localStore struct {
 	dir      string
 	master   []byte
 	content  []byte
@@ -189,25 +376,18 @@ func (s *localStore) decryptContent(blob []byte) (*storedpb.Metadata, map[string
 	return &metadata, files, nil
 }
 
-func (s *localStore) SetFile(name string, data []byte) error {
+func (s *localStore) setFile(name string, data []byte) error {
 	if name == "" {
 		return errors.New("file name is empty")
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.files == nil {
 		s.files = make(map[string][]byte)
 	}
 	s.files[name] = append([]byte(nil), data...)
-
-	return s.persistLocked()
+	return s.persist()
 }
 
-func (s *localStore) GetFile(name string) ([]byte, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *localStore) getFile(name string) ([]byte, error) {
 	data, ok := s.files[name]
 	if !ok {
 		return nil, errFileNotFound
@@ -215,9 +395,7 @@ func (s *localStore) GetFile(name string) ([]byte, error) {
 	return append([]byte(nil), data...), nil
 }
 
-func (s *localStore) ListFiles() []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *localStore) listFiles() []string {
 	names := make([]string, 0, len(s.files))
 	for name := range s.files {
 		names = append(names, name)
@@ -226,7 +404,7 @@ func (s *localStore) ListFiles() []string {
 	return names
 }
 
-func (s *localStore) persistLocked() error {
+func (s *localStore) persist() error {
 	salt := make([]byte, saltSize)
 	if _, err := rand.Read(salt); err != nil {
 		return fmt.Errorf("salt: %w", err)
@@ -272,9 +450,11 @@ func (s *localStore) persistLocked() error {
 	}
 	metadata.MostRecentContent = contentRev
 
-	var nonce []byte
-	var cipherMeta []byte
-	var metaLen int
+	var (
+		nonce      []byte
+		cipherMeta []byte
+		metaLen    int
+	)
 	for i := 0; i < 5; i++ {
 		nonce, cipherMeta, metaLen, err = encryptMetadata(metadata, metaKey)
 		if err != nil {
