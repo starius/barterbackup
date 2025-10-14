@@ -39,11 +39,9 @@ type storageLoop struct {
 	setCh  chan setRequest
 	getCh  chan getRequest
 	listCh chan listRequest
-	stopCh chan struct{}
 	doneCh chan struct{}
 
 	startOnce sync.Once
-	stopOnce  sync.Once
 
 	state *localStore
 }
@@ -57,34 +55,30 @@ func newStorageLoop(dir string, master []byte) (*storageLoop, error) {
 		setCh:  make(chan setRequest),
 		getCh:  make(chan getRequest),
 		listCh: make(chan listRequest),
-		stopCh: make(chan struct{}),
 		doneCh: make(chan struct{}),
 		state:  state,
 	}, nil
 }
 
-// Start launches the storage event loop goroutine. It is safe to call more
-// than once; subsequent calls are no-ops.
-func (s *storageLoop) Start() {
+// Start launches the storage event loop goroutine with the provided context.
+// It is safe to call more than once; subsequent calls are no-ops.
+func (s *storageLoop) Start(ctx context.Context) {
 	s.startOnce.Do(func() {
-		go s.run()
+		go s.run(ctx)
 	})
 }
 
-// Stop stops the storage event loop and waits for it to finish. Call Stop
-// only after Start has run.
-func (s *storageLoop) Stop() {
-	s.stopOnce.Do(func() {
-		close(s.stopCh)
-		<-s.doneCh
-	})
+// WaitForShutdown waits for the storage event loop to exit. Call this after
+// cancelling the context passed to Start.
+func (s *storageLoop) WaitForShutdown() {
+	<-s.doneCh
 }
 
-func (s *storageLoop) run() {
+func (s *storageLoop) run(ctx context.Context) {
 	defer close(s.doneCh)
 	for {
 		select {
-		case <-s.stopCh:
+		case <-ctx.Done():
 			return
 		case req := <-s.setCh:
 			s.handleSet(req)
@@ -152,7 +146,7 @@ func (s *storageLoop) respondSet(req setRequest, resp setResponse) {
 	select {
 	case <-req.cancel:
 		return
-	case <-s.stopCh:
+	case <-s.doneCh:
 		return
 	case req.resp <- resp:
 	}
@@ -165,7 +159,7 @@ func (s *storageLoop) respondGet(req getRequest, resp getResponse) {
 	select {
 	case <-req.cancel:
 		return
-	case <-s.stopCh:
+	case <-s.doneCh:
 		return
 	case req.resp <- resp:
 	}
@@ -178,7 +172,7 @@ func (s *storageLoop) respondList(req listRequest, resp listResponse) {
 	select {
 	case <-req.cancel:
 		return
-	case <-s.stopCh:
+	case <-s.doneCh:
 		return
 	case req.resp <- resp:
 	}

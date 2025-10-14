@@ -37,7 +37,8 @@ type Node struct {
 	evictStop chan struct{}
 	evictDone chan struct{}
 
-	store *storageLoop
+	store       *storageLoop
+	storeCancel context.CancelFunc
 
 	startedAt time.Time
 }
@@ -82,12 +83,16 @@ func (n *Node) Start(ctx context.Context) error {
 	if n.stop != nil {
 		return errors.New("already started")
 	}
-	n.store.Start()
+	storageCtx, storageCancel := context.WithCancel(ctx)
+	n.store.Start(storageCtx)
+	n.storeCancel = storageCancel
 
 	// Build server TLS config and gRPC server.
 	cert, err := selfSignedEd25519Cert(n.priv)
 	if err != nil {
-		n.store.Stop()
+		storageCancel()
+		n.store.WaitForShutdown()
+		n.storeCancel = nil
 		return err
 	}
 	srvTLS := &tls.Config{
@@ -106,7 +111,9 @@ func (n *Node) Start(ctx context.Context) error {
 
 	unregister, err := n.net.Register(ctx, n.addr, n.priv, grpcSrv)
 	if err != nil {
-		n.store.Stop()
+		storageCancel()
+		n.store.WaitForShutdown()
+		n.storeCancel = nil
 		return err
 	}
 	n.stop = unregister
@@ -122,7 +129,7 @@ func (n *Node) Start(ctx context.Context) error {
 // Stop unregisters the node from the network and stops serving.
 func (n *Node) Stop() error {
 	if n.stop == nil {
-		n.store.Stop()
+		n.cancelStorage()
 		return nil
 	}
 	n.stopEvictor()
@@ -137,9 +144,17 @@ func (n *Node) Stop() error {
 	}
 	n.mu.Unlock()
 
-	n.store.Stop()
+	n.cancelStorage()
 
 	return err
+}
+
+func (n *Node) cancelStorage() {
+	if n.storeCancel != nil {
+		n.storeCancel()
+		n.store.WaitForShutdown()
+		n.storeCancel = nil
+	}
 }
 
 // Address returns the onion address of this node.
