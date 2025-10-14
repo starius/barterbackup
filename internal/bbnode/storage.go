@@ -16,7 +16,6 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/starius/barterbackup/internal/keys"
@@ -44,8 +43,6 @@ type storageLoop struct {
 	stopCh chan struct{}
 	doneCh chan struct{}
 
-	started atomic.Bool
-
 	startOnce sync.Once
 	stopOnce  sync.Once
 
@@ -67,21 +64,20 @@ func newStorageLoop(dir string, master []byte) (*storageLoop, error) {
 	}, nil
 }
 
+// Start launches the storage event loop goroutine. It is safe to call more
+// than once; subsequent calls are no-ops.
 func (s *storageLoop) Start() {
 	s.startOnce.Do(func() {
-		s.started.Store(true)
 		go s.run()
 	})
 }
 
+// Stop stops the storage event loop and waits for it to finish. Call Stop
+// only after Start has run.
 func (s *storageLoop) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
-		if s.started.Load() {
-			<-s.doneCh
-		} else {
-			close(s.doneCh)
-		}
+		<-s.doneCh
 	})
 }
 
@@ -190,9 +186,6 @@ func (s *storageLoop) respondList(req listRequest, resp listResponse) {
 }
 
 func (s *storageLoop) enqueueSet(ctx context.Context, req setRequest) error {
-	if !s.started.Load() {
-		return errStorageNotReady
-	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -204,9 +197,6 @@ func (s *storageLoop) enqueueSet(ctx context.Context, req setRequest) error {
 }
 
 func (s *storageLoop) enqueueGet(ctx context.Context, req getRequest) error {
-	if !s.started.Load() {
-		return errStorageNotReady
-	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -218,9 +208,6 @@ func (s *storageLoop) enqueueGet(ctx context.Context, req getRequest) error {
 }
 
 func (s *storageLoop) enqueueList(ctx context.Context, req listRequest) error {
-	if !s.started.Load() {
-		return errStorageNotReady
-	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
