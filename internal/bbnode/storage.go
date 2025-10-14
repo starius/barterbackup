@@ -37,30 +37,10 @@ var (
 	errStorageNotReady = errors.New("storage not started")
 )
 
-type storageRequestKind int
-
-const (
-	storageRequestSet storageRequestKind = iota
-	storageRequestGet
-	storageRequestList
-)
-
-type storageRequest struct {
-	kind   storageRequestKind
-	name   string
-	data   []byte
-	resp   chan<- storageResponse
-	cancel <-chan struct{}
-}
-
-type storageResponse struct {
-	data  []byte
-	names []string
-	err   error
-}
-
 type storageLoop struct {
-	reqCh  chan storageRequest
+	setCh  chan setRequest
+	getCh  chan getRequest
+	listCh chan listRequest
 	stopCh chan struct{}
 	doneCh chan struct{}
 
@@ -78,7 +58,9 @@ func newStorageLoop(dir string, master []byte) (*storageLoop, error) {
 		return nil, err
 	}
 	return &storageLoop{
-		reqCh:  make(chan storageRequest),
+		setCh:  make(chan setRequest),
+		getCh:  make(chan getRequest),
+		listCh: make(chan listRequest),
 		stopCh: make(chan struct{}),
 		doneCh: make(chan struct{}),
 		state:  state,
@@ -109,28 +91,66 @@ func (s *storageLoop) run() {
 		select {
 		case <-s.stopCh:
 			return
-		case req := <-s.reqCh:
-			s.handleRequest(req)
+		case req := <-s.setCh:
+			s.handleSet(req)
+		case req := <-s.getCh:
+			s.handleGet(req)
+		case req := <-s.listCh:
+			s.handleList(req)
 		}
 	}
 }
 
-func (s *storageLoop) handleRequest(req storageRequest) {
-	var resp storageResponse
-	switch req.kind {
-	case storageRequestSet:
-		resp.err = s.state.setFile(req.name, req.data)
-	case storageRequestGet:
-		resp.data, resp.err = s.state.getFile(req.name)
-	case storageRequestList:
-		resp.names = s.state.listFiles()
-	default:
-		resp.err = errors.New("unknown storage request")
-	}
-	s.respond(req, resp)
+type setRequest struct {
+	name   string
+	data   []byte
+	resp   chan<- setResponse
+	cancel <-chan struct{}
 }
 
-func (s *storageLoop) respond(req storageRequest, resp storageResponse) {
+type setResponse struct {
+	err error
+}
+
+type getRequest struct {
+	name   string
+	resp   chan<- getResponse
+	cancel <-chan struct{}
+}
+
+type getResponse struct {
+	data []byte
+	err  error
+}
+
+type listRequest struct {
+	resp   chan<- listResponse
+	cancel <-chan struct{}
+}
+
+type listResponse struct {
+	names []string
+	err   error
+}
+
+func (s *storageLoop) handleSet(req setRequest) {
+	resp := setResponse{err: s.state.setFile(req.name, req.data)}
+	s.respondSet(req, resp)
+}
+
+func (s *storageLoop) handleGet(req getRequest) {
+	data, err := s.state.getFile(req.name)
+	resp := getResponse{data: data, err: err}
+	s.respondGet(req, resp)
+}
+
+func (s *storageLoop) handleList(req listRequest) {
+	names := s.state.listFiles()
+	resp := listResponse{names: names}
+	s.respondList(req, resp)
+}
+
+func (s *storageLoop) respondSet(req setRequest, resp setResponse) {
 	if req.resp == nil {
 		return
 	}
@@ -143,7 +163,33 @@ func (s *storageLoop) respond(req storageRequest, resp storageResponse) {
 	}
 }
 
-func (s *storageLoop) enqueue(ctx context.Context, req storageRequest) error {
+func (s *storageLoop) respondGet(req getRequest, resp getResponse) {
+	if req.resp == nil {
+		return
+	}
+	select {
+	case <-req.cancel:
+		return
+	case <-s.stopCh:
+		return
+	case req.resp <- resp:
+	}
+}
+
+func (s *storageLoop) respondList(req listRequest, resp listResponse) {
+	if req.resp == nil {
+		return
+	}
+	select {
+	case <-req.cancel:
+		return
+	case <-s.stopCh:
+		return
+	case req.resp <- resp:
+	}
+}
+
+func (s *storageLoop) enqueueSet(ctx context.Context, req setRequest) error {
 	if !s.started.Load() {
 		return errStorageNotReady
 	}
@@ -152,35 +198,87 @@ func (s *storageLoop) enqueue(ctx context.Context, req storageRequest) error {
 		return ctx.Err()
 	case <-s.doneCh:
 		return errStorageStopped
-	case s.reqCh <- req:
+	case s.setCh <- req:
 		return nil
 	}
 }
 
-func (s *storageLoop) await(ctx context.Context, respCh <-chan storageResponse) (storageResponse, error) {
+func (s *storageLoop) enqueueGet(ctx context.Context, req getRequest) error {
+	if !s.started.Load() {
+		return errStorageNotReady
+	}
 	select {
 	case <-ctx.Done():
-		return storageResponse{}, ctx.Err()
+		return ctx.Err()
 	case <-s.doneCh:
-		return storageResponse{}, errStorageStopped
+		return errStorageStopped
+	case s.getCh <- req:
+		return nil
+	}
+}
+
+func (s *storageLoop) enqueueList(ctx context.Context, req listRequest) error {
+	if !s.started.Load() {
+		return errStorageNotReady
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.doneCh:
+		return errStorageStopped
+	case s.listCh <- req:
+		return nil
+	}
+}
+
+func (s *storageLoop) awaitSet(ctx context.Context, respCh <-chan setResponse) (setResponse, error) {
+	var zero setResponse
+	select {
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	case <-s.doneCh:
+		return zero, errStorageStopped
+	case resp := <-respCh:
+		return resp, nil
+	}
+}
+
+func (s *storageLoop) awaitGet(ctx context.Context, respCh <-chan getResponse) (getResponse, error) {
+	var zero getResponse
+	select {
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	case <-s.doneCh:
+		return zero, errStorageStopped
+	case resp := <-respCh:
+		return resp, nil
+	}
+}
+
+func (s *storageLoop) awaitList(ctx context.Context, respCh <-chan listResponse) (listResponse, error) {
+	var zero listResponse
+	select {
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	case <-s.doneCh:
+		return zero, errStorageStopped
 	case resp := <-respCh:
 		return resp, nil
 	}
 }
 
 func (s *storageLoop) SetFile(ctx context.Context, name string, data []byte) error {
-	respCh := make(chan storageResponse)
-	req := storageRequest{
-		kind:   storageRequestSet,
+	respCh := make(chan setResponse)
+	req := setRequest{
 		name:   name,
 		data:   append([]byte(nil), data...),
 		resp:   respCh,
 		cancel: ctx.Done(),
 	}
-	if err := s.enqueue(ctx, req); err != nil {
+	if err := s.enqueueSet(ctx, req); err != nil {
 		return err
 	}
-	resp, err := s.await(ctx, respCh)
+	resp, err := s.awaitSet(ctx, respCh)
 	if err != nil {
 		return err
 	}
@@ -188,17 +286,16 @@ func (s *storageLoop) SetFile(ctx context.Context, name string, data []byte) err
 }
 
 func (s *storageLoop) GetFile(ctx context.Context, name string) ([]byte, error) {
-	respCh := make(chan storageResponse)
-	req := storageRequest{
-		kind:   storageRequestGet,
+	respCh := make(chan getResponse)
+	req := getRequest{
 		name:   name,
 		resp:   respCh,
 		cancel: ctx.Done(),
 	}
-	if err := s.enqueue(ctx, req); err != nil {
+	if err := s.enqueueGet(ctx, req); err != nil {
 		return nil, err
 	}
-	resp, err := s.await(ctx, respCh)
+	resp, err := s.awaitGet(ctx, respCh)
 	if err != nil {
 		return nil, err
 	}
@@ -206,16 +303,15 @@ func (s *storageLoop) GetFile(ctx context.Context, name string) ([]byte, error) 
 }
 
 func (s *storageLoop) ListFiles(ctx context.Context) ([]string, error) {
-	respCh := make(chan storageResponse)
-	req := storageRequest{
-		kind:   storageRequestList,
+	respCh := make(chan listResponse)
+	req := listRequest{
 		resp:   respCh,
 		cancel: ctx.Done(),
 	}
-	if err := s.enqueue(ctx, req); err != nil {
+	if err := s.enqueueList(ctx, req); err != nil {
 		return nil, err
 	}
-	resp, err := s.await(ctx, respCh)
+	resp, err := s.awaitList(ctx, respCh)
 	if err != nil {
 		return nil, err
 	}
