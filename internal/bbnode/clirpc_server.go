@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/starius/barterbackup/clirpc"
+	"github.com/starius/barterbackup/internal/bbnode/storage"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -101,9 +102,9 @@ func mapStorageError(err error) error {
 		return err
 	}
 	switch {
-	case errors.Is(err, errFileNotFound):
+	case errors.Is(err, storage.ErrFileNotFound):
 		return status.Error(codes.NotFound, "file not found")
-	case errors.Is(err, errStorageStopped):
+	case errors.Is(err, storage.ErrStopped):
 		return status.Error(codes.Unavailable, "storage stopped")
 	default:
 		return status.Errorf(codes.Internal, "storage error: %v", err)
