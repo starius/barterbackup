@@ -2,9 +2,13 @@ package storage
 
 import (
 	"context"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -88,4 +92,68 @@ func TestStorageWrongKeyFails(t *testing.T) {
 
 	_, err = New(dir, []byte("wrong-key"))
 	require.Error(t, err)
+}
+
+func TestStorageConcurrentAccess(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dir := t.TempDir()
+	master := []byte("concurrent-master")
+
+	store, err := New(dir, master)
+	require.NoError(t, err)
+	store.Start(ctx)
+	defer func() {
+		cancel()
+		store.WaitForShutdown()
+	}()
+
+	randSrc := rand.New(rand.NewSource(time.Now().UnixNano()))
+	var mu sync.Mutex
+	sleepRand := func() {
+		mu.Lock()
+		d := time.Duration(randSrc.Int63n(int64(100 * time.Millisecond)))
+		mu.Unlock()
+		time.Sleep(d)
+	}
+
+	const workers = 1000
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			name := "file-" + strconv.Itoa(i)
+			content := []byte(name + "-payload")
+
+			require.NoError(t, store.SetFile(ctx, name, content))
+			sleepRand()
+
+			names, err := store.ListFiles(ctx)
+			require.NoError(t, err)
+			require.Contains(t, names, name)
+
+			data, err := store.GetFile(ctx, name)
+			require.NoError(t, err)
+			require.Equal(t, content, data)
+
+			sleepRand()
+
+			require.NoError(t, store.DeleteFile(ctx, name))
+
+			names, err = store.ListFiles(ctx)
+			require.NoError(t, err)
+			require.NotContains(t, names, name)
+		}()
+	}
+
+	wg.Wait()
+
+	finalNames, err := store.ListFiles(ctx)
+	require.NoError(t, err)
+	require.Empty(t, finalNames)
 }
