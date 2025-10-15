@@ -13,7 +13,7 @@ import (
 	torutiled25519 "github.com/cretz/bine/torutil/ed25519"
 	"github.com/starius/barterbackup/bbrpc"
 	"github.com/starius/barterbackup/clirpc"
-	"github.com/starius/barterbackup/internal/bbnode/storage"
+	"github.com/starius/barterbackup/internal/bbnode/userstorage"
 	"github.com/starius/barterbackup/internal/keys"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -38,7 +38,7 @@ type Node struct {
 	evictStop chan struct{}
 	evictDone chan struct{}
 
-	store       *storage.Storage
+	store       *userstorage.Storage
 	storeCancel context.CancelFunc
 
 	startedAt time.Time
@@ -64,7 +64,7 @@ func New(seed string, netw Network, storageDir string) (*Node, error) {
 	onionID := torutil.OnionServiceIDFromV3PublicKey(torutiled25519.PublicKey(pub))
 	addr := onionID + ".onion"
 
-	store, err := storage.New(storageDir, master)
+	store, err := userstorage.New(storageDir, master)
 	if err != nil {
 		return nil, err
 	}
