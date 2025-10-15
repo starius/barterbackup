@@ -37,6 +37,9 @@ service BarterBackupClient {
     // encrypted). It stores other peers' content in exchange.
     rpc SetFile(SetFileRequest) returns (SetFileResponse);
 
+    // DeleteFile removes a file by name from the current content set.
+    rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
+
     // GetFile returns the file data by its name from the current set of
     // files that form the most recent content blob.
     rpc GetFile(GetFileRequest) returns (GetFileResponse);
@@ -159,6 +162,13 @@ message SetFileRequest {
 }
 
 message SetFileResponse {}
+
+message DeleteFileRequest {
+    // name is the name of the file to delete from the current content set.
+    string name = 1;
+}
+
+message DeleteFileResponse {}
 
 message GetFileRequest {
     // name is the name of the file to fetch from the current content.

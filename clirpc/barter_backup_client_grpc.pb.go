@@ -24,6 +24,7 @@ const (
 	BarterBackupClient_ConnectPeer_FullMethodName       = "/clirpc.BarterBackupClient/ConnectPeer"
 	BarterBackupClient_ConnectedPeers_FullMethodName    = "/clirpc.BarterBackupClient/ConnectedPeers"
 	BarterBackupClient_SetFile_FullMethodName           = "/clirpc.BarterBackupClient/SetFile"
+	BarterBackupClient_DeleteFile_FullMethodName        = "/clirpc.BarterBackupClient/DeleteFile"
 	BarterBackupClient_GetFile_FullMethodName           = "/clirpc.BarterBackupClient/GetFile"
 	BarterBackupClient_ListFiles_FullMethodName         = "/clirpc.BarterBackupClient/ListFiles"
 	BarterBackupClient_SetStorageConfig_FullMethodName  = "/clirpc.BarterBackupClient/SetStorageConfig"
@@ -68,6 +69,8 @@ type BarterBackupClientClient interface {
 	// locally, and uploads the resulting content to other peers (also
 	// encrypted). It stores other peers' content in exchange.
 	SetFile(ctx context.Context, in *SetFileRequest, opts ...grpc.CallOption) (*SetFileResponse, error)
+	// DeleteFile removes a file by name from the current content set.
+	DeleteFile(ctx context.Context, in *DeleteFileRequest, opts ...grpc.CallOption) (*DeleteFileResponse, error)
 	// GetFile returns the file data by its name from the current set of
 	// files that form the most recent content blob.
 	GetFile(ctx context.Context, in *GetFileRequest, opts ...grpc.CallOption) (*GetFileResponse, error)
@@ -165,6 +168,16 @@ func (c *barterBackupClientClient) SetFile(ctx context.Context, in *SetFileReque
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetFileResponse)
 	err := c.cc.Invoke(ctx, BarterBackupClient_SetFile_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *barterBackupClientClient) DeleteFile(ctx context.Context, in *DeleteFileRequest, opts ...grpc.CallOption) (*DeleteFileResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteFileResponse)
+	err := c.cc.Invoke(ctx, BarterBackupClient_DeleteFile_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -333,6 +346,8 @@ type BarterBackupClientServer interface {
 	// locally, and uploads the resulting content to other peers (also
 	// encrypted). It stores other peers' content in exchange.
 	SetFile(context.Context, *SetFileRequest) (*SetFileResponse, error)
+	// DeleteFile removes a file by name from the current content set.
+	DeleteFile(context.Context, *DeleteFileRequest) (*DeleteFileResponse, error)
 	// GetFile returns the file data by its name from the current set of
 	// files that form the most recent content blob.
 	GetFile(context.Context, *GetFileRequest) (*GetFileResponse, error)
@@ -400,6 +415,9 @@ func (UnimplementedBarterBackupClientServer) ConnectedPeers(context.Context, *Co
 }
 func (UnimplementedBarterBackupClientServer) SetFile(context.Context, *SetFileRequest) (*SetFileResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SetFile not implemented")
+}
+func (UnimplementedBarterBackupClientServer) DeleteFile(context.Context, *DeleteFileRequest) (*DeleteFileResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteFile not implemented")
 }
 func (UnimplementedBarterBackupClientServer) GetFile(context.Context, *GetFileRequest) (*GetFileResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetFile not implemented")
@@ -538,6 +556,24 @@ func _BarterBackupClient_SetFile_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(BarterBackupClientServer).SetFile(ctx, req.(*SetFileRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _BarterBackupClient_DeleteFile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteFileRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BarterBackupClientServer).DeleteFile(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BarterBackupClient_DeleteFile_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BarterBackupClientServer).DeleteFile(ctx, req.(*DeleteFileRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -716,6 +752,10 @@ var BarterBackupClient_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetFile",
 			Handler:    _BarterBackupClient_SetFile_Handler,
+		},
+		{
+			MethodName: "DeleteFile",
+			Handler:    _BarterBackupClient_DeleteFile_Handler,
 		},
 		{
 			MethodName: "GetFile",

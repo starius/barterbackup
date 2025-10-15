@@ -14,10 +14,11 @@ var (
 
 // Storage manages encrypted local storage via an event-driven goroutine.
 type Storage struct {
-	setCh  chan setRequest
-	getCh  chan getRequest
-	listCh chan listRequest
-	doneCh chan struct{}
+	setCh    chan setRequest
+	getCh    chan getRequest
+	deleteCh chan deleteRequest
+	listCh   chan listRequest
+	doneCh   chan struct{}
 
 	startOnce sync.Once
 
@@ -30,11 +31,12 @@ func New(storageDir string, master []byte) (*Storage, error) {
 		return nil, err
 	}
 	return &Storage{
-		setCh:  make(chan setRequest),
-		getCh:  make(chan getRequest),
-		listCh: make(chan listRequest),
-		doneCh: make(chan struct{}),
-		state:  state,
+		setCh:    make(chan setRequest),
+		getCh:    make(chan getRequest),
+		deleteCh: make(chan deleteRequest),
+		listCh:   make(chan listRequest),
+		doneCh:   make(chan struct{}),
+		state:    state,
 	}, nil
 }
 
@@ -58,6 +60,8 @@ func (l *Storage) run(ctx context.Context) {
 			l.handleSet(req)
 		case req := <-l.getCh:
 			l.handleGet(req)
+		case req := <-l.deleteCh:
+			l.handleDelete(req)
 		case req := <-l.listCh:
 			l.handleList(req)
 		}
@@ -86,6 +90,16 @@ type getResponse struct {
 	err  error
 }
 
+type deleteRequest struct {
+	name   string
+	resp   chan<- deleteResponse
+	cancel <-chan struct{}
+}
+
+type deleteResponse struct {
+	err error
+}
+
 type listRequest struct {
 	resp   chan<- listResponse
 	cancel <-chan struct{}
@@ -104,6 +118,11 @@ func (s *Storage) handleSet(req setRequest) {
 func (s *Storage) handleGet(req getRequest) {
 	data, err := s.state.getFile(req.name)
 	s.respondGet(req, getResponse{data: data, err: err})
+}
+
+func (s *Storage) handleDelete(req deleteRequest) {
+	err := s.state.deleteFile(req.name)
+	s.respondDelete(req, deleteResponse{err: err})
 }
 
 func (s *Storage) handleList(req listRequest) {
@@ -125,6 +144,19 @@ func (s *Storage) respondSet(req setRequest, resp setResponse) {
 }
 
 func (s *Storage) respondGet(req getRequest, resp getResponse) {
+	if req.resp == nil {
+		return
+	}
+	select {
+	case <-req.cancel:
+		return
+	case <-s.doneCh:
+		return
+	case req.resp <- resp:
+	}
+}
+
+func (s *Storage) respondDelete(req deleteRequest, resp deleteResponse) {
 	if req.resp == nil {
 		return
 	}
@@ -172,6 +204,17 @@ func (s *Storage) enqueueGet(ctx context.Context, req getRequest) error {
 	}
 }
 
+func (s *Storage) enqueueDelete(ctx context.Context, req deleteRequest) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.doneCh:
+		return ErrStopped
+	case s.deleteCh <- req:
+		return nil
+	}
+}
+
 func (s *Storage) enqueueList(ctx context.Context, req listRequest) error {
 	select {
 	case <-ctx.Done():
@@ -197,6 +240,18 @@ func (s *Storage) awaitSet(ctx context.Context, respCh <-chan setResponse) (setR
 
 func (s *Storage) awaitGet(ctx context.Context, respCh <-chan getResponse) (getResponse, error) {
 	var zero getResponse
+	select {
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	case <-s.doneCh:
+		return zero, ErrStopped
+	case resp := <-respCh:
+		return resp, nil
+	}
+}
+
+func (s *Storage) awaitDelete(ctx context.Context, respCh <-chan deleteResponse) (deleteResponse, error) {
+	var zero deleteResponse
 	select {
 	case <-ctx.Done():
 		return zero, ctx.Err()
@@ -254,6 +309,24 @@ func (s *Storage) GetFile(ctx context.Context, name string) ([]byte, error) {
 		return nil, err
 	}
 	return resp.data, resp.err
+}
+
+// DeleteFile removes a file from the current content set.
+func (s *Storage) DeleteFile(ctx context.Context, name string) error {
+	respCh := make(chan deleteResponse)
+	req := deleteRequest{
+		name:   name,
+		resp:   respCh,
+		cancel: ctx.Done(),
+	}
+	if err := s.enqueueDelete(ctx, req); err != nil {
+		return err
+	}
+	resp, err := s.awaitDelete(ctx, respCh)
+	if err != nil {
+		return err
+	}
+	return resp.err
 }
 
 // ListFiles returns the list of file names stored in the current content blob.

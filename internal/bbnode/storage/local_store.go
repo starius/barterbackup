@@ -201,6 +201,17 @@ func (s *localStore) getFile(name string) ([]byte, error) {
 	return append([]byte(nil), data...), nil
 }
 
+func (s *localStore) deleteFile(name string) error {
+	if s.files == nil {
+		return ErrFileNotFound
+	}
+	if _, ok := s.files[name]; !ok {
+		return ErrFileNotFound
+	}
+	delete(s.files, name)
+	return s.persist()
+}
+
 func (s *localStore) listFiles() []string {
 	names := make([]string, 0, len(s.files))
 	for name := range s.files {

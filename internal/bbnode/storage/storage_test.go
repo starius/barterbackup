@@ -33,6 +33,15 @@ func TestStoragePersistenceAndEncryption(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("hello world"), data)
 
+	require.NoError(t, store.DeleteFile(ctx, "note.txt"))
+
+	_, err = store.GetFile(ctx, "note.txt")
+	require.ErrorIs(t, err, ErrFileNotFound)
+
+	names, err = store.ListFiles(ctx)
+	require.NoError(t, err)
+	require.Empty(t, names)
+
 	blob, err := os.ReadFile(filepath.Join(dir, "content.bin"))
 	require.NoError(t, err)
 	require.NotContains(t, string(blob), "hello world")
@@ -51,9 +60,12 @@ func TestStoragePersistenceAndEncryption(t *testing.T) {
 		reloaded.WaitForShutdown()
 	}()
 
-	reloadedData, err := reloaded.GetFile(ctx2, "note.txt")
+	reloadedNames, err := reloaded.ListFiles(ctx2)
 	require.NoError(t, err)
-	require.Equal(t, []byte("hello world"), reloadedData)
+	require.Empty(t, reloadedNames)
+
+	_, err = reloaded.GetFile(ctx2, "note.txt")
+	require.ErrorIs(t, err, ErrFileNotFound)
 }
 
 func TestStorageWrongKeyFails(t *testing.T) {
