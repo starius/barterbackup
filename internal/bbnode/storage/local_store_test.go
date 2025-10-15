@@ -33,11 +33,14 @@ func TestLocalStoreSetGetDelete(t *testing.T) {
 	reloadedData, err := reloaded.getFile("foo.txt")
 	require.NoError(t, err)
 	require.Equal(t, []byte("secret payload"), reloadedData)
+	reloadedNames := reloaded.listFiles()
+	require.Equal(t, []string{"foo.txt"}, reloadedNames)
 
 	require.NoError(t, reloaded.deleteFile("foo.txt"))
 
 	_, err = reloaded.getFile("foo.txt")
 	require.ErrorIs(t, err, ErrFileNotFound)
+	require.Empty(t, reloaded.listFiles())
 
 	require.ErrorIs(t, reloaded.deleteFile("foo.txt"), ErrFileNotFound)
 
