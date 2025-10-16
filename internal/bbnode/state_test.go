@@ -2,20 +2,43 @@ package bbnode
 
 import (
 	"context"
+	"io/fs"
 	"strconv"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"testing/synctest"
 
 	"github.com/starius/barterbackup/internal/bbnode/userstorage"
 	"github.com/stretchr/testify/require"
 )
 
+type stateTestFS struct {
+	fstest.MapFS
+}
+
+func newStateTestFS() *stateTestFS {
+	return &stateTestFS{MapFS: fstest.MapFS{}}
+}
+
+func (m *stateTestFS) ReadFile(name string) ([]byte, error) {
+	file, ok := m.MapFS[name]
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+	return append([]byte(nil), file.Data...), nil
+}
+
+func (m *stateTestFS) WriteFile(name string, data []byte) error {
+	m.MapFS[name] = &fstest.MapFile{Data: append([]byte(nil), data...), Mode: 0o600}
+	return nil
+}
+
 func TestEventStateConcurrentAccess(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
-		fsys := userstorage.NewMapFilesystem()
+		fsys := newStateTestFS()
 		store, err := userstorage.NewStore(fsys, []byte("master"))
 		require.NoError(t, err)
 

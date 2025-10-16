@@ -6,6 +6,7 @@ import (
 	"github.com/starius/barterbackup/internal/bbnode/userstorage"
 )
 
+// nodeState mediates access to mutable node data via the Node event loop.
 type nodeState interface {
 	SetFile(ctx context.Context, name string, data []byte) error
 	DeleteFile(ctx context.Context, name string) error

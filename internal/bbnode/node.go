@@ -22,6 +22,16 @@ import (
 // Node represents a single BarterBackup node that serves both bbrpc (P2P)
 // and clirpc (local) APIs. Networking to other nodes is abstracted by the
 // Network interface so we can swap Tor-backed and in-memory implementations.
+//
+// Event loop rules:
+//   - All mutable state lives behind the nodeState interface. RPC handlers
+//     interact with the event loop exclusively through those methods.
+//   - The event loop performs only in-memory work or disk operations via the
+//     Filesystem abstraction. Networking is handled outside the loop.
+//   - Disk access is provided by an fs.FS implementation (os.Root in production
+//     and fstest-backed filesystems in tests).
+//   - bbrpc handlers authenticate peers and pass the extracted peer public key
+//     when state methods require it.
 type Node struct {
 	bbrpc.UnimplementedBarterBackupServerServer
 	clirpc.UnimplementedBarterBackupClientServer
