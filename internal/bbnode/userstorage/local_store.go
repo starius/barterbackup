@@ -3,6 +3,8 @@ package userstorage
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"errors"
 	"io"
 	"io/fs"
@@ -35,13 +37,15 @@ type contentSnapshot struct {
 
 // Store maintains the encrypted user content metadata and files on disk.
 type Store struct {
-	fs         Filesystem
-	files      map[string][]byte
-	metadata   *storedpb.Metadata
-	content    []byte
-	contentID  []byte
-	contentKey []byte
-	filesKey   []byte
+	fs           Filesystem
+	files        map[string][]byte
+	metadata     *storedpb.Metadata
+	content      []byte
+	contentID    []byte
+	contentAEAD  cipher.AEAD
+	metadataAEAD cipher.AEAD
+	xor          usercontent.XORKeyStreamAt
+	ivKey        []byte
 }
 
 // NewStore loads persisted state from the provided filesystem.
@@ -53,15 +57,36 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	filesKey, err := keys.DeriveKey(master, "usercontent/files", 32)
+	metaKey, err := keys.DeriveKey(master, "usercontent/metadata", 32)
 	if err != nil {
 		return nil, err
 	}
+	fileKey, err := keys.DeriveKey(master, "usercontent/files", 32)
+	if err != nil {
+		return nil, err
+	}
+	ivKey, err := keys.DeriveKey(master, "usercontent/iv", 32)
+	if err != nil {
+		return nil, err
+	}
+
+	contentAEAD, err := cipher.NewGCM(newAESBlock(contentKey))
+	if err != nil {
+		return nil, err
+	}
+	metadataAEAD, err := cipher.NewGCM(newAESBlock(metaKey))
+	if err != nil {
+		return nil, err
+	}
+	xor := makeXORKeyStream(newAESBlock(fileKey))
+
 	store := &Store{
-		fs:         fsys,
-		files:      make(map[string][]byte),
-		contentKey: contentKey,
-		filesKey:   filesKey,
+		fs:           fsys,
+		files:        make(map[string][]byte),
+		contentAEAD:  contentAEAD,
+		metadataAEAD: metadataAEAD,
+		xor:          xor,
+		ivKey:        ivKey,
 	}
 	if err := store.load(); err != nil {
 		return nil, err
@@ -77,10 +102,11 @@ func (s *Store) load() error {
 		}
 		return err
 	}
-	uc, err := usercontent.ParseContentFile(bytes.NewReader(data), s.contentKey, s.filesKey)
+	uc, meta, cid, err := usercontent.ParseContentFile(bytes.NewReader(data), s.contentAEAD, s.metadataAEAD, s.xor, s.ivKey)
 	if err != nil {
 		return err
 	}
+
 	s.files = make(map[string][]byte, len(uc.Files))
 	for name, file := range uc.Files {
 		buf := make([]byte, file.Size)
@@ -91,18 +117,11 @@ func (s *Store) load() error {
 		}
 		s.files[name] = buf
 	}
-	meta, err := usercontent.MetadataFromUserContent(usercontent.UserContent{
-		CreatedAt: uc.CreatedAt,
-		Files:     cloneFiles(s.files),
-		Peers:     uc.Peers,
-	})
-	if err != nil {
-		return err
-	}
+
 	s.metadata = meta
 	s.content = bytes.Clone(data)
-	s.contentID, err = usercontent.MakeContentID(uc.CreatedAt, s.contentKey)
-	return err
+	s.contentID = append([]byte(nil), cid...)
+	return nil
 }
 
 func (s *Store) setFile(name string, data []byte) error {
@@ -159,8 +178,9 @@ func (s *Store) ListFiles(_ context.Context) ([]string, error) {
 }
 
 func (s *Store) persist() error {
+	now := time.Now()
 	uc := usercontent.UserContent{
-		CreatedAt: time.Now(),
+		CreatedAt: now,
 		Files:     cloneFiles(s.files),
 	}
 	if s.metadata != nil {
@@ -168,15 +188,7 @@ func (s *Store) persist() error {
 	}
 
 	var buf bytes.Buffer
-	if err := usercontent.WriteContentFile(&buf, uc, s.contentKey, s.filesKey); err != nil {
-		return err
-	}
-
-	meta, err := usercontent.MetadataFromUserContent(uc)
-	if err != nil {
-		return err
-	}
-	contentID, err := usercontent.MakeContentID(uc.CreatedAt, s.contentKey)
+	meta, cid, err := usercontent.WriteContentFile(&buf, uc, s.contentAEAD, s.metadataAEAD, s.xor, s.ivKey)
 	if err != nil {
 		return err
 	}
@@ -187,7 +199,7 @@ func (s *Store) persist() error {
 	}
 
 	s.content = append([]byte(nil), contentBytes...)
-	s.contentID = contentID
+	s.contentID = append([]byte(nil), cid...)
 	s.metadata = meta
 	return nil
 }
@@ -208,4 +220,46 @@ func cloneFiles(files map[string][]byte) map[string]usercontent.File {
 		}
 	}
 	return out
+}
+
+func newAESBlock(key []byte) cipher.Block {
+	blk, err := aes.NewCipher(key)
+	if err != nil {
+		panic(err)
+	}
+	return blk
+}
+
+func makeXORKeyStream(block cipher.Block) usercontent.XORKeyStreamAt {
+	blockSize := block.BlockSize()
+	return func(dst, src, iv []byte, offset uint64) {
+		if len(dst) != len(src) {
+			panic("usercontent: xor buffer length mismatch")
+		}
+		counter := make([]byte, blockSize)
+		copy(counter, iv)
+		blocksToSkip := offset / uint64(blockSize)
+		addCounter(counter, blocksToSkip)
+		buf := make([]byte, blockSize)
+		written := 0
+		skip := int(offset % uint64(blockSize))
+		for written < len(src) {
+			block.Encrypt(buf, counter)
+			for i := skip; i < blockSize && written < len(src); i++ {
+				dst[written] = src[written] ^ buf[i]
+				written++
+			}
+			skip = 0
+			addCounter(counter, 1)
+		}
+	}
+}
+
+func addCounter(counter []byte, delta uint64) {
+	carry := delta
+	for i := len(counter) - 1; i >= 0 && carry > 0; i-- {
+		sum := uint64(counter[i]) + (carry & 0xff)
+		counter[i] = byte(sum)
+		carry = carry>>8 + sum>>8
+	}
 }
