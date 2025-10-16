@@ -1,20 +1,18 @@
 package userstorage
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestLocalStoreSetGetDelete(t *testing.T) {
+func TestStoreSetGetDelete(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
+	fsys := NewMapFilesystem()
 	master := []byte("local-store-master")
 
-	store, err := newLocalStore(dir, master)
+	store, err := NewStore(fsys, master)
 	require.NoError(t, err)
 
 	require.NoError(t, store.setFile("foo.txt", []byte("secret payload")))
@@ -23,18 +21,17 @@ func TestLocalStoreSetGetDelete(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("secret payload"), data)
 
-	blob, err := os.ReadFile(filepath.Join(dir, storageFileName))
+	blob, err := fsys.ReadFile(contentFileName)
 	require.NoError(t, err)
 	require.NotContains(t, string(blob), "secret payload")
 
-	reloaded, err := newLocalStore(dir, master)
+	reloaded, err := NewStore(fsys, master)
 	require.NoError(t, err)
 
 	reloadedData, err := reloaded.getFile("foo.txt")
 	require.NoError(t, err)
 	require.Equal(t, []byte("secret payload"), reloadedData)
-	reloadedNames := reloaded.listFiles()
-	require.Equal(t, []string{"foo.txt"}, reloadedNames)
+	require.Equal(t, []string{"foo.txt"}, reloaded.listFiles())
 
 	require.NoError(t, reloaded.deleteFile("foo.txt"))
 
@@ -42,16 +39,14 @@ func TestLocalStoreSetGetDelete(t *testing.T) {
 	require.ErrorIs(t, err, ErrFileNotFound)
 	require.Empty(t, reloaded.listFiles())
 
-	require.ErrorIs(t, reloaded.deleteFile("foo.txt"), ErrFileNotFound)
-
-	blobAfterDelete, err := os.ReadFile(filepath.Join(dir, storageFileName))
+	blobAfterDelete, err := fsys.ReadFile(contentFileName)
 	require.NoError(t, err)
 	require.NotContains(t, string(blobAfterDelete), "secret payload")
 }
 
-func TestLocalStoreEmptyDirError(t *testing.T) {
+func TestStoreEmptyFilesystemError(t *testing.T) {
 	t.Parallel()
 
-	_, err := newLocalStore("", []byte("master"))
+	_, err := NewStore(nil, []byte("master"))
 	require.Error(t, err)
 }

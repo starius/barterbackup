@@ -36,6 +36,9 @@ func (n *Node) SetFile(ctx context.Context, req *clirpc.SetFileRequest) (*clirpc
 		}
 		return nil, ctx.Err()
 	}
+	if n.state == nil {
+		return nil, status.Error(codes.FailedPrecondition, "node not started")
+	}
 	if req == nil || req.GetFile() == nil {
 		return nil, status.Error(codes.InvalidArgument, "file is required")
 	}
@@ -44,7 +47,7 @@ func (n *Node) SetFile(ctx context.Context, req *clirpc.SetFileRequest) (*clirpc
 	if name == "" {
 		return nil, status.Error(codes.InvalidArgument, "file name is required")
 	}
-	if err := n.store.SetFile(ctx, name, data); err != nil {
+	if err := n.state.SetFile(ctx, name, data); err != nil {
 		return nil, mapStorageError(err)
 	}
 	return &clirpc.SetFileResponse{}, nil
@@ -60,10 +63,13 @@ func (n *Node) DeleteFile(ctx context.Context, req *clirpc.DeleteFileRequest) (*
 		}
 		return nil, ctx.Err()
 	}
+	if n.state == nil {
+		return nil, status.Error(codes.FailedPrecondition, "node not started")
+	}
 	if req == nil || req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "file name is required")
 	}
-	if err := n.store.DeleteFile(ctx, req.GetName()); err != nil {
+	if err := n.state.DeleteFile(ctx, req.GetName()); err != nil {
 		return nil, mapStorageError(err)
 	}
 	return &clirpc.DeleteFileResponse{}, nil
@@ -78,10 +84,13 @@ func (n *Node) GetFile(ctx context.Context, req *clirpc.GetFileRequest) (*clirpc
 		}
 		return nil, ctx.Err()
 	}
+	if n.state == nil {
+		return nil, status.Error(codes.FailedPrecondition, "node not started")
+	}
 	if req == nil || req.GetName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "file name is required")
 	}
-	data, err := n.store.GetFile(ctx, req.GetName())
+	data, err := n.state.GetFile(ctx, req.GetName())
 	if err != nil {
 		return nil, mapStorageError(err)
 	}
@@ -102,7 +111,10 @@ func (n *Node) ListFiles(ctx context.Context, _ *clirpc.ListFilesRequest) (*clir
 		}
 		return nil, ctx.Err()
 	}
-	names, err := n.store.ListFiles(ctx)
+	if n.state == nil {
+		return nil, status.Error(codes.FailedPrecondition, "node not started")
+	}
+	names, err := n.state.ListFiles(ctx)
 	if err != nil {
 		return nil, mapStorageError(err)
 	}

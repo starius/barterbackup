@@ -2,6 +2,7 @@ package userstorage
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -11,8 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
+	"io/fs"
 	"sort"
 	"time"
 
@@ -21,50 +21,63 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const contentFileName = "content.bin"
+
+// Filesystem abstracts persistent storage operations for user data.
+type Filesystem interface {
+	ReadFile(name string) ([]byte, error)
+	WriteFile(name string, data []byte) error
+}
+
+var (
+	ErrFileNotFound = errors.New("file not found")
+	ErrStopped      = errors.New("storage stopped")
+)
+
 const (
-	storageFileName   = "content.bin"
 	storageMagicBytes = "BBST"
 	storageVersion    = 1
 	saltSize          = 32
 )
 
-type localStore struct {
-	dir      string
-	master   []byte
-	content  []byte
-	files    map[string][]byte
-	metadata *storedpb.Metadata
+// contentSnapshot captures responder content metadata for quick access.
+type contentSnapshot struct {
+	id     []byte
+	length int64
 }
 
-func newLocalStore(dir string, master []byte) (*localStore, error) {
-	if dir == "" {
-		return nil, errors.New("storage dir is empty")
+// Store maintains the encrypted user content metadata and files on disk.
+type Store struct {
+	fs        Filesystem
+	master    []byte
+	content   []byte
+	contentID []byte
+	files     map[string][]byte
+	metadata  *storedpb.Metadata
+}
+
+// NewStore loads persisted state from the provided filesystem.
+func NewStore(fsys Filesystem, master []byte) (*Store, error) {
+	if fsys == nil {
+		return nil, errors.New("filesystem is nil")
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create storage dir: %w", err)
-	}
-	s := &localStore{
-		dir:    dir,
-		master: append([]byte{}, master...),
+	store := &Store{
+		fs:     fsys,
+		master: append([]byte(nil), master...),
 		files:  make(map[string][]byte),
 	}
-	if err := s.load(); err != nil {
+	if err := store.load(); err != nil {
 		return nil, err
 	}
-	return s, nil
+	return store, nil
 }
 
-func (s *localStore) storagePath() string {
-	return filepath.Join(s.dir, storageFileName)
-}
-
-func (s *localStore) load() error {
-	path := s.storagePath()
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
+func (s *Store) load() error {
+	data, err := s.fs.ReadFile(contentFileName)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		return fmt.Errorf("read storage: %w", err)
 	}
 	meta, files, err := s.decryptContent(data)
@@ -73,11 +86,172 @@ func (s *localStore) load() error {
 	}
 	s.metadata = meta
 	s.files = files
-	s.content = data
+	s.content = append([]byte(nil), data...)
+	s.contentID = hashContent(data)
 	return nil
 }
 
-func (s *localStore) decryptContent(blob []byte) (*storedpb.Metadata, map[string][]byte, error) {
+func (s *Store) setFile(name string, data []byte) error {
+	if name == "" {
+		return errors.New("file name is empty")
+	}
+	s.files[name] = append([]byte(nil), data...)
+	return s.persist()
+}
+
+// SetFile persists or updates a file.
+func (s *Store) SetFile(_ context.Context, name string, data []byte) error {
+	return s.setFile(name, data)
+}
+
+func (s *Store) getFile(name string) ([]byte, error) {
+	data, ok := s.files[name]
+	if !ok {
+		return nil, ErrFileNotFound
+	}
+	return append([]byte(nil), data...), nil
+}
+
+// GetFile retrieves a persisted file by name.
+func (s *Store) GetFile(_ context.Context, name string) ([]byte, error) {
+	return s.getFile(name)
+}
+
+func (s *Store) deleteFile(name string) error {
+	if _, ok := s.files[name]; !ok {
+		return ErrFileNotFound
+	}
+	delete(s.files, name)
+	return s.persist()
+}
+
+// DeleteFile removes a file from persistent state.
+func (s *Store) DeleteFile(_ context.Context, name string) error {
+	return s.deleteFile(name)
+}
+
+func (s *Store) listFiles() []string {
+	names := make([]string, 0, len(s.files))
+	for name := range s.files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ListFiles returns the sorted list of file names.
+func (s *Store) ListFiles(_ context.Context) ([]string, error) {
+	return s.listFiles(), nil
+}
+
+func (s *Store) persist() error {
+	salt := make([]byte, saltSize)
+	if _, err := rand.Read(salt); err != nil {
+		return fmt.Errorf("salt: %w", err)
+	}
+
+	metaKey, err := deriveMetadataKey(s.master, salt)
+	if err != nil {
+		return err
+	}
+	filesKey, err := deriveFilesKey(s.master, salt)
+	if err != nil {
+		return err
+	}
+
+	fileHeaders := make([]*storedpb.FileHeader, 0, len(s.files))
+	names := s.listFiles()
+	for _, name := range names {
+		data := s.files[name]
+		sum := sha256.Sum256(data)
+		fileHeaders = append(fileHeaders, &storedpb.FileHeader{
+			Name:       name,
+			FileLength: int64(len(data)),
+			FileSha256: sum[:],
+		})
+	}
+
+	now := time.Now()
+	metadata := &storedpb.Metadata{
+		Files: fileHeaders,
+	}
+	if s.metadata != nil {
+		metadata.Peers = s.metadata.GetPeers()
+	}
+	metadata.MostRecentContent = &storedpb.ContentRevision{
+		CreatedAt:   now.Unix(),
+		CreatedAtNs: int64(now.Nanosecond()),
+	}
+
+	var (
+		nonce      []byte
+		cipherMeta []byte
+		metaLen    int
+	)
+	for i := 0; i < 5; i++ {
+		nonce, cipherMeta, metaLen, err = encryptMetadata(metadata, metaKey)
+		if err != nil {
+			return err
+		}
+		if metadata.GetMostRecentContent().GetMetadataAeadLength() == int64(metaLen) {
+			break
+		}
+		metadata.MostRecentContent.MetadataAeadLength = int64(metaLen)
+		if i == 4 {
+			return errors.New("metadata AEAD length did not stabilize")
+		}
+	}
+	metadata.MostRecentContent.MetadataAeadLength = int64(metaLen)
+
+	fileBlock, err := aes.NewCipher(filesKey)
+	if err != nil {
+		return fmt.Errorf("file cipher init: %w", err)
+	}
+
+	buf := bytes.NewBuffer(make([]byte, 0, len(storageMagicBytes)+1+saltSize+4+len(nonce)+len(cipherMeta)))
+	buf.WriteString(storageMagicBytes)
+	if err := buf.WriteByte(storageVersion); err != nil {
+		return fmt.Errorf("buffer write version: %w", err)
+	}
+	buf.Write(salt)
+	if err := binary.Write(buf, binary.BigEndian, uint32(metaLen)); err != nil {
+		return fmt.Errorf("buffer write metadata len: %w", err)
+	}
+	buf.Write(nonce)
+	buf.Write(cipherMeta)
+
+	for _, name := range names {
+		data := s.files[name]
+		iv, err := deriveFileIV(s.master, salt, name)
+		if err != nil {
+			return err
+		}
+		enc := make([]byte, len(data))
+		stream := cipher.NewCTR(fileBlock, iv)
+		stream.XORKeyStream(enc, data)
+		buf.Write(enc)
+	}
+
+	content := buf.Bytes()
+	if err := s.fs.WriteFile(contentFileName, content); err != nil {
+		return fmt.Errorf("write storage: %w", err)
+	}
+
+	s.content = append([]byte(nil), content...)
+	s.contentID = hashContent(content)
+	s.metadata = metadata
+
+	return nil
+}
+
+func (s *Store) snapshot() contentSnapshot {
+	return contentSnapshot{
+		id:     append([]byte(nil), s.contentID...),
+		length: int64(len(s.content)),
+	}
+}
+
+func (s *Store) decryptContent(blob []byte) (*storedpb.Metadata, map[string][]byte, error) {
 	r := bytes.NewReader(blob)
 
 	magic := make([]byte, len(storageMagicBytes))
@@ -182,153 +356,6 @@ func (s *localStore) decryptContent(blob []byte) (*storedpb.Metadata, map[string
 	return &metadata, files, nil
 }
 
-func (s *localStore) setFile(name string, data []byte) error {
-	if name == "" {
-		return errors.New("file name is empty")
-	}
-	if s.files == nil {
-		s.files = make(map[string][]byte)
-	}
-	s.files[name] = append([]byte(nil), data...)
-	return s.persist()
-}
-
-func (s *localStore) getFile(name string) ([]byte, error) {
-	data, ok := s.files[name]
-	if !ok {
-		return nil, ErrFileNotFound
-	}
-	return append([]byte(nil), data...), nil
-}
-
-func (s *localStore) deleteFile(name string) error {
-	if s.files == nil {
-		return ErrFileNotFound
-	}
-	if _, ok := s.files[name]; !ok {
-		return ErrFileNotFound
-	}
-	delete(s.files, name)
-	return s.persist()
-}
-
-func (s *localStore) listFiles() []string {
-	names := make([]string, 0, len(s.files))
-	for name := range s.files {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
-}
-
-func (s *localStore) persist() error {
-	salt := make([]byte, saltSize)
-	if _, err := rand.Read(salt); err != nil {
-		return fmt.Errorf("salt: %w", err)
-	}
-
-	metaKey, err := deriveMetadataKey(s.master, salt)
-	if err != nil {
-		return err
-	}
-	filesKey, err := deriveFilesKey(s.master, salt)
-	if err != nil {
-		return err
-	}
-
-	fileHeaders := make([]*storedpb.FileHeader, 0, len(s.files))
-	names := make([]string, 0, len(s.files))
-	for name := range s.files {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		data := s.files[name]
-		sum := sha256.Sum256(data)
-		fileHeaders = append(fileHeaders, &storedpb.FileHeader{
-			Name:       name,
-			FileLength: int64(len(data)),
-			FileSha256: sum[:],
-		})
-	}
-
-	now := time.Now()
-	metadata := &storedpb.Metadata{
-		Files: fileHeaders,
-	}
-	if s.metadata != nil {
-		metadata.Peers = s.metadata.GetPeers()
-	}
-	contentRev := &storedpb.ContentRevision{
-		CreatedAt: int64(now.Unix()),
-		CreatedAtNs: func() int64 {
-			return int64(now.Nanosecond())
-		}(),
-	}
-	metadata.MostRecentContent = contentRev
-
-	var (
-		nonce      []byte
-		cipherMeta []byte
-		metaLen    int
-	)
-	for i := 0; i < 5; i++ {
-		nonce, cipherMeta, metaLen, err = encryptMetadata(metadata, metaKey)
-		if err != nil {
-			return err
-		}
-		if metadata.GetMostRecentContent().GetMetadataAeadLength() == int64(metaLen) {
-			break
-		}
-		metadata.MostRecentContent.MetadataAeadLength = int64(metaLen)
-		if i == 4 {
-			return errors.New("metadata AEAD length did not stabilize")
-		}
-	}
-	metadata.MostRecentContent.MetadataAeadLength = int64(metaLen)
-
-	fileBlock, err := aes.NewCipher(filesKey)
-	if err != nil {
-		return fmt.Errorf("file cipher init: %w", err)
-	}
-
-	buf := bytes.NewBuffer(make([]byte, 0, len(storageMagicBytes)+1+saltSize+4+len(nonce)+len(cipherMeta)))
-	buf.WriteString(storageMagicBytes)
-	if err := buf.WriteByte(storageVersion); err != nil {
-		return fmt.Errorf("buffer write version: %w", err)
-	}
-	buf.Write(salt)
-	if err := binary.Write(buf, binary.BigEndian, uint32(metaLen)); err != nil {
-		return fmt.Errorf("buffer write metadata len: %w", err)
-	}
-	buf.Write(nonce)
-	buf.Write(cipherMeta)
-
-	for _, name := range names {
-		data := s.files[name]
-		iv, err := deriveFileIV(s.master, salt, name)
-		if err != nil {
-			return err
-		}
-		enc := make([]byte, len(data))
-		stream := cipher.NewCTR(fileBlock, iv)
-		stream.XORKeyStream(enc, data)
-		buf.Write(enc)
-	}
-
-	content := buf.Bytes()
-	path := s.storagePath()
-
-	if err := writeAtomic(path, content, 0o600); err != nil {
-		return err
-	}
-
-	s.content = append([]byte(nil), content...)
-	s.metadata = metadata
-
-	return nil
-}
-
 func encryptMetadata(metadata *storedpb.Metadata, key []byte) ([]byte, []byte, int, error) {
 	plain, err := proto.Marshal(metadata)
 	if err != nil {
@@ -363,28 +390,7 @@ func deriveFileIV(master []byte, salt []byte, name string) ([]byte, error) {
 	return keys.DeriveKey(master, "bbnode/file-iv:"+hex.EncodeToString(salt)+":"+name, aes.BlockSize)
 }
 
-func writeAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "tmp-content-*")
-	if err != nil {
-		return fmt.Errorf("create temp: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		return fmt.Errorf("write temp: %w", err)
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		return fmt.Errorf("chmod temp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("rename temp: %w", err)
-	}
-	return nil
+func hashContent(data []byte) []byte {
+	sum := sha256.Sum256(data)
+	return append([]byte(nil), sum[:]...)
 }

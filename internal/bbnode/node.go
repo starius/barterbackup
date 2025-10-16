@@ -38,8 +38,8 @@ type Node struct {
 	evictStop chan struct{}
 	evictDone chan struct{}
 
-	store       *userstorage.Storage
-	storeCancel context.CancelFunc
+	store *userstorage.Store
+	state nodeState
 
 	startedAt time.Time
 }
@@ -64,7 +64,11 @@ func New(seed string, netw Network, storageDir string) (*Node, error) {
 	onionID := torutil.OnionServiceIDFromV3PublicKey(torutiled25519.PublicKey(pub))
 	addr := onionID + ".onion"
 
-	store, err := userstorage.New(storageDir, master)
+	fsys, err := userstorage.NewOSFilesystem(storageDir)
+	if err != nil {
+		return nil, err
+	}
+	store, err := userstorage.NewStore(fsys, master)
 	if err != nil {
 		return nil, err
 	}
@@ -84,16 +88,13 @@ func (n *Node) Start(ctx context.Context) error {
 	if n.stop != nil {
 		return errors.New("already started")
 	}
-	storageCtx, storageCancel := context.WithCancel(ctx)
-	n.store.Start(storageCtx)
-	n.storeCancel = storageCancel
+	n.state = newEventState(n.store)
 
 	// Build server TLS config and gRPC server.
 	cert, err := selfSignedEd25519Cert(n.priv)
 	if err != nil {
-		storageCancel()
-		n.store.WaitForShutdown()
-		n.storeCancel = nil
+		n.state.Close()
+		n.state = nil
 		return err
 	}
 	srvTLS := &tls.Config{
@@ -112,9 +113,8 @@ func (n *Node) Start(ctx context.Context) error {
 
 	unregister, err := n.net.Register(ctx, n.addr, n.priv, grpcSrv)
 	if err != nil {
-		storageCancel()
-		n.store.WaitForShutdown()
-		n.storeCancel = nil
+		n.state.Close()
+		n.state = nil
 		return err
 	}
 	n.stop = unregister
@@ -130,7 +130,10 @@ func (n *Node) Start(ctx context.Context) error {
 // Stop unregisters the node from the network and stops serving.
 func (n *Node) Stop() error {
 	if n.stop == nil {
-		n.cancelStorage()
+		if n.state != nil {
+			n.state.Close()
+			n.state = nil
+		}
 		return nil
 	}
 	n.stopEvictor()
@@ -145,17 +148,12 @@ func (n *Node) Stop() error {
 	}
 	n.mu.Unlock()
 
-	n.cancelStorage()
+	if n.state != nil {
+		n.state.Close()
+		n.state = nil
+	}
 
 	return err
-}
-
-func (n *Node) cancelStorage() {
-	if n.storeCancel != nil {
-		n.storeCancel()
-		n.store.WaitForShutdown()
-		n.storeCancel = nil
-	}
 }
 
 // Address returns the onion address of this node.
