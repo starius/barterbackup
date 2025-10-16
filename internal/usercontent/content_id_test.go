@@ -9,18 +9,17 @@ import (
 )
 
 func TestContentIDRoundTrip(t *testing.T) {
-	block := makeBlock(t)
-	macFactory := makeMACFactory(t)
+	seal, open := makeContentIDAEAD(t)
 	revision := &storedpb.ContentRevision{
 		CreatedAt:          123,
 		CreatedAtNs:        456,
 		MetadataAeadLength: 789,
 	}
 
-	cid, err := MakeContentID(revision, block, macFactory)
+	cid, err := MakeContentID(revision, seal)
 	require.NoError(t, err)
 
-	parsed, err := ParseContentID(cid, block, macFactory)
+	parsed, err := ParseContentID(cid, open)
 	require.NoError(t, err)
 	require.Equal(t, revision.GetCreatedAt(), parsed.GetCreatedAt())
 	require.Equal(t, revision.GetCreatedAtNs(), parsed.GetCreatedAtNs())
@@ -28,19 +27,18 @@ func TestContentIDRoundTrip(t *testing.T) {
 }
 
 func TestContentIDTampering(t *testing.T) {
-	block := makeBlock(t)
-	macFactory := makeMACFactory(t)
+	seal, open := makeContentIDAEAD(t)
 	revision := &storedpb.ContentRevision{CreatedAt: time.Now().Unix()}
-	cid, err := MakeContentID(revision, block, macFactory)
+	cid, err := MakeContentID(revision, seal)
 	require.NoError(t, err)
 
 	cipherTampered := append([]byte(nil), cid...)
 	cipherTampered[0] ^= 0xff
-	_, err = ParseContentID(cipherTampered, block, macFactory)
+	_, err = ParseContentID(cipherTampered, open)
 	require.Error(t, err)
 
 	macTampered := append([]byte(nil), cid...)
-	macTampered[block.BlockSize()] ^= 0xff
-	_, err = ParseContentID(macTampered, block, macFactory)
+	macTampered[len(macTampered)-1] ^= 0xff
+	_, err = ParseContentID(macTampered, open)
 	require.Error(t, err)
 }

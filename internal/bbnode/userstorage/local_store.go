@@ -5,10 +5,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hmac"
-	"crypto/sha256"
 	"errors"
-	"hash"
 	"io"
 	"io/fs"
 	"sort"
@@ -45,8 +42,8 @@ type Store struct {
 	metadata     *storedpb.Metadata
 	content      []byte
 	contentID    []byte
-	contentBlock cipher.Block
-	macFactory   usercontent.MACFactory
+	contentSeal  usercontent.SealFunc
+	contentOpen  usercontent.OpenFunc
 	metadataAEAD cipher.AEAD
 	xor          usercontent.XORKeyStreamAt
 	ivKey        []byte
@@ -58,10 +55,6 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 		return nil, errors.New("filesystem is nil")
 	}
 	contentKey, err := keys.DeriveKey(master, "usercontent/content-id", 32)
-	if err != nil {
-		return nil, err
-	}
-	contentMacKey, err := keys.DeriveKey(master, "usercontent/content-id-mac", 32)
 	if err != nil {
 		return nil, err
 	}
@@ -78,9 +71,9 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 		return nil, err
 	}
 
-	contentBlock := newAESBlock(contentKey)
-	contentMAC := func() hash.Hash {
-		return hmac.New(sha256.New, contentMacKey)
+	contentSeal, contentOpen, err := usercontent.NewAEAD(contentKey)
+	if err != nil {
+		return nil, err
 	}
 	metadataAEAD, err := cipher.NewGCM(newAESBlock(metaKey))
 	if err != nil {
@@ -91,8 +84,8 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 	store := &Store{
 		fs:           fsys,
 		files:        make(map[string][]byte),
-		contentBlock: contentBlock,
-		macFactory:   contentMAC,
+		contentSeal:  contentSeal,
+		contentOpen:  contentOpen,
 		metadataAEAD: metadataAEAD,
 		xor:          xor,
 		ivKey:        ivKey,
@@ -111,7 +104,7 @@ func (s *Store) load() error {
 		}
 		return err
 	}
-	uc, meta, cid, err := usercontent.ParseContentFile(bytes.NewReader(data), s.contentBlock, s.macFactory, s.metadataAEAD, s.xor, s.ivKey)
+	uc, meta, cid, err := usercontent.ParseContentFile(bytes.NewReader(data), s.contentSeal, s.contentOpen, s.metadataAEAD, s.xor, s.ivKey)
 	if err != nil {
 		return err
 	}
@@ -197,7 +190,7 @@ func (s *Store) persist() error {
 	}
 
 	var buf bytes.Buffer
-	meta, cid, err := usercontent.WriteContentFile(&buf, uc, s.contentBlock, s.macFactory, s.metadataAEAD, s.xor, s.ivKey)
+	meta, cid, err := usercontent.WriteContentFile(&buf, uc, s.contentSeal, s.contentOpen, s.metadataAEAD, s.xor, s.ivKey)
 	if err != nil {
 		return err
 	}

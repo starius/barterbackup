@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"hash"
 	"io"
 	"sort"
 	"time"
@@ -27,9 +26,6 @@ var (
 	errInvalidMagic   = errors.New("usercontent: invalid magic")
 	errInvalidContent = errors.New("usercontent: invalid content")
 )
-
-// MACFactory returns a fresh keyed MAC instance for computing integrity tags.
-type MACFactory func() hash.Hash
 
 // XORKeyStreamAt applies a key stream to src and writes the result into dst.
 // The IV identifies the stream and offset allows random access.
@@ -89,8 +85,8 @@ func MetadataFromUserContent(uc UserContent) (*storedpb.Metadata, []fileDescript
 
 // WriteContentFile encodes user content to w using the provided primitives and
 // returns the metadata (with AEAD length populated) and the generated content ID.
-func WriteContentFile(w io.Writer, uc UserContent, contentBlock cipher.Block, macFactory MACFactory, metadataAEAD cipher.AEAD, xor XORKeyStreamAt, ivKey []byte) (*storedpb.Metadata, []byte, error) {
-	if contentBlock == nil || macFactory == nil || metadataAEAD == nil {
+func WriteContentFile(w io.Writer, uc UserContent, contentSeal SealFunc, contentOpen OpenFunc, metadataAEAD cipher.AEAD, xor XORKeyStreamAt, ivKey []byte) (*storedpb.Metadata, []byte, error) {
+	if contentSeal == nil || contentOpen == nil || metadataAEAD == nil {
 		return nil, nil, errors.New("usercontent: encryption primitives must be provided")
 	}
 	if xor == nil {
@@ -113,7 +109,7 @@ func WriteContentFile(w io.Writer, uc UserContent, contentBlock cipher.Block, ma
 	metaCipher := metadataAEAD.Seal(nil, nonceMeta, metaPlain, nil)
 	metadata.MostRecentContent.MetadataAeadLength = int64(len(nonceMeta) + len(metaCipher))
 
-	contentID, err := MakeContentID(metadata.MostRecentContent, contentBlock, macFactory)
+	contentID, err := MakeContentID(metadata.MostRecentContent, contentSeal)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -152,9 +148,9 @@ func WriteContentFile(w io.Writer, uc UserContent, contentBlock cipher.Block, ma
 
 // ParseContentFile decodes user content from r, returning the content, metadata
 // and the serialized content identifier.
-func ParseContentFile(r io.ReaderAt, contentBlock cipher.Block, macFactory MACFactory, metadataAEAD cipher.AEAD, xor XORKeyStreamAt, ivKey []byte) (UserContent, *storedpb.Metadata, []byte, error) {
+func ParseContentFile(r io.ReaderAt, contentSeal SealFunc, contentOpen OpenFunc, metadataAEAD cipher.AEAD, xor XORKeyStreamAt, ivKey []byte) (UserContent, *storedpb.Metadata, []byte, error) {
 	var result UserContent
-	if contentBlock == nil || macFactory == nil || metadataAEAD == nil {
+	if contentSeal == nil || contentOpen == nil || metadataAEAD == nil {
 		return result, nil, nil, errors.New("usercontent: encryption primitives must be provided")
 	}
 	if xor == nil {
@@ -184,7 +180,7 @@ func ParseContentFile(r io.ReaderAt, contentBlock cipher.Block, macFactory MACFa
 	}
 	offset += int64(cidLen)
 
-	revision, err := ParseContentID(cid, contentBlock, macFactory)
+	revision, err := ParseContentID(cid, contentOpen)
 	if err != nil {
 		return result, nil, nil, err
 	}
