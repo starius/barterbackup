@@ -81,7 +81,7 @@ func makeCipherBlock(t *testing.T) cipher.Block {
 	return block
 }
 
-func makeContentIDAEAD(t *testing.T) (func([]byte) []byte, func([]byte) ([]byte, error)) {
+func makeContentIDAEAD(t *testing.T) (SealFunc, OpenFunc) {
 	t.Helper()
 	seal, open, err := NewAEAD(randomKey(t))
 	require.NoError(t, err)

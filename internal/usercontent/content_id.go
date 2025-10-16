@@ -26,7 +26,11 @@ func MakeContentID(revision *storedpb.ContentRevision, aeadSeal SealFunc) ([]byt
 	if len(plain) > contentIDMaxPayload {
 		return nil, fmt.Errorf("usercontent: revision too large (%d bytes)", len(plain))
 	}
-	return aeadSeal(plain), nil
+	contentID, err := aeadSeal(plain)
+	if err != nil {
+		return nil, err
+	}
+	return contentID, nil
 }
 
 // ParseContentID verifies and decrypts a content identifier into a revision.

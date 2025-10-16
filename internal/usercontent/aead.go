@@ -17,7 +17,7 @@ const (
 var _ [0]struct{} = [siv.NonceSize - len(contentIDNonceString)]struct{}{}
 
 // SealFunc encrypts the provided plaintext deterministically.
-type SealFunc func([]byte) []byte
+type SealFunc func([]byte) ([]byte, error)
 
 // OpenFunc decrypts the provided ciphertext and returns the plaintext.
 type OpenFunc func([]byte) ([]byte, error)
@@ -37,9 +37,9 @@ func NewAEAD(key []byte) (SealFunc, OpenFunc, error) {
 	}
 	nonce := []byte(contentIDNonceString)
 
-	seal := func(plain []byte) []byte {
+	seal := func(plain []byte) ([]byte, error) {
 		if len(plain) > contentIDMaxPayload {
-			panic("usercontent: content id payload too large")
+			return nil, errors.New("usercontent: content id payload too large")
 		}
 		buf := make([]byte, contentIDBlockSize)
 		buf[0] = byte(len(plain))
@@ -47,9 +47,9 @@ func NewAEAD(key []byte) (SealFunc, OpenFunc, error) {
 
 		ct := aead.Seal(nil, nonce, buf, nil)
 		if len(ct) != 2*contentIDBlockSize {
-			panic("usercontent: unexpected ciphertext length")
+			return nil, errors.New("usercontent: unexpected ciphertext length")
 		}
-		return ct
+		return ct, nil
 	}
 
 	open := func(ciphertext []byte) ([]byte, error) {
