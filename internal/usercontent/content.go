@@ -1,7 +1,6 @@
 package usercontent
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -48,49 +47,6 @@ type UserContent struct {
 // MakeContentID encrypts the provided revision using the supplied AEAD.
 // The nonce is derived deterministically from the revision fields to make
 // content identifiers stable across runs.
-func MakeContentID(revision *storedpb.ContentRevision, aead cipher.AEAD) ([]byte, error) {
-	if revision == nil {
-		return nil, errors.New("usercontent: revision is nil")
-	}
-	if aead == nil {
-		return nil, errors.New("usercontent: content AEAD is nil")
-	}
-	nonce := makeRevisionNonce(revision, aead.NonceSize())
-	plain, err := proto.Marshal(revision)
-	if err != nil {
-		return nil, err
-	}
-	ciphertext := aead.Seal(nil, nonce, plain, nil)
-	out := make([]byte, len(nonce)+len(ciphertext))
-	copy(out, nonce)
-	copy(out[len(nonce):], ciphertext)
-	return out, nil
-}
-
-// ParseContentID verifies and decrypts a content identifier into a revision.
-func ParseContentID(contentID []byte, aead cipher.AEAD) (*storedpb.ContentRevision, error) {
-	if aead == nil {
-		return nil, errors.New("usercontent: content AEAD is nil")
-	}
-	nonceSize := aead.NonceSize()
-	if len(contentID) <= nonceSize {
-		return nil, errInvalidContent
-	}
-	nonce := contentID[:nonceSize]
-	ciphertext := contentID[nonceSize:]
-	plain, err := aead.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return nil, err
-	}
-	var revision storedpb.ContentRevision
-	if err := proto.Unmarshal(plain, &revision); err != nil {
-		return nil, err
-	}
-	if !bytes.Equal(nonce, makeRevisionNonce(&revision, nonceSize)) {
-		return nil, errInvalidContent
-	}
-	return &revision, nil
-}
 
 // MetadataFromUserContent builds the metadata structure for the provided
 // user content. The returned metadata has MostRecentContent populated with
@@ -402,17 +358,6 @@ func deriveFileIV(ivKey []byte, name string, size int) ([]byte, error) {
 		return nil, err
 	}
 	return iv, nil
-}
-
-func makeRevisionNonce(rev *storedpb.ContentRevision, nonceSize int) []byte {
-	nonce := make([]byte, nonceSize)
-	if nonceSize >= 8 {
-		binary.BigEndian.PutUint64(nonce[nonceSize-8:], uint64(rev.GetCreatedAtNs()))
-	}
-	if nonceSize >= 12 {
-		binary.BigEndian.PutUint32(nonce[nonceSize-12:], uint32(rev.GetCreatedAt()))
-	}
-	return nonce
 }
 
 func readUint32(r io.ReaderAt, offset int64, out *uint32) error {
