@@ -13,6 +13,9 @@ const (
 	contentIDMaxPayload  = contentIDBlockSize - 1
 )
 
+// Static assert for equality.
+var _ [0]struct{} = [siv.NonceSize - len(contentIDNonceString)]struct{}{}
+
 // SealFunc encrypts the provided plaintext deterministically.
 type SealFunc func([]byte) []byte
 
