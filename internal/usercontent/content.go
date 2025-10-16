@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"sort"
 	"time"
@@ -27,6 +28,9 @@ var (
 	errInvalidContent = errors.New("usercontent: invalid content")
 )
 
+// MACFactory returns a fresh keyed MAC instance for computing integrity tags.
+type MACFactory func() hash.Hash
+
 // XORKeyStreamAt applies a key stream to src and writes the result into dst.
 // The IV identifies the stream and offset allows random access.
 type XORKeyStreamAt func(dst, src, iv []byte, offset uint64)
@@ -43,10 +47,6 @@ type UserContent struct {
 	Files     map[string]File
 	Peers     []*storedpb.Peer
 }
-
-// MakeContentID encrypts the provided revision using the supplied AEAD.
-// The nonce is derived deterministically from the revision fields to make
-// content identifiers stable across runs.
 
 // MetadataFromUserContent builds the metadata structure for the provided
 // user content. The returned metadata has MostRecentContent populated with
@@ -89,9 +89,9 @@ func MetadataFromUserContent(uc UserContent) (*storedpb.Metadata, []fileDescript
 
 // WriteContentFile encodes user content to w using the provided primitives and
 // returns the metadata (with AEAD length populated) and the generated content ID.
-func WriteContentFile(w io.Writer, uc UserContent, contentAEAD, metadataAEAD cipher.AEAD, xor XORKeyStreamAt, ivKey []byte) (*storedpb.Metadata, []byte, error) {
-	if contentAEAD == nil || metadataAEAD == nil {
-		return nil, nil, errors.New("usercontent: AEADs must be provided")
+func WriteContentFile(w io.Writer, uc UserContent, contentBlock cipher.Block, macFactory MACFactory, metadataAEAD cipher.AEAD, xor XORKeyStreamAt, ivKey []byte) (*storedpb.Metadata, []byte, error) {
+	if contentBlock == nil || macFactory == nil || metadataAEAD == nil {
+		return nil, nil, errors.New("usercontent: encryption primitives must be provided")
 	}
 	if xor == nil {
 		return nil, nil, errors.New("usercontent: XOR function missing")
@@ -113,7 +113,7 @@ func WriteContentFile(w io.Writer, uc UserContent, contentAEAD, metadataAEAD cip
 	metaCipher := metadataAEAD.Seal(nil, nonceMeta, metaPlain, nil)
 	metadata.MostRecentContent.MetadataAeadLength = int64(len(nonceMeta) + len(metaCipher))
 
-	contentID, err := MakeContentID(metadata.MostRecentContent, contentAEAD)
+	contentID, err := MakeContentID(metadata.MostRecentContent, contentBlock, macFactory)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -152,10 +152,10 @@ func WriteContentFile(w io.Writer, uc UserContent, contentAEAD, metadataAEAD cip
 
 // ParseContentFile decodes user content from r, returning the content, metadata
 // and the serialized content identifier.
-func ParseContentFile(r io.ReaderAt, contentAEAD, metadataAEAD cipher.AEAD, xor XORKeyStreamAt, ivKey []byte) (UserContent, *storedpb.Metadata, []byte, error) {
+func ParseContentFile(r io.ReaderAt, contentBlock cipher.Block, macFactory MACFactory, metadataAEAD cipher.AEAD, xor XORKeyStreamAt, ivKey []byte) (UserContent, *storedpb.Metadata, []byte, error) {
 	var result UserContent
-	if contentAEAD == nil || metadataAEAD == nil {
-		return result, nil, nil, errors.New("usercontent: AEADs must be provided")
+	if contentBlock == nil || macFactory == nil || metadataAEAD == nil {
+		return result, nil, nil, errors.New("usercontent: encryption primitives must be provided")
 	}
 	if xor == nil {
 		return result, nil, nil, errors.New("usercontent: XOR function missing")
@@ -184,7 +184,7 @@ func ParseContentFile(r io.ReaderAt, contentAEAD, metadataAEAD cipher.AEAD, xor 
 	}
 	offset += int64(cidLen)
 
-	revision, err := ParseContentID(cid, contentAEAD)
+	revision, err := ParseContentID(cid, contentBlock, macFactory)
 	if err != nil {
 		return result, nil, nil, err
 	}

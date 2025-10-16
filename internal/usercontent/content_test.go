@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"hash"
 	"io"
 	"testing"
 	"time"
@@ -13,7 +16,8 @@ import (
 )
 
 func TestContentRoundTrip(t *testing.T) {
-	contentAEAD := makeAEAD(t)
+	contentBlock := makeBlock(t)
+	macFactory := makeMACFactory(t)
 	metadataAEAD := makeAEAD(t)
 	xor := makeTestXOR(t)
 	ivKey := randomKey(t)
@@ -27,12 +31,12 @@ func TestContentRoundTrip(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	meta, cid, err := WriteContentFile(&buf, uc, contentAEAD, metadataAEAD, xor, ivKey)
+	meta, cid, err := WriteContentFile(&buf, uc, contentBlock, macFactory, metadataAEAD, xor, ivKey)
 	require.NoError(t, err)
 	require.NotNil(t, meta)
 	require.NotEmpty(t, cid)
 
-	parsed, parsedMeta, parsedCID, err := ParseContentFile(bytes.NewReader(buf.Bytes()), contentAEAD, metadataAEAD, xor, ivKey)
+	parsed, parsedMeta, parsedCID, err := ParseContentFile(bytes.NewReader(buf.Bytes()), contentBlock, macFactory, metadataAEAD, xor, ivKey)
 	require.NoError(t, err)
 	require.NotNil(t, parsedMeta)
 	require.Equal(t, cid, parsedCID)
@@ -74,9 +78,23 @@ func makeAEAD(t *testing.T) cipher.AEAD {
 	return aead
 }
 
-func makeTestXOR(t *testing.T) XORKeyStreamAt {
+func makeBlock(t *testing.T) cipher.Block {
+	t.Helper()
 	block, err := aes.NewCipher(randomKey(t))
 	require.NoError(t, err)
+	return block
+}
+
+func makeMACFactory(t *testing.T) MACFactory {
+	t.Helper()
+	key := randomKey(t)
+	return func() hash.Hash {
+		return hmac.New(sha256.New, key)
+	}
+}
+
+func makeTestXOR(t *testing.T) XORKeyStreamAt {
+	block := makeBlock(t)
 	blockSize := block.BlockSize()
 	return func(dst, src, iv []byte, offset uint64) {
 		if len(dst) != len(src) {
