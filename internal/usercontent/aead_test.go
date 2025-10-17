@@ -23,17 +23,22 @@ func TestAEADVectors(t *testing.T) {
 		{
 			name:      "empty",
 			plain:     []byte{},
-			cipherHex: "2ea046a23642cb8028bcadaf66b4208f4dc6b0c8da274e56f35fa1cd2797b77f",
+			cipherHex: "2edd35ccc2cdf8ff76db4aa8b7bfef31",
 		},
 		{
 			name:      "hello",
 			plain:     []byte("hello"),
-			cipherHex: "cefc62a9efcdbb580d01cab90211e49c8aaebbdf50e939f585744fd980a8e071",
+			cipherHex: "7d9c42f0e73e849f0aee40c166de0233c523c241e2",
 		},
 		{
-			name:      "max-15",
+			name:      "fifteen-bytes",
 			plain:     []byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e},
-			cipherHex: "07db91bb9cd66fbaef901e17217b2a77247e239c6ae3306673a2dd7e4a1b9080",
+			cipherHex: "8b06b2cb778c1de483db5b9c86d879ecbd6047f3c963125e01cb8bf0adba8a",
+		},
+		{
+			name:      "longer",
+			plain:     []byte("this is a longer sample plaintext for testing deterministic output"),
+			cipherHex: "7096aa90c95f56948a64cfa67afb516040cadba051bb5aeb8216313ea232a5ae8e328370eec4b1525b64720603ea6a696e26fa0e9ad347f13bee559a87467901a3cc08ab46a0f86593a9f42b574fe489ea2b",
 		},
 	}
 
@@ -52,9 +57,12 @@ func TestAEADVectors(t *testing.T) {
 		})
 	}
 
-	tooLong := bytes.Repeat([]byte{0xff}, contentIDMaxPayload+1)
-	_, err = seal(tooLong)
-	require.Error(t, err)
+	large := bytes.Repeat([]byte("x"), 1024)
+	ciphertext, err := seal(large)
+	require.NoError(t, err)
+	recovered, err := open(ciphertext)
+	require.NoError(t, err)
+	require.Equal(t, large, recovered)
 }
 
 func mustHex(t *testing.T, s string) []byte {
@@ -62,5 +70,6 @@ func mustHex(t *testing.T, s string) []byte {
 
 	b, err := hex.DecodeString(s)
 	require.NoError(t, err)
+
 	return b
 }

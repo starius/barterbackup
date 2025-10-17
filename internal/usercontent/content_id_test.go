@@ -1,6 +1,7 @@
 package usercontent
 
 import (
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -9,7 +10,7 @@ import (
 )
 
 func TestContentIDRoundTrip(t *testing.T) {
-	seal, open := makeContentIDAEAD(t)
+	seal, open := newDeterministicAEAD(t)
 	revision := &storedpb.ContentRevision{
 		CreatedAt:          1760123456,
 		CreatedAtNs:        123456789,
@@ -18,6 +19,7 @@ func TestContentIDRoundTrip(t *testing.T) {
 
 	cid, err := MakeContentID(revision, seal)
 	require.NoError(t, err)
+	require.Equal(t, "69607f035df1660823d71f56deba50ccacdda65d9a9e14628d80c73a", hex.EncodeToString(cid))
 
 	parsed, err := ParseContentID(cid, open)
 	require.NoError(t, err)
@@ -27,7 +29,7 @@ func TestContentIDRoundTrip(t *testing.T) {
 }
 
 func TestContentIDTampering(t *testing.T) {
-	seal, open := makeContentIDAEAD(t)
+	seal, open := newDeterministicAEAD(t)
 	revision := &storedpb.ContentRevision{CreatedAt: time.Now().Unix()}
 	cid, err := MakeContentID(revision, seal)
 	require.NoError(t, err)
@@ -41,4 +43,14 @@ func TestContentIDTampering(t *testing.T) {
 	macTampered[len(macTampered)-1] ^= 0xff
 	_, err = ParseContentID(macTampered, open)
 	require.ErrorContains(t, err, "message authentication failure")
+}
+
+func newDeterministicAEAD(t *testing.T) (SealFunc, OpenFunc) {
+	t.Helper()
+
+	key, err := hex.DecodeString("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+	require.NoError(t, err)
+	seal, open, err := NewAEAD(key)
+	require.NoError(t, err)
+	return seal, open
 }
