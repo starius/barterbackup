@@ -75,7 +75,10 @@ func metadataFromUserContent(uc UserContent) (*storedpb.Metadata, []fileDescript
 			FileLength: file.Size,
 			FileSha256: sum,
 		})
-		descriptors = append(descriptors, fileDescriptor{name: name, file: file})
+		descriptors = append(descriptors, fileDescriptor{
+			name: name,
+			file: file,
+		})
 	}
 
 	return meta, descriptors, nil
@@ -260,6 +263,7 @@ func hashFile(file File) ([]byte, error) {
 	if _, err := io.Copy(hasher, reader); err != nil {
 		return nil, err
 	}
+
 	return hasher.Sum(nil), nil
 }
 
