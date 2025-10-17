@@ -49,6 +49,9 @@ func MakeContentID(revision *storedpb.ContentRevision, aeadSeal SealFunc) ([]byt
 		return nil, errors.New("usercontent: created_at overflow")
 	}
 	unixNano := uint64(createdAt)*1_000_000_000 + uint64(createdAtNs)
+	if unixNano > uint64(maxInt64) {
+		return nil, errors.New("usercontent: timestamp overflow")
+	}
 	if int64(unixNano/1_000_000_000) != createdAt || int64(unixNano%1_000_000_000) != createdAtNs {
 		return nil, errors.New("usercontent: timestamp overflow")
 	}

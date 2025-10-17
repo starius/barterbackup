@@ -45,6 +45,31 @@ func TestContentIDTampering(t *testing.T) {
 	require.ErrorContains(t, err, "message authentication failure")
 }
 
+func TestContentIDTimestampOverflow(t *testing.T) {
+	seal, _ := newDeterministicAEAD(t)
+
+	const maxInt64 = int64(^uint64(0) >> 1)
+	const maxSeconds = maxInt64 / 1_000_000_000
+	const remainder = maxInt64 % 1_000_000_000
+
+	revision := &storedpb.ContentRevision{
+		CreatedAt:          maxSeconds + 1,
+		CreatedAtNs:        0,
+		MetadataAeadLength: 1,
+	}
+	_, err := MakeContentID(revision, seal)
+	require.ErrorContains(t, err, "overflow")
+
+	revision = &storedpb.ContentRevision{
+		CreatedAt:          maxSeconds,
+		CreatedAtNs:        remainder + 1,
+		MetadataAeadLength: 1,
+	}
+
+	_, err = MakeContentID(revision, seal)
+	require.ErrorContains(t, err, "overflow")
+}
+
 func newDeterministicAEAD(t *testing.T) (SealFunc, OpenFunc) {
 	t.Helper()
 
