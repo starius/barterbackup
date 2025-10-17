@@ -46,7 +46,6 @@ type Store struct {
 	contentOpen  usercontent.OpenFunc
 	metadataAEAD cipher.AEAD
 	xor          usercontent.XORKeyStreamAt
-	ivKey        []byte
 }
 
 // NewStore loads persisted state from the provided filesystem.
@@ -66,11 +65,6 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	ivKey, err := keys.DeriveKey(master, "usercontent/iv", 32)
-	if err != nil {
-		return nil, err
-	}
-
 	contentSeal, contentOpen, err := usercontent.NewAEAD(contentKey)
 	if err != nil {
 		return nil, err
@@ -88,7 +82,6 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 		contentOpen:  contentOpen,
 		metadataAEAD: metadataAEAD,
 		xor:          xor,
-		ivKey:        ivKey,
 	}
 	if err := store.load(); err != nil {
 		return nil, err
@@ -104,7 +97,7 @@ func (s *Store) load() error {
 		}
 		return err
 	}
-	uc, meta, cid, err := usercontent.ParseContentFile(bytes.NewReader(data), s.contentSeal, s.contentOpen, s.metadataAEAD, s.xor, s.ivKey)
+	uc, meta, cid, err := usercontent.ParseContentFile(bytes.NewReader(data), s.contentOpen, s.metadataAEAD, s.xor)
 	if err != nil {
 		return err
 	}
@@ -190,7 +183,7 @@ func (s *Store) persist() error {
 	}
 
 	var buf bytes.Buffer
-	meta, cid, err := usercontent.WriteContentFile(&buf, uc, s.contentSeal, s.contentOpen, s.metadataAEAD, s.xor, s.ivKey)
+	meta, cid, err := usercontent.WriteContentFile(&buf, uc, s.contentSeal, s.metadataAEAD, s.xor)
 	if err != nil {
 		return err
 	}

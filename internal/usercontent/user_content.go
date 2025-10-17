@@ -44,10 +44,10 @@ type UserContent struct {
 	Peers     []*storedpb.Peer
 }
 
-// MetadataFromUserContent builds the metadata structure for the provided
+// metadataFromUserContent builds the metadata structure for the provided
 // user content. The returned metadata has MostRecentContent populated with
 // creation timestamps but not the AEAD length.
-func MetadataFromUserContent(uc UserContent) (*storedpb.Metadata, []fileDescriptor, error) {
+func metadataFromUserContent(uc UserContent) (*storedpb.Metadata, []fileDescriptor, error) {
 	names := make([]string, 0, len(uc.Files))
 	for name := range uc.Files {
 		names = append(names, name)
@@ -85,7 +85,7 @@ func MetadataFromUserContent(uc UserContent) (*storedpb.Metadata, []fileDescript
 
 // WriteContentFile encodes user content to w using the provided primitives and
 // returns the metadata (with AEAD length populated) and the generated content ID.
-func WriteContentFile(w io.Writer, uc UserContent, contentSeal SealFunc, metadataAEAD cipher.AEAD, xor XORKeyStreamAt, ivKey []byte) (*storedpb.Metadata, []byte, error) {
+func WriteContentFile(w io.Writer, uc UserContent, contentSeal SealFunc, metadataAEAD cipher.AEAD, xor XORKeyStreamAt) (*storedpb.Metadata, []byte, error) {
 	if contentSeal == nil || metadataAEAD == nil {
 		return nil, nil, errors.New("usercontent: encryption primitives must be provided")
 	}
@@ -93,7 +93,7 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal SealFunc, metadat
 		return nil, nil, errors.New("usercontent: XOR function missing")
 	}
 
-	metadata, descriptors, err := MetadataFromUserContent(uc)
+	metadata, descriptors, err := metadataFromUserContent(uc)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -108,6 +108,11 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal SealFunc, metadat
 	}
 	metaCipher := metadataAEAD.Seal(nil, nonceMeta, metaPlain, nil)
 	metadata.MostRecentContent.MetadataAeadLength = int64(len(nonceMeta) + len(metaCipher))
+
+	ivKey, err := revisionIVKey(metadata.MostRecentContent)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	contentID, err := MakeContentID(metadata.MostRecentContent, contentSeal)
 	if err != nil {
@@ -148,7 +153,7 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal SealFunc, metadat
 
 // ParseContentFile decodes user content from r, returning the content, metadata
 // and the serialized content identifier.
-func ParseContentFile(r io.ReaderAt, contentOpen OpenFunc, metadataAEAD cipher.AEAD, xor XORKeyStreamAt, ivKey []byte) (UserContent, *storedpb.Metadata, []byte, error) {
+func ParseContentFile(r io.ReaderAt, contentOpen OpenFunc, metadataAEAD cipher.AEAD, xor XORKeyStreamAt) (UserContent, *storedpb.Metadata, []byte, error) {
 	var result UserContent
 	if contentOpen == nil || metadataAEAD == nil {
 		return result, nil, nil, errors.New("usercontent: encryption primitives must be provided")
@@ -181,6 +186,11 @@ func ParseContentFile(r io.ReaderAt, contentOpen OpenFunc, metadataAEAD cipher.A
 	offset += int64(cidLen)
 
 	revision, err := ParseContentID(cid, contentOpen)
+	if err != nil {
+		return result, nil, nil, err
+	}
+
+	ivKey, err := revisionIVKey(revision)
 	if err != nil {
 		return result, nil, nil, err
 	}
@@ -270,6 +280,31 @@ func findFileLength(metadata *storedpb.Metadata, name string) int64 {
 		}
 	}
 	return 0
+}
+
+func revisionIVKey(revision *storedpb.ContentRevision) ([]byte, error) {
+	if revision == nil {
+		return nil, errors.New("usercontent: nil revision")
+	}
+	if revision.GetCreatedAt() < 0 {
+		return nil, errors.New("usercontent: negative revision created_at")
+	}
+	if revision.GetCreatedAtNs() < 0 {
+		return nil, errors.New("usercontent: negative revision created_at_ns")
+	}
+	if revision.GetCreatedAtNs() >= 1_000_000_000 {
+		return nil, errors.New("usercontent: revision created_at_ns out of range")
+	}
+	if revision.GetMetadataAeadLength() < 0 {
+		return nil, errors.New("usercontent: negative metadata aead length")
+	}
+
+	buf := make([]byte, 24)
+	binary.BigEndian.PutUint64(buf[0:8], uint64(revision.GetCreatedAt()))
+	binary.BigEndian.PutUint64(buf[8:16], uint64(revision.GetCreatedAtNs()))
+	binary.BigEndian.PutUint64(buf[16:], uint64(revision.GetMetadataAeadLength()))
+	sum := sha256.Sum256(buf)
+	return sum[:], nil
 }
 
 func writeEncryptedFile(w io.Writer, desc fileDescriptor, xor XORKeyStreamAt, ivKey []byte) error {
