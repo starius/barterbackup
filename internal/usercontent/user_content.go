@@ -132,8 +132,8 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal Sea
 	if _, err := w.Write([]byte{currentVersion}); err != nil {
 		return nil, err
 	}
-	if err := binary.Write(w, binary.BigEndian, uint32(len(contentID))); err != nil {
-		return nil, err
+	if len(contentID) != siv.TagSize+contentIDPlaintextSize {
+		return nil, fmt.Errorf("usercontent: unexpected content id length %d", len(contentID))
 	}
 	if _, err := w.Write(contentID); err != nil {
 		return nil, err
@@ -178,16 +178,11 @@ func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc, xor XOR
 	}
 
 	offset := int64(len(header))
-	var cidLen uint32
-	if err := readUint32(r, offset, &cidLen); err != nil {
-		return result, nil, err
-	}
-	offset += 4
-	cid := make([]byte, cidLen)
+	cid := make([]byte, siv.TagSize+contentIDPlaintextSize)
 	if _, err := r.ReadAt(cid, offset); err != nil {
 		return result, nil, err
 	}
-	offset += int64(cidLen)
+	offset += int64(len(cid))
 
 	revision, err := ParseContentID(cid, contentOpen)
 	if err != nil {
