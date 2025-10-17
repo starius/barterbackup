@@ -36,6 +36,10 @@ func TestContentRoundTrip(t *testing.T) {
 	require.NotNil(t, parsedMeta)
 	require.Equal(t, cid, parsedCID)
 
+	cid2, err := MakeContentID(parsedMeta.MostRecentContent, contentSeal)
+	require.NoError(t, err)
+	require.Equal(t, cid, cid2)
+
 	require.Equal(t, uc.CreatedAt.Unix(), parsedMeta.GetMostRecentContent().GetCreatedAt())
 	require.Equal(t, uc.CreatedAt.Nanosecond(), int(parsedMeta.GetMostRecentContent().GetCreatedAtNs()))
 
