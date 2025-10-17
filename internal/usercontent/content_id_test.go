@@ -11,9 +11,9 @@ import (
 func TestContentIDRoundTrip(t *testing.T) {
 	seal, open := makeContentIDAEAD(t)
 	revision := &storedpb.ContentRevision{
-		CreatedAt:          123,
-		CreatedAtNs:        456,
-		MetadataAeadLength: 789,
+		CreatedAt:          1760123456,
+		CreatedAtNs:        123456789,
+		MetadataAeadLength: 10_000_000,
 	}
 
 	cid, err := MakeContentID(revision, seal)
@@ -35,10 +35,10 @@ func TestContentIDTampering(t *testing.T) {
 	cipherTampered := append([]byte(nil), cid...)
 	cipherTampered[0] ^= 0xff
 	_, err = ParseContentID(cipherTampered, open)
-	require.Error(t, err)
+	require.ErrorContains(t, err, "message authentication failure")
 
 	macTampered := append([]byte(nil), cid...)
 	macTampered[len(macTampered)-1] ^= 0xff
 	_, err = ParseContentID(macTampered, open)
-	require.Error(t, err)
+	require.ErrorContains(t, err, "message authentication failure")
 }
