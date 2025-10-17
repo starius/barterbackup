@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/sha256"
 	"errors"
 	"io"
 	"io/fs"
@@ -212,11 +211,9 @@ func (s *Store) snapshot() contentSnapshot {
 func cloneFiles(files map[string][]byte) map[string]usercontent.File {
 	out := make(map[string]usercontent.File, len(files))
 	for name, data := range files {
-		sum := sha256.Sum256(data)
 		out[name] = usercontent.File{
-			Body:   bytes.NewReader(data),
-			Size:   int64(len(data)),
-			Sha256: append([]byte(nil), sum[:]...),
+			Body: bytes.NewReader(data),
+			Size: int64(len(data)),
 		}
 	}
 	return out

@@ -54,8 +54,6 @@ func TestContentRoundTrip(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, int(orig.Size), n)
 		require.Equal(t, origBuf, buf)
-		shaFromMeta := findFileSha(parsedMeta, name)
-		require.Equal(t, shaFromMeta, file.Sha256)
 	}
 }
 

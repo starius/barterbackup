@@ -31,9 +31,8 @@ type XORKeyStreamAt func(dst, src, iv []byte, offset uint64)
 
 // File represents a single file participating in user content.
 type File struct {
-	Body   io.ReaderAt
-	Size   int64
-	Sha256 []byte
+	Body io.ReaderAt
+	Size int64
 }
 
 // UserContent is the in-memory representation of encoded content.
@@ -71,7 +70,6 @@ func metadataFromUserContent(uc UserContent) (*storedpb.Metadata, []fileDescript
 		if err != nil {
 			return nil, nil, err
 		}
-		file.Sha256 = append([]byte(nil), sum...)
 		meta.Files = append(meta.Files, &storedpb.FileHeader{
 			Name:       name,
 			FileLength: file.Size,
@@ -238,7 +236,7 @@ func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc, xor XOR
 		if err != nil {
 			return result, nil, nil, err
 		}
-		result.Files[name] = File{Body: file, Size: plainLen, Sha256: findFileSha(&metadata, name)}
+		result.Files[name] = File{Body: file, Size: plainLen}
 		offset += int64(cipherLen)
 	}
 
@@ -254,9 +252,6 @@ type fileDescriptor struct {
 }
 
 func hashFile(file File) ([]byte, error) {
-	if len(file.Sha256) == sha256.Size {
-		return append([]byte(nil), file.Sha256...), nil
-	}
 	if file.Body == nil {
 		return nil, errors.New("usercontent: file body missing for hash")
 	}
@@ -284,15 +279,6 @@ func findFileLength(metadata *storedpb.Metadata, name string) int64 {
 		}
 	}
 	return 0
-}
-
-func findFileSha(metadata *storedpb.Metadata, name string) []byte {
-	for _, fh := range metadata.GetFiles() {
-		if fh.GetName() == name {
-			return append([]byte(nil), fh.GetFileSha256()...)
-		}
-	}
-	return nil
 }
 
 func revisionMaterial(revision *storedpb.ContentRevision) ([]byte, error) {
