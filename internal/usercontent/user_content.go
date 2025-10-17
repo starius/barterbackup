@@ -85,7 +85,6 @@ func metadataFromUserContent(uc UserContent) ([]byte, []fileDescriptor, *storedp
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	revision.MetadataAeadLength = int64(len(metaPlain) + siv.TagSize)
 	return metaPlain, descriptors, revision, nil
 }
 
@@ -331,10 +330,8 @@ func writeEncryptedFile(w io.Writer, desc fileDescriptor, xor XORKeyStreamAt, iv
 	if err := binary.Write(w, binary.BigEndian, uint64(desc.file.Size)); err != nil {
 		return err
 	}
-	iv, err := deriveFileIV(ivKey, desc.name, aes.BlockSize)
-	if err != nil {
-		return err
-	}
+	iv := make([]byte, aes.BlockSize)
+	copy(iv, ivKey)
 	reader := io.NewSectionReader(desc.file.Body, 0, desc.file.Size)
 	buf := make([]byte, 32*1024)
 	offset := uint64(0)
@@ -371,10 +368,8 @@ func newCipherFile(src io.ReaderAt, xor XORKeyStreamAt, ivKey []byte, name strin
 	if plainLen < 0 || cipherLen < 0 {
 		return nil, errors.New("usercontent: invalid file lengths")
 	}
-	iv, err := deriveFileIV(ivKey, name, aes.BlockSize)
-	if err != nil {
-		return nil, err
-	}
+	iv := make([]byte, aes.BlockSize)
+	copy(iv, ivKey)
 	return &cipherFile{src: src, xor: xor, iv: iv, offset: offset, length: cipherLen, size: plainLen}, nil
 }
 
@@ -398,17 +393,6 @@ func (cf *cipherFile) ReadAt(p []byte, off int64) (int, error) {
 		return n, io.EOF
 	}
 	return n, nil
-}
-
-func deriveFileIV(ivKey []byte, name string, size int) ([]byte, error) {
-	if len(ivKey) == 0 {
-		return nil, errors.New("usercontent: empty iv key")
-	}
-	iv := make([]byte, size)
-	if _, err := io.ReadFull(hkdf.New(sha256.New, ivKey, nil, []byte("usercontent-iv:"+name)), iv); err != nil {
-		return nil, err
-	}
-	return iv, nil
 }
 
 func readUint32(r io.ReaderAt, offset int64, out *uint32) error {
