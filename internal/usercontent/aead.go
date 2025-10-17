@@ -34,6 +34,7 @@ func NewAEAD(key []byte) (SealFunc, OpenFunc, error) {
 
 	seal := func(plain []byte) ([]byte, error) {
 		ct := aead.Seal(nil, nonce, plain, nil)
+
 		return ct, nil
 	}
 
@@ -42,6 +43,11 @@ func NewAEAD(key []byte) (SealFunc, OpenFunc, error) {
 		if err != nil {
 			return nil, err
 		}
+
+		if len(plain) == 0 {
+			plain = []byte{}
+		}
+
 		return plain, nil
 	}
 
