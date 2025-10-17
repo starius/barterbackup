@@ -312,9 +312,12 @@ func revisionIVKey(revision *storedpb.ContentRevision) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	data := append([]byte("usercontent/file-iv:"), material...)
-	sum := sha256.Sum256(data)
-	return sum[:], nil
+	deriver := hkdf.New(sha256.New, material, nil, []byte("usercontent/file-iv"))
+	key := make([]byte, sha256.Size)
+	if _, err := io.ReadFull(deriver, key); err != nil {
+		return nil, err
+	}
+	return key, nil
 }
 
 func revisionMetadataAD(revision *storedpb.ContentRevision) ([]byte, error) {
@@ -326,9 +329,12 @@ func revisionMetadataAD(revision *storedpb.ContentRevision) ([]byte, error) {
 	for i := 16; i < len(trimmed); i++ {
 		trimmed[i] = 0
 	}
-	data := append([]byte("usercontent/metadata-ad:"), trimmed...)
-	sum := sha256.Sum256(data)
-	return sum[:], nil
+	deriver := hkdf.New(sha256.New, trimmed, nil, []byte("usercontent/metadata-ad"))
+	ad := make([]byte, sha256.Size)
+	if _, err := io.ReadFull(deriver, ad); err != nil {
+		return nil, err
+	}
+	return ad, nil
 }
 
 func writeEncryptedFile(w io.Writer, desc fileDescriptor, xor XORKeyStreamAt, ivKey []byte) error {
