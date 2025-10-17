@@ -112,9 +112,7 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal Sea
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(metaCipher)) != revision.GetMetadataAeadLength() {
-		return nil, fmt.Errorf("usercontent: metadata aead length mismatch: expected %d got %d", revision.GetMetadataAeadLength(), len(metaCipher))
-	}
+	revision.MetadataAeadLength = int64(len(metaCipher))
 
 	ivKey, err := revisionIVKey(revision)
 	if err != nil {
@@ -139,9 +137,6 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal Sea
 		return nil, err
 	}
 
-	if err := binary.Write(w, binary.BigEndian, uint32(len(metaCipher))); err != nil {
-		return nil, err
-	}
 	if _, err := w.Write(metaCipher); err != nil {
 		return nil, err
 	}
@@ -194,19 +189,19 @@ func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc, xor XOR
 		return result, nil, err
 	}
 
-	var metaLen uint32
-	if err := readUint32(r, offset, &metaLen); err != nil {
-		return result, nil, err
-	}
-	offset += 4
-	if int64(metaLen) != revision.GetMetadataAeadLength() {
+	metaLen := revision.GetMetadataAeadLength()
+	if metaLen < 0 {
 		return result, nil, errInvalidContent
 	}
-	metaBuf := make([]byte, metaLen)
+	if metaLen > int64(int(^uint(0)>>1)) {
+		return result, nil, fmt.Errorf("usercontent: metadata ciphertext too large: %d", metaLen)
+	}
+	length := int(metaLen)
+	metaBuf := make([]byte, length)
 	if _, err := r.ReadAt(metaBuf, offset); err != nil {
 		return result, nil, err
 	}
-	offset += int64(metaLen)
+	offset += int64(length)
 
 	ad, err := revisionMetadataAD(revision)
 	if err != nil {
