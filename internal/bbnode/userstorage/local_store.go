@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"io/fs"
@@ -44,7 +45,8 @@ type Store struct {
 	contentID    []byte
 	contentSeal  usercontent.SealFunc
 	contentOpen  usercontent.OpenFunc
-	metadataAEAD cipher.AEAD
+	metadataSeal usercontent.SealFunc
+	metadataOpen usercontent.OpenFunc
 	xor          usercontent.XORKeyStreamAt
 }
 
@@ -69,7 +71,7 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	metadataAEAD, err := cipher.NewGCM(newAESBlock(metaKey))
+	metadataSeal, metadataOpen, err := usercontent.NewAEAD(metaKey)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +82,8 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 		files:        make(map[string][]byte),
 		contentSeal:  contentSeal,
 		contentOpen:  contentOpen,
-		metadataAEAD: metadataAEAD,
+		metadataSeal: metadataSeal,
+		metadataOpen: metadataOpen,
 		xor:          xor,
 	}
 	if err := store.load(); err != nil {
@@ -97,7 +100,7 @@ func (s *Store) load() error {
 		}
 		return err
 	}
-	uc, meta, cid, err := usercontent.ParseContentFile(bytes.NewReader(data), s.contentOpen, s.metadataAEAD, s.xor)
+	uc, meta, cid, err := usercontent.ParseContentFile(bytes.NewReader(data), s.contentOpen, s.metadataOpen, s.xor)
 	if err != nil {
 		return err
 	}
@@ -183,7 +186,7 @@ func (s *Store) persist() error {
 	}
 
 	var buf bytes.Buffer
-	meta, cid, err := usercontent.WriteContentFile(&buf, uc, s.contentSeal, s.metadataAEAD, s.xor)
+	meta, cid, err := usercontent.WriteContentFile(&buf, uc, s.contentSeal, s.metadataSeal, s.xor)
 	if err != nil {
 		return err
 	}
@@ -209,9 +212,11 @@ func (s *Store) snapshot() contentSnapshot {
 func cloneFiles(files map[string][]byte) map[string]usercontent.File {
 	out := make(map[string]usercontent.File, len(files))
 	for name, data := range files {
+		sum := sha256.Sum256(data)
 		out[name] = usercontent.File{
-			Body: bytes.NewReader(data),
-			Size: int64(len(data)),
+			Body:   bytes.NewReader(data),
+			Size:   int64(len(data)),
+			Sha256: append([]byte(nil), sum[:]...),
 		}
 	}
 	return out

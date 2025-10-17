@@ -64,7 +64,7 @@ func MakeContentID(revision *storedpb.ContentRevision, aeadSeal SealFunc) ([]byt
 	plaintext[3] = byte(metaLen)
 	binary.BigEndian.PutUint64(plaintext[4:], unixNano)
 
-	contentID, err := aeadSeal(plaintext)
+	contentID, err := aeadSeal(plaintext, nil)
 	if err != nil {
 		return nil, fmt.Errorf("usercontent: seal failed: %w", err)
 	}
@@ -78,7 +78,7 @@ func ParseContentID(contentID []byte, aeadOpen OpenFunc) (*storedpb.ContentRevis
 		return nil, errors.New("usercontent: open function is nil")
 	}
 
-	plain, err := aeadOpen(contentID)
+	plain, err := aeadOpen(contentID, nil)
 	if err != nil {
 		return nil, fmt.Errorf("usercontent: open failed: %w", err)
 	}

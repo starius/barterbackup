@@ -14,7 +14,7 @@ import (
 
 func TestContentRoundTrip(t *testing.T) {
 	contentSeal, contentOpen := makeContentIDAEAD(t)
-	metadataAEAD := makeAEAD(t)
+	metadataSeal, metadataOpen := makeContentIDAEAD(t)
 	xor := makeTestXOR(t)
 
 	uc := UserContent{
@@ -26,12 +26,12 @@ func TestContentRoundTrip(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	meta, cid, err := WriteContentFile(&buf, uc, contentSeal, metadataAEAD, xor)
+	meta, cid, err := WriteContentFile(&buf, uc, contentSeal, metadataSeal, xor)
 	require.NoError(t, err)
 	require.NotNil(t, meta)
 	require.NotEmpty(t, cid)
 
-	parsed, parsedMeta, parsedCID, err := ParseContentFile(bytes.NewReader(buf.Bytes()), contentOpen, metadataAEAD, xor)
+	parsed, parsedMeta, parsedCID, err := ParseContentFile(bytes.NewReader(buf.Bytes()), contentOpen, metadataOpen, xor)
 	require.NoError(t, err)
 	require.NotNil(t, parsedMeta)
 	require.Equal(t, cid, parsedCID)
@@ -54,6 +54,8 @@ func TestContentRoundTrip(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, int(orig.Size), n)
 		require.Equal(t, origBuf, buf)
+		shaFromMeta := findFileSha(parsedMeta, name)
+		require.Equal(t, shaFromMeta, file.Sha256)
 	}
 }
 
@@ -63,14 +65,6 @@ func randomKey(t *testing.T) []byte {
 	_, err := rand.Read(key)
 	require.NoError(t, err)
 	return key
-}
-
-func makeAEAD(t *testing.T) cipher.AEAD {
-	block, err := aes.NewCipher(randomKey(t))
-	require.NoError(t, err)
-	aead, err := cipher.NewGCM(block)
-	require.NoError(t, err)
-	return aead
 }
 
 func makeCipherBlock(t *testing.T) cipher.Block {

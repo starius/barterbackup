@@ -12,11 +12,11 @@ const contentIDNonceString = "bb-contentID"
 // Static assert that the nonce matches the required size.
 var _ [0]struct{} = [len(contentIDNonceString) - siv.NonceSize]struct{}{}
 
-// SealFunc encrypts the provided plaintext deterministically.
-type SealFunc func([]byte) ([]byte, error)
+// SealFunc encrypts the provided plaintext with optional associated data.
+type SealFunc func(plaintext, associatedData []byte) ([]byte, error)
 
-// OpenFunc decrypts the provided ciphertext and returns the plaintext.
-type OpenFunc func([]byte) ([]byte, error)
+// OpenFunc decrypts the provided ciphertext with optional associated data.
+type OpenFunc func(ciphertext, associatedData []byte) ([]byte, error)
 
 // NewAEAD returns sealing and opening helpers backed by AES-GCM-SIV.
 func NewAEAD(key []byte) (SealFunc, OpenFunc, error) {
@@ -32,14 +32,13 @@ func NewAEAD(key []byte) (SealFunc, OpenFunc, error) {
 	}
 	nonce := []byte(contentIDNonceString)
 
-	seal := func(plain []byte) ([]byte, error) {
-		ct := aead.Seal(nil, nonce, plain, nil)
-
+	seal := func(plain, ad []byte) ([]byte, error) {
+		ct := aead.Seal(nil, nonce, plain, ad)
 		return ct, nil
 	}
 
-	open := func(ciphertext []byte) ([]byte, error) {
-		plain, err := aead.Open(nil, nonce, ciphertext, nil)
+	open := func(ciphertext, ad []byte) ([]byte, error) {
+		plain, err := aead.Open(nil, nonce, ciphertext, ad)
 		if err != nil {
 			return nil, err
 		}

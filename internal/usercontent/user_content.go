@@ -2,8 +2,6 @@ package usercontent
 
 import (
 	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -33,8 +31,9 @@ type XORKeyStreamAt func(dst, src, iv []byte, offset uint64)
 
 // File represents a single file participating in user content.
 type File struct {
-	Body io.ReaderAt
-	Size int64
+	Body   io.ReaderAt
+	Size   int64
+	Sha256 []byte
 }
 
 // UserContent is the in-memory representation of encoded content.
@@ -72,6 +71,7 @@ func metadataFromUserContent(uc UserContent) (*storedpb.Metadata, []fileDescript
 		if err != nil {
 			return nil, nil, err
 		}
+		file.Sha256 = append([]byte(nil), sum...)
 		meta.Files = append(meta.Files, &storedpb.FileHeader{
 			Name:       name,
 			FileLength: file.Size,
@@ -85,8 +85,8 @@ func metadataFromUserContent(uc UserContent) (*storedpb.Metadata, []fileDescript
 
 // WriteContentFile encodes user content to w using the provided primitives and
 // returns the metadata (with AEAD length populated) and the generated content ID.
-func WriteContentFile(w io.Writer, uc UserContent, contentSeal SealFunc, metadataAEAD cipher.AEAD, xor XORKeyStreamAt) (*storedpb.Metadata, []byte, error) {
-	if contentSeal == nil || metadataAEAD == nil {
+func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal SealFunc, xor XORKeyStreamAt) (*storedpb.Metadata, []byte, error) {
+	if contentSeal == nil || metadataSeal == nil {
 		return nil, nil, errors.New("usercontent: encryption primitives must be provided")
 	}
 	if xor == nil {
@@ -98,16 +98,19 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal SealFunc, metadat
 		return nil, nil, err
 	}
 
-	nonceMeta := make([]byte, metadataAEAD.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonceMeta); err != nil {
-		return nil, nil, err
-	}
 	metaPlain, err := proto.Marshal(metadata)
 	if err != nil {
 		return nil, nil, err
 	}
-	metaCipher := metadataAEAD.Seal(nil, nonceMeta, metaPlain, nil)
-	metadata.MostRecentContent.MetadataAeadLength = int64(len(nonceMeta) + len(metaCipher))
+	ad, err := revisionMetadataAD(metadata.MostRecentContent)
+	if err != nil {
+		return nil, nil, err
+	}
+	metaCipher, err := metadataSeal(metaPlain, ad)
+	if err != nil {
+		return nil, nil, err
+	}
+	metadata.MostRecentContent.MetadataAeadLength = int64(len(metaCipher))
 
 	ivKey, err := revisionIVKey(metadata.MostRecentContent)
 	if err != nil {
@@ -132,10 +135,7 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal SealFunc, metadat
 		return nil, nil, err
 	}
 
-	if err := binary.Write(w, binary.BigEndian, uint32(len(nonceMeta)+len(metaCipher))); err != nil {
-		return nil, nil, err
-	}
-	if _, err := w.Write(nonceMeta); err != nil {
+	if err := binary.Write(w, binary.BigEndian, uint32(len(metaCipher))); err != nil {
 		return nil, nil, err
 	}
 	if _, err := w.Write(metaCipher); err != nil {
@@ -153,9 +153,9 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal SealFunc, metadat
 
 // ParseContentFile decodes user content from r, returning the content, metadata
 // and the serialized content identifier.
-func ParseContentFile(r io.ReaderAt, contentOpen OpenFunc, metadataAEAD cipher.AEAD, xor XORKeyStreamAt) (UserContent, *storedpb.Metadata, []byte, error) {
+func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc, xor XORKeyStreamAt) (UserContent, *storedpb.Metadata, []byte, error) {
 	var result UserContent
-	if contentOpen == nil || metadataAEAD == nil {
+	if contentOpen == nil || metadataOpen == nil {
 		return result, nil, nil, errors.New("usercontent: encryption primitives must be provided")
 	}
 	if xor == nil {
@@ -209,13 +209,11 @@ func ParseContentFile(r io.ReaderAt, contentOpen OpenFunc, metadataAEAD cipher.A
 	}
 	offset += int64(metaLen)
 
-	nonceSize := metadataAEAD.NonceSize()
-	if len(metaBuf) < nonceSize {
-		return result, nil, nil, errInvalidContent
+	ad, err := revisionMetadataAD(revision)
+	if err != nil {
+		return result, nil, nil, err
 	}
-	nonce := metaBuf[:nonceSize]
-	encMeta := metaBuf[nonceSize:]
-	metaPlain, err := metadataAEAD.Open(nil, nonce, encMeta, nil)
+	metaPlain, err := metadataOpen(metaBuf, ad)
 	if err != nil {
 		return result, nil, nil, err
 	}
@@ -240,7 +238,7 @@ func ParseContentFile(r io.ReaderAt, contentOpen OpenFunc, metadataAEAD cipher.A
 		if err != nil {
 			return result, nil, nil, err
 		}
-		result.Files[name] = File{Body: file, Size: plainLen}
+		result.Files[name] = File{Body: file, Size: plainLen, Sha256: findFileSha(&metadata, name)}
 		offset += int64(cipherLen)
 	}
 
@@ -256,6 +254,12 @@ type fileDescriptor struct {
 }
 
 func hashFile(file File) ([]byte, error) {
+	if len(file.Sha256) == sha256.Size {
+		return append([]byte(nil), file.Sha256...), nil
+	}
+	if file.Body == nil {
+		return nil, errors.New("usercontent: file body missing for hash")
+	}
 	hasher := sha256.New()
 	reader := io.NewSectionReader(file.Body, 0, file.Size)
 	if _, err := io.Copy(hasher, reader); err != nil {
@@ -282,7 +286,16 @@ func findFileLength(metadata *storedpb.Metadata, name string) int64 {
 	return 0
 }
 
-func revisionIVKey(revision *storedpb.ContentRevision) ([]byte, error) {
+func findFileSha(metadata *storedpb.Metadata, name string) []byte {
+	for _, fh := range metadata.GetFiles() {
+		if fh.GetName() == name {
+			return append([]byte(nil), fh.GetFileSha256()...)
+		}
+	}
+	return nil
+}
+
+func revisionMaterial(revision *storedpb.ContentRevision) ([]byte, error) {
 	if revision == nil {
 		return nil, errors.New("usercontent: nil revision")
 	}
@@ -303,7 +316,30 @@ func revisionIVKey(revision *storedpb.ContentRevision) ([]byte, error) {
 	binary.BigEndian.PutUint64(buf[0:8], uint64(revision.GetCreatedAt()))
 	binary.BigEndian.PutUint64(buf[8:16], uint64(revision.GetCreatedAtNs()))
 	binary.BigEndian.PutUint64(buf[16:], uint64(revision.GetMetadataAeadLength()))
-	sum := sha256.Sum256(buf)
+	return buf, nil
+}
+
+func revisionIVKey(revision *storedpb.ContentRevision) ([]byte, error) {
+	material, err := revisionMaterial(revision)
+	if err != nil {
+		return nil, err
+	}
+	data := append([]byte("usercontent/file-iv:"), material...)
+	sum := sha256.Sum256(data)
+	return sum[:], nil
+}
+
+func revisionMetadataAD(revision *storedpb.ContentRevision) ([]byte, error) {
+	material, err := revisionMaterial(revision)
+	if err != nil {
+		return nil, err
+	}
+	trimmed := append([]byte(nil), material...)
+	for i := 16; i < len(trimmed); i++ {
+		trimmed[i] = 0
+	}
+	data := append([]byte("usercontent/metadata-ad:"), trimmed...)
+	sum := sha256.Sum256(data)
 	return sum[:], nil
 }
 
