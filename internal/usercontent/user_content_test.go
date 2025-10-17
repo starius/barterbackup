@@ -27,12 +27,12 @@ func TestContentRoundTrip(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	meta, cid, err := WriteContentFile(&buf, uc, contentSeal, contentOpen, metadataAEAD, xor, ivKey)
+	meta, cid, err := WriteContentFile(&buf, uc, contentSeal, metadataAEAD, xor, ivKey)
 	require.NoError(t, err)
 	require.NotNil(t, meta)
 	require.NotEmpty(t, cid)
 
-	parsed, parsedMeta, parsedCID, err := ParseContentFile(bytes.NewReader(buf.Bytes()), contentSeal, contentOpen, metadataAEAD, xor, ivKey)
+	parsed, parsedMeta, parsedCID, err := ParseContentFile(bytes.NewReader(buf.Bytes()), contentOpen, metadataAEAD, xor, ivKey)
 	require.NoError(t, err)
 	require.NotNil(t, parsedMeta)
 	require.Equal(t, cid, parsedCID)

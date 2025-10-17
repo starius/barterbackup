@@ -85,8 +85,8 @@ func MetadataFromUserContent(uc UserContent) (*storedpb.Metadata, []fileDescript
 
 // WriteContentFile encodes user content to w using the provided primitives and
 // returns the metadata (with AEAD length populated) and the generated content ID.
-func WriteContentFile(w io.Writer, uc UserContent, contentSeal SealFunc, contentOpen OpenFunc, metadataAEAD cipher.AEAD, xor XORKeyStreamAt, ivKey []byte) (*storedpb.Metadata, []byte, error) {
-	if contentSeal == nil || contentOpen == nil || metadataAEAD == nil {
+func WriteContentFile(w io.Writer, uc UserContent, contentSeal SealFunc, metadataAEAD cipher.AEAD, xor XORKeyStreamAt, ivKey []byte) (*storedpb.Metadata, []byte, error) {
+	if contentSeal == nil || metadataAEAD == nil {
 		return nil, nil, errors.New("usercontent: encryption primitives must be provided")
 	}
 	if xor == nil {
@@ -148,9 +148,9 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal SealFunc, content
 
 // ParseContentFile decodes user content from r, returning the content, metadata
 // and the serialized content identifier.
-func ParseContentFile(r io.ReaderAt, contentSeal SealFunc, contentOpen OpenFunc, metadataAEAD cipher.AEAD, xor XORKeyStreamAt, ivKey []byte) (UserContent, *storedpb.Metadata, []byte, error) {
+func ParseContentFile(r io.ReaderAt, contentOpen OpenFunc, metadataAEAD cipher.AEAD, xor XORKeyStreamAt, ivKey []byte) (UserContent, *storedpb.Metadata, []byte, error) {
 	var result UserContent
-	if contentSeal == nil || contentOpen == nil || metadataAEAD == nil {
+	if contentOpen == nil || metadataAEAD == nil {
 		return result, nil, nil, errors.New("usercontent: encryption primitives must be provided")
 	}
 	if xor == nil {

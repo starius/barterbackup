@@ -77,5 +77,6 @@ func newDeterministicAEAD(t *testing.T) (SealFunc, OpenFunc) {
 	require.NoError(t, err)
 	seal, open, err := NewAEAD(key)
 	require.NoError(t, err)
+
 	return seal, open
 }
