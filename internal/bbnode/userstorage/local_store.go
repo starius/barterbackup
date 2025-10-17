@@ -40,6 +40,7 @@ type Store struct {
 	fs           Filesystem
 	files        map[string][]byte
 	metadata     *storedpb.Metadata
+	revision     *storedpb.ContentRevision
 	content      []byte
 	contentID    []byte
 	contentSeal  usercontent.SealFunc
@@ -99,7 +100,7 @@ func (s *Store) load() error {
 		}
 		return err
 	}
-	uc, meta, cid, err := usercontent.ParseContentFile(bytes.NewReader(data), s.contentOpen, s.metadataOpen, s.xor)
+	uc, meta, rev, cid, err := usercontent.ParseContentFile(bytes.NewReader(data), s.contentOpen, s.metadataOpen, s.xor)
 	if err != nil {
 		return err
 	}
@@ -116,6 +117,7 @@ func (s *Store) load() error {
 	}
 
 	s.metadata = meta
+	s.revision = rev
 	s.content = bytes.Clone(data)
 	s.contentID = append([]byte(nil), cid...)
 	return nil
@@ -185,7 +187,7 @@ func (s *Store) persist() error {
 	}
 
 	var buf bytes.Buffer
-	meta, cid, err := usercontent.WriteContentFile(&buf, uc, s.contentSeal, s.metadataSeal, s.xor)
+	meta, rev, cid, err := usercontent.WriteContentFile(&buf, uc, s.contentSeal, s.metadataSeal, s.xor)
 	if err != nil {
 		return err
 	}
@@ -198,6 +200,7 @@ func (s *Store) persist() error {
 	s.content = append([]byte(nil), contentBytes...)
 	s.contentID = append([]byte(nil), cid...)
 	s.metadata = meta
+	s.revision = rev
 	return nil
 }
 

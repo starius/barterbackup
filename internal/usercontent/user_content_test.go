@@ -26,22 +26,23 @@ func TestContentRoundTrip(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	meta, cid, err := WriteContentFile(&buf, uc, contentSeal, metadataSeal, xor)
+	meta, rev, cid, err := WriteContentFile(&buf, uc, contentSeal, metadataSeal, xor)
 	require.NoError(t, err)
 	require.NotNil(t, meta)
+	require.NotNil(t, rev)
 	require.NotEmpty(t, cid)
 
-	parsed, parsedMeta, parsedCID, err := ParseContentFile(bytes.NewReader(buf.Bytes()), contentOpen, metadataOpen, xor)
+	parsed, parsedMeta, parsedRev, parsedCID, err := ParseContentFile(bytes.NewReader(buf.Bytes()), contentOpen, metadataOpen, xor)
 	require.NoError(t, err)
 	require.NotNil(t, parsedMeta)
+	require.NotNil(t, parsedRev)
 	require.Equal(t, cid, parsedCID)
 
-	cid2, err := MakeContentID(parsedMeta.MostRecentContent, contentSeal)
-	require.NoError(t, err)
-	require.Equal(t, cid, cid2)
-
-	require.Equal(t, uc.CreatedAt.Unix(), parsedMeta.GetMostRecentContent().GetCreatedAt())
-	require.Equal(t, uc.CreatedAt.Nanosecond(), int(parsedMeta.GetMostRecentContent().GetCreatedAtNs()))
+	require.Equal(t, rev.GetCreatedAt(), parsedRev.GetCreatedAt())
+	require.Equal(t, rev.GetCreatedAtNs(), parsedRev.GetCreatedAtNs())
+	require.Equal(t, rev.GetMetadataAeadLength(), parsedRev.GetMetadataAeadLength())
+	require.Equal(t, uc.CreatedAt.Unix(), rev.GetCreatedAt())
+	require.Equal(t, uc.CreatedAt.Nanosecond(), int(rev.GetCreatedAtNs()))
 
 	require.Equal(t, len(uc.Files), len(parsed.Files))
 	for name, file := range parsed.Files {
