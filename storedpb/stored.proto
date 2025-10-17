@@ -54,13 +54,10 @@ message Peer {
 // Metadata is short data that is stored together with the main content on
 // other peers and survives a node reset.
 message Metadata {
-    // most_recent_content is the latest content revision.
-    ContentRevision most_recent_content = 1;
-
     // files is the list of files stored as a concatenation in the content
     // after the metadata.
-    repeated FileHeader files = 2;
+    repeated FileHeader files = 1;
 
     // peers is the list of known peers with some information about them.
-    repeated Peer peers = 3;
+    repeated Peer peers = 2;
 }

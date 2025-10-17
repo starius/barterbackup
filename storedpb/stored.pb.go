@@ -234,13 +234,11 @@ func (x *Peer) GetScoreMeasuredAt() int64 {
 // other peers and survives a node reset.
 type Metadata struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// most_recent_content is the latest content revision.
-	MostRecentContent *ContentRevision `protobuf:"bytes,1,opt,name=most_recent_content,json=mostRecentContent,proto3" json:"most_recent_content,omitempty"`
 	// files is the list of files stored as a concatenation in the content
 	// after the metadata.
-	Files []*FileHeader `protobuf:"bytes,2,rep,name=files,proto3" json:"files,omitempty"`
+	Files []*FileHeader `protobuf:"bytes,1,rep,name=files,proto3" json:"files,omitempty"`
 	// peers is the list of known peers with some information about them.
-	Peers         []*Peer `protobuf:"bytes,3,rep,name=peers,proto3" json:"peers,omitempty"`
+	Peers         []*Peer `protobuf:"bytes,2,rep,name=peers,proto3" json:"peers,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -273,13 +271,6 @@ func (x *Metadata) ProtoReflect() protoreflect.Message {
 // Deprecated: Use Metadata.ProtoReflect.Descriptor instead.
 func (*Metadata) Descriptor() ([]byte, []int) {
 	return file_storedpb_stored_proto_rawDescGZIP(), []int{3}
-}
-
-func (x *Metadata) GetMostRecentContent() *ContentRevision {
-	if x != nil {
-		return x.MostRecentContent
-	}
-	return nil
 }
 
 func (x *Metadata) GetFiles() []*FileHeader {
@@ -317,11 +308,10 @@ const file_storedpb_stored_proto_rawDesc = "" +
 	"\fonion_pubkey\x18\x01 \x01(\fR\vonionPubkey\x12\x19\n" +
 	"\baead_key\x18\x02 \x01(\fR\aaeadKey\x12#\n" +
 	"\rscore_seconds\x18\x03 \x01(\x03R\fscoreSeconds\x12*\n" +
-	"\x11score_measured_at\x18\x04 \x01(\x03R\x0fscoreMeasuredAt\"\xa7\x01\n" +
-	"\bMetadata\x12I\n" +
-	"\x13most_recent_content\x18\x01 \x01(\v2\x19.storedpb.ContentRevisionR\x11mostRecentContent\x12*\n" +
-	"\x05files\x18\x02 \x03(\v2\x14.storedpb.FileHeaderR\x05files\x12$\n" +
-	"\x05peers\x18\x03 \x03(\v2\x0e.storedpb.PeerR\x05peersB*Z(github.com/starius/barterbackup/storedpbb\x06proto3"
+	"\x11score_measured_at\x18\x04 \x01(\x03R\x0fscoreMeasuredAt\"\\\n" +
+	"\bMetadata\x12*\n" +
+	"\x05files\x18\x01 \x03(\v2\x14.storedpb.FileHeaderR\x05files\x12$\n" +
+	"\x05peers\x18\x02 \x03(\v2\x0e.storedpb.PeerR\x05peersB*Z(github.com/starius/barterbackup/storedpbb\x06proto3"
 
 var (
 	file_storedpb_stored_proto_rawDescOnce sync.Once
@@ -343,14 +333,13 @@ var file_storedpb_stored_proto_goTypes = []any{
 	(*Metadata)(nil),        // 3: storedpb.Metadata
 }
 var file_storedpb_stored_proto_depIdxs = []int32{
-	0, // 0: storedpb.Metadata.most_recent_content:type_name -> storedpb.ContentRevision
-	1, // 1: storedpb.Metadata.files:type_name -> storedpb.FileHeader
-	2, // 2: storedpb.Metadata.peers:type_name -> storedpb.Peer
-	3, // [3:3] is the sub-list for method output_type
-	3, // [3:3] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	1, // 0: storedpb.Metadata.files:type_name -> storedpb.FileHeader
+	2, // 1: storedpb.Metadata.peers:type_name -> storedpb.Peer
+	2, // [2:2] is the sub-list for method output_type
+	2, // [2:2] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_storedpb_stored_proto_init() }
