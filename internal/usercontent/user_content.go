@@ -102,6 +102,11 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal Sea
 	if err != nil {
 		return nil, err
 	}
+
+	if revision.MetadataAeadLength != 0 {
+		return nil, errors.New("usercontent: metadata_aead_length preset")
+	}
+
 	ad, err := revisionMetadataAD(revision)
 	if err != nil {
 		return nil, err
@@ -111,6 +116,11 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal Sea
 		return nil, err
 	}
 	revision.MetadataAeadLength = int64(len(metaCipher))
+
+	ad, err = revisionMetadataAD(revision)
+	if err != nil {
+		return nil, err
+	}
 
 	ivKey, err := revisionIVKey(revision)
 	if err != nil {
