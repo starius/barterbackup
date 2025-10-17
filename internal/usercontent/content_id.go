@@ -11,6 +11,7 @@ import (
 const (
 	contentIDVersion       = 1
 	contentIDPlaintextSize = 1 + 3 + 8
+	maxMetadataLen         = 0xFFFFFF
 )
 
 var errInvalidContentID = errors.New("usercontent: invalid content id")

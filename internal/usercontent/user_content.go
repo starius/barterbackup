@@ -55,10 +55,6 @@ func metadataFromUserContent(uc UserContent) ([]byte, []fileDescriptor, *storedp
 	meta := &storedpb.Metadata{
 		Peers: append([]*storedpb.Peer(nil), uc.Peers...),
 	}
-	revision := &storedpb.ContentRevision{
-		CreatedAt:   uc.CreatedAt.Unix(),
-		CreatedAtNs: int64(uc.CreatedAt.Nanosecond()),
-	}
 
 	descriptors := make([]fileDescriptor, 0, len(names))
 	for _, name := range names {
@@ -85,6 +81,15 @@ func metadataFromUserContent(uc UserContent) ([]byte, []fileDescriptor, *storedp
 	if err != nil {
 		return nil, nil, nil, err
 	}
+
+	expectedCipherLen := len(metaPlain) + siv.TagSize
+
+	revision := &storedpb.ContentRevision{
+		CreatedAt:          uc.CreatedAt.Unix(),
+		CreatedAtNs:        int64(uc.CreatedAt.Nanosecond()),
+		MetadataAeadLength: int64(expectedCipherLen),
+	}
+
 	return metaPlain, descriptors, revision, nil
 }
 
@@ -111,7 +116,9 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal Sea
 	if err != nil {
 		return nil, err
 	}
-	revision.MetadataAeadLength = int64(len(metaCipher))
+	if int64(len(metaCipher)) != revision.MetadataAeadLength {
+		return nil, fmt.Errorf("usercontent: metadata aead length mismatch: expected %d got %d", revision.MetadataAeadLength, len(metaCipher))
+	}
 
 	ivKey, err := revisionIVKey(revision)
 	if err != nil {
@@ -189,18 +196,11 @@ func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc, xor XOR
 	}
 
 	metaLen := revision.GetMetadataAeadLength()
-	if metaLen < 0 {
-		return result, nil, errInvalidContent
-	}
-	if metaLen > int64(int(^uint(0)>>1)) {
-		return result, nil, fmt.Errorf("usercontent: metadata ciphertext too large: %d", metaLen)
-	}
-	length := int(metaLen)
-	metaBuf := make([]byte, length)
+	metaBuf := make([]byte, metaLen)
 	if _, err := r.ReadAt(metaBuf, offset); err != nil {
 		return result, nil, err
 	}
-	offset += int64(length)
+	offset += metaLen
 
 	ad, err := revisionMetadataAD(revision)
 	if err != nil {
@@ -221,18 +221,15 @@ func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc, xor XOR
 
 	names := orderedNames(&metadata)
 	for _, name := range names {
-		var cipherLen uint64
-		if err := readUint64(r, offset, &cipherLen); err != nil {
-			return result, nil, err
-		}
-		offset += 8
-		plainLen := findFileLength(&metadata, name)
-		file, err := newCipherFile(r, xor, ivKey, name, offset, int64(cipherLen), plainLen)
+		size := findFileLength(&metadata, name)
+		file, err := newCipherFile(r, xor, ivKey, offset, size)
 		if err != nil {
 			return result, nil, err
 		}
-		result.Files[name] = File{Body: file, Size: plainLen}
-		offset += int64(cipherLen)
+		result.Files[name] = File{
+			Body: file, Size: size,
+		}
+		offset += size
 	}
 
 	return result, cid, nil
@@ -297,6 +294,7 @@ func revisionMaterial(revision *storedpb.ContentRevision) ([]byte, error) {
 	binary.BigEndian.PutUint64(buf[0:8], uint64(revision.GetCreatedAt()))
 	binary.BigEndian.PutUint64(buf[8:16], uint64(revision.GetCreatedAtNs()))
 	binary.BigEndian.PutUint64(buf[16:], uint64(revision.GetMetadataAeadLength()))
+
 	return buf, nil
 }
 
@@ -305,11 +303,13 @@ func revisionIVKey(revision *storedpb.ContentRevision) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	deriver := hkdf.New(sha256.New, material, nil, []byte("usercontent/file-iv"))
-	key := make([]byte, sha256.Size)
+	key := make([]byte, aes.BlockSize)
 	if _, err := io.ReadFull(deriver, key); err != nil {
 		return nil, err
 	}
+
 	return key, nil
 }
 
@@ -318,28 +318,25 @@ func revisionMetadataAD(revision *storedpb.ContentRevision) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	deriver := hkdf.New(sha256.New, material, nil, []byte("usercontent/metadata-ad"))
 	ad := make([]byte, sha256.Size)
 	if _, err := io.ReadFull(deriver, ad); err != nil {
 		return nil, err
 	}
+
 	return ad, nil
 }
 
 func writeEncryptedFile(w io.Writer, desc fileDescriptor, xor XORKeyStreamAt, ivKey []byte) error {
-	if err := binary.Write(w, binary.BigEndian, uint64(desc.file.Size)); err != nil {
-		return err
-	}
-	iv := make([]byte, aes.BlockSize)
-	copy(iv, ivKey)
 	reader := io.NewSectionReader(desc.file.Body, 0, desc.file.Size)
 	buf := make([]byte, 32*1024)
 	offset := uint64(0)
 	for {
 		n, err := reader.Read(buf)
 		if n > 0 {
-			chunk := make([]byte, n)
-			xor(chunk, buf[:n], iv, offset)
+			chunk := buf[:n]
+			xor(chunk, chunk, ivKey, offset)
 			if _, werr := w.Write(chunk); werr != nil {
 				return werr
 			}
@@ -352,6 +349,7 @@ func writeEncryptedFile(w io.Writer, desc fileDescriptor, xor XORKeyStreamAt, iv
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -364,13 +362,18 @@ type cipherFile struct {
 	size   int64
 }
 
-func newCipherFile(src io.ReaderAt, xor XORKeyStreamAt, ivKey []byte, name string, offset, cipherLen, plainLen int64) (*cipherFile, error) {
-	if plainLen < 0 || cipherLen < 0 {
+func newCipherFile(src io.ReaderAt, xor XORKeyStreamAt, iv []byte, offset, size int64) (*cipherFile, error) {
+	if offset < 0 || size < 0 {
 		return nil, errors.New("usercontent: invalid file lengths")
 	}
-	iv := make([]byte, aes.BlockSize)
-	copy(iv, ivKey)
-	return &cipherFile{src: src, xor: xor, iv: iv, offset: offset, length: cipherLen, size: plainLen}, nil
+
+	return &cipherFile{
+		src:    src,
+		xor:    xor,
+		iv:     iv,
+		offset: offset,
+		size:   size,
+	}, nil
 }
 
 func (cf *cipherFile) ReadAt(p []byte, off int64) (int, error) {
@@ -380,18 +383,21 @@ func (cf *cipherFile) ReadAt(p []byte, off int64) (int, error) {
 	if off >= cf.size {
 		return 0, io.EOF
 	}
+
 	if int64(len(p)) > cf.size-off {
 		p = p[:cf.size-off]
 	}
-	ciphertext := make([]byte, len(p))
-	n, err := cf.src.ReadAt(ciphertext, cf.offset+off)
+
+	n, err := cf.src.ReadAt(p, cf.offset+off)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return 0, err
 	}
-	cf.xor(p[:n], ciphertext[:n], cf.iv, uint64(off))
+
+	cf.xor(p[:n], p[:n], cf.iv, uint64(off))
 	if int64(n)+off >= cf.size || n < len(p) {
 		return n, io.EOF
 	}
+
 	return n, nil
 }
 
