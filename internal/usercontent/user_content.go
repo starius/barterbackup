@@ -10,6 +10,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/ericlagergren/siv"
 	"github.com/starius/barterbackup/storedpb"
 	"golang.org/x/crypto/hkdf"
 	"google.golang.org/protobuf/proto"
@@ -44,7 +45,7 @@ type UserContent struct {
 
 // metadataFromUserContent builds the metadata structure for the provided
 // user content and the associated revision descriptor derived from timestamps.
-func metadataFromUserContent(uc UserContent) (*storedpb.Metadata, []fileDescriptor, *storedpb.ContentRevision, error) {
+func metadataFromUserContent(uc UserContent) ([]byte, []fileDescriptor, *storedpb.ContentRevision, error) {
 	names := make([]string, 0, len(uc.Files))
 	for name := range uc.Files {
 		names = append(names, name)
@@ -80,7 +81,12 @@ func metadataFromUserContent(uc UserContent) (*storedpb.Metadata, []fileDescript
 		})
 	}
 
-	return meta, descriptors, revision, nil
+	metaPlain, err := proto.Marshal(meta)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	revision.MetadataAeadLength = int64(len(metaPlain) + siv.TagSize)
+	return metaPlain, descriptors, revision, nil
 }
 
 // WriteContentFile encodes user content to w using the provided primitives and
@@ -93,18 +99,9 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal Sea
 		return nil, errors.New("usercontent: XOR function missing")
 	}
 
-	metadata, descriptors, revision, err := metadataFromUserContent(uc)
+	metaPlain, descriptors, revision, err := metadataFromUserContent(uc)
 	if err != nil {
 		return nil, err
-	}
-
-	metaPlain, err := proto.Marshal(metadata)
-	if err != nil {
-		return nil, err
-	}
-
-	if revision.MetadataAeadLength != 0 {
-		return nil, errors.New("usercontent: metadata_aead_length preset")
 	}
 
 	ad, err := revisionMetadataAD(revision)
@@ -115,11 +112,8 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal Sea
 	if err != nil {
 		return nil, err
 	}
-	revision.MetadataAeadLength = int64(len(metaCipher))
-
-	ad, err = revisionMetadataAD(revision)
-	if err != nil {
-		return nil, err
+	if int64(len(metaCipher)) != revision.GetMetadataAeadLength() {
+		return nil, fmt.Errorf("usercontent: metadata aead length mismatch: expected %d got %d", revision.GetMetadataAeadLength(), len(metaCipher))
 	}
 
 	ivKey, err := revisionIVKey(revision)
@@ -335,11 +329,7 @@ func revisionMetadataAD(revision *storedpb.ContentRevision) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	trimmed := append([]byte(nil), material...)
-	for i := 16; i < len(trimmed); i++ {
-		trimmed[i] = 0
-	}
-	deriver := hkdf.New(sha256.New, trimmed, nil, []byte("usercontent/metadata-ad"))
+	deriver := hkdf.New(sha256.New, material, nil, []byte("usercontent/metadata-ad"))
 	ad := make([]byte, sha256.Size)
 	if _, err := io.ReadFull(deriver, ad); err != nil {
 		return nil, err
