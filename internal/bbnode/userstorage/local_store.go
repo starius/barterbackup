@@ -39,8 +39,6 @@ type contentSnapshot struct {
 type Store struct {
 	fs           Filesystem
 	files        map[string][]byte
-	metadata     *storedpb.Metadata
-	revision     *storedpb.ContentRevision
 	content      []byte
 	contentID    []byte
 	contentSeal  usercontent.SealFunc
@@ -48,6 +46,7 @@ type Store struct {
 	metadataSeal usercontent.SealFunc
 	metadataOpen usercontent.OpenFunc
 	xor          usercontent.XORKeyStreamAt
+	peers        []*storedpb.Peer
 }
 
 // NewStore loads persisted state from the provided filesystem.
@@ -100,7 +99,7 @@ func (s *Store) load() error {
 		}
 		return err
 	}
-	uc, meta, rev, cid, err := usercontent.ParseContentFile(bytes.NewReader(data), s.contentOpen, s.metadataOpen, s.xor)
+	uc, cid, err := usercontent.ParseContentFile(bytes.NewReader(data), s.contentOpen, s.metadataOpen, s.xor)
 	if err != nil {
 		return err
 	}
@@ -116,10 +115,9 @@ func (s *Store) load() error {
 		s.files[name] = buf
 	}
 
-	s.metadata = meta
-	s.revision = rev
 	s.content = bytes.Clone(data)
 	s.contentID = append([]byte(nil), cid...)
+	s.peers = append([]*storedpb.Peer(nil), uc.Peers...)
 	return nil
 }
 
@@ -182,12 +180,12 @@ func (s *Store) persist() error {
 		CreatedAt: now,
 		Files:     cloneFiles(s.files),
 	}
-	if s.metadata != nil {
-		uc.Peers = s.metadata.GetPeers()
+	if len(s.peers) > 0 {
+		uc.Peers = append([]*storedpb.Peer(nil), s.peers...)
 	}
 
 	var buf bytes.Buffer
-	meta, rev, cid, err := usercontent.WriteContentFile(&buf, uc, s.contentSeal, s.metadataSeal, s.xor)
+	cid, err := usercontent.WriteContentFile(&buf, uc, s.contentSeal, s.metadataSeal, s.xor)
 	if err != nil {
 		return err
 	}
@@ -199,8 +197,7 @@ func (s *Store) persist() error {
 
 	s.content = append([]byte(nil), contentBytes...)
 	s.contentID = append([]byte(nil), cid...)
-	s.metadata = meta
-	s.revision = rev
+	s.peers = append([]*storedpb.Peer(nil), uc.Peers...)
 	return nil
 }
 

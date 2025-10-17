@@ -84,142 +84,142 @@ func metadataFromUserContent(uc UserContent) (*storedpb.Metadata, []fileDescript
 }
 
 // WriteContentFile encodes user content to w using the provided primitives and
-// returns the metadata (with AEAD length populated) and the generated content ID.
-func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal SealFunc, xor XORKeyStreamAt) (*storedpb.Metadata, *storedpb.ContentRevision, []byte, error) {
+// returns the generated content ID.
+func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal SealFunc, xor XORKeyStreamAt) ([]byte, error) {
 	if contentSeal == nil || metadataSeal == nil {
-		return nil, nil, nil, errors.New("usercontent: encryption primitives must be provided")
+		return nil, errors.New("usercontent: encryption primitives must be provided")
 	}
 	if xor == nil {
-		return nil, nil, nil, errors.New("usercontent: XOR function missing")
+		return nil, errors.New("usercontent: XOR function missing")
 	}
 
 	metadata, descriptors, revision, err := metadataFromUserContent(uc)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 
 	metaPlain, err := proto.Marshal(metadata)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	ad, err := revisionMetadataAD(revision)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	metaCipher, err := metadataSeal(metaPlain, ad)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	revision.MetadataAeadLength = int64(len(metaCipher))
 
 	ivKey, err := revisionIVKey(revision)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 
 	contentID, err := MakeContentID(revision, contentSeal)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 
 	if _, err := w.Write([]byte(headerMagic)); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	if _, err := w.Write([]byte{currentVersion}); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	if err := binary.Write(w, binary.BigEndian, uint32(len(contentID))); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	if _, err := w.Write(contentID); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 
 	if err := binary.Write(w, binary.BigEndian, uint32(len(metaCipher))); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	if _, err := w.Write(metaCipher); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 
 	for _, desc := range descriptors {
 		if err := writeEncryptedFile(w, desc, xor, ivKey); err != nil {
-			return nil, nil, nil, err
+			return nil, err
 		}
 	}
 
-	return metadata, revision, contentID, nil
+	return contentID, nil
 }
 
-// ParseContentFile decodes user content from r, returning the content, metadata
-// and the serialized content identifier.
-func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc, xor XORKeyStreamAt) (UserContent, *storedpb.Metadata, *storedpb.ContentRevision, []byte, error) {
+// ParseContentFile decodes user content from r and returns the content and
+// serialized content identifier.
+func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc, xor XORKeyStreamAt) (UserContent, []byte, error) {
 	var result UserContent
 	if contentOpen == nil || metadataOpen == nil {
-		return result, nil, nil, nil, errors.New("usercontent: encryption primitives must be provided")
+		return result, nil, errors.New("usercontent: encryption primitives must be provided")
 	}
 	if xor == nil {
-		return result, nil, nil, nil, errors.New("usercontent: XOR function missing")
+		return result, nil, errors.New("usercontent: XOR function missing")
 	}
 
 	header := make([]byte, len(headerMagic)+1)
 	if _, err := r.ReadAt(header, 0); err != nil {
-		return result, nil, nil, nil, err
+		return result, nil, err
 	}
 	if string(header[:len(headerMagic)]) != headerMagic {
-		return result, nil, nil, nil, errInvalidMagic
+		return result, nil, errInvalidMagic
 	}
 	if header[len(headerMagic)] != currentVersion {
-		return result, nil, nil, nil, fmt.Errorf("usercontent: unsupported version %d", header[len(headerMagic)])
+		return result, nil, fmt.Errorf("usercontent: unsupported version %d", header[len(headerMagic)])
 	}
 
 	offset := int64(len(header))
 	var cidLen uint32
 	if err := readUint32(r, offset, &cidLen); err != nil {
-		return result, nil, nil, nil, err
+		return result, nil, err
 	}
 	offset += 4
 	cid := make([]byte, cidLen)
 	if _, err := r.ReadAt(cid, offset); err != nil {
-		return result, nil, nil, nil, err
+		return result, nil, err
 	}
 	offset += int64(cidLen)
 
 	revision, err := ParseContentID(cid, contentOpen)
 	if err != nil {
-		return result, nil, nil, nil, err
+		return result, nil, err
 	}
 
 	ivKey, err := revisionIVKey(revision)
 	if err != nil {
-		return result, nil, nil, nil, err
+		return result, nil, err
 	}
 
 	var metaLen uint32
 	if err := readUint32(r, offset, &metaLen); err != nil {
-		return result, nil, nil, nil, err
+		return result, nil, err
 	}
 	offset += 4
 	if int64(metaLen) != revision.GetMetadataAeadLength() {
-		return result, nil, nil, nil, errInvalidContent
+		return result, nil, errInvalidContent
 	}
 	metaBuf := make([]byte, metaLen)
 	if _, err := r.ReadAt(metaBuf, offset); err != nil {
-		return result, nil, nil, nil, err
+		return result, nil, err
 	}
 	offset += int64(metaLen)
 
 	ad, err := revisionMetadataAD(revision)
 	if err != nil {
-		return result, nil, nil, nil, err
+		return result, nil, err
 	}
 	metaPlain, err := metadataOpen(metaBuf, ad)
 	if err != nil {
-		return result, nil, nil, nil, err
+		return result, nil, err
 	}
 	var metadata storedpb.Metadata
 	if err := proto.Unmarshal(metaPlain, &metadata); err != nil {
-		return result, nil, nil, nil, err
+		return result, nil, err
 	}
 
 	result.CreatedAt = time.Unix(revision.GetCreatedAt(), revision.GetCreatedAtNs())
@@ -230,19 +230,19 @@ func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc, xor XOR
 	for _, name := range names {
 		var cipherLen uint64
 		if err := readUint64(r, offset, &cipherLen); err != nil {
-			return result, nil, nil, nil, err
+			return result, nil, err
 		}
 		offset += 8
 		plainLen := findFileLength(&metadata, name)
 		file, err := newCipherFile(r, xor, ivKey, name, offset, int64(cipherLen), plainLen)
 		if err != nil {
-			return result, nil, nil, nil, err
+			return result, nil, err
 		}
 		result.Files[name] = File{Body: file, Size: plainLen}
 		offset += int64(cipherLen)
 	}
 
-	return result, &metadata, revision, cid, nil
+	return result, cid, nil
 }
 
 // --- helper structures ---

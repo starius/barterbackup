@@ -26,23 +26,19 @@ func TestContentRoundTrip(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	meta, rev, cid, err := WriteContentFile(&buf, uc, contentSeal, metadataSeal, xor)
+	cid, err := WriteContentFile(&buf, uc, contentSeal, metadataSeal, xor)
 	require.NoError(t, err)
-	require.NotNil(t, meta)
-	require.NotNil(t, rev)
 	require.NotEmpty(t, cid)
 
-	parsed, parsedMeta, parsedRev, parsedCID, err := ParseContentFile(bytes.NewReader(buf.Bytes()), contentOpen, metadataOpen, xor)
+	parsed, parsedCID, err := ParseContentFile(bytes.NewReader(buf.Bytes()), contentOpen, metadataOpen, xor)
 	require.NoError(t, err)
-	require.NotNil(t, parsedMeta)
-	require.NotNil(t, parsedRev)
 	require.Equal(t, cid, parsedCID)
+	require.Equal(t, uc.CreatedAt.UTC(), parsed.CreatedAt.UTC())
 
-	require.Equal(t, rev.GetCreatedAt(), parsedRev.GetCreatedAt())
-	require.Equal(t, rev.GetCreatedAtNs(), parsedRev.GetCreatedAtNs())
-	require.Equal(t, rev.GetMetadataAeadLength(), parsedRev.GetMetadataAeadLength())
-	require.Equal(t, uc.CreatedAt.Unix(), rev.GetCreatedAt())
-	require.Equal(t, uc.CreatedAt.Nanosecond(), int(rev.GetCreatedAtNs()))
+	revision, err := ParseContentID(cid, contentOpen)
+	require.NoError(t, err)
+	require.Equal(t, uc.CreatedAt.Unix(), revision.GetCreatedAt())
+	require.Equal(t, uc.CreatedAt.Nanosecond(), int(revision.GetCreatedAtNs()))
 
 	require.Equal(t, len(uc.Files), len(parsed.Files))
 	for name, file := range parsed.Files {
