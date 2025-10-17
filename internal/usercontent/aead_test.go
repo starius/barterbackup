@@ -48,7 +48,7 @@ func TestAEADVectors(t *testing.T) {
 
 			recovered, err := open(ciphertext)
 			require.NoError(t, err)
-			require.True(t, bytes.Equal(tc.plain, recovered))
+			require.Equal(t, tc.plain, recovered)
 		})
 	}
 

@@ -49,6 +49,7 @@ func NewAEAD(key []byte) (SealFunc, OpenFunc, error) {
 		if len(ct) != 2*contentIDBlockSize {
 			return nil, errors.New("usercontent: unexpected ciphertext length")
 		}
+
 		return ct, nil
 	}
 
@@ -65,6 +66,9 @@ func NewAEAD(key []byte) (SealFunc, OpenFunc, error) {
 			return nil, errors.New("usercontent: invalid plaintext length")
 		}
 		length := int(plain[0])
+		if length < 0 {
+			return nil, errors.New("usercontent: negative length")
+		}
 		if length > contentIDMaxPayload {
 			return nil, errors.New("usercontent: invalid payload length")
 		}
@@ -73,6 +77,7 @@ func NewAEAD(key []byte) (SealFunc, OpenFunc, error) {
 		}
 		out := make([]byte, length)
 		copy(out, plain[1:1+length])
+
 		return out, nil
 	}
 
