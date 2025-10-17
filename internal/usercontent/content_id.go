@@ -41,7 +41,17 @@ func MakeContentID(revision *storedpb.ContentRevision, aeadSeal SealFunc) ([]byt
 		return nil, errors.New("usercontent: created_at_ns out of range")
 	}
 
-	unixNano := uint64(revision.GetCreatedAt())*1_000_000_000 + uint64(revision.GetCreatedAtNs())
+	createdAt := revision.GetCreatedAt()
+	createdAtNs := revision.GetCreatedAtNs()
+
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if createdAt > maxInt64/1_000_000_000 {
+		return nil, errors.New("usercontent: created_at overflow")
+	}
+	unixNano := uint64(createdAt)*1_000_000_000 + uint64(createdAtNs)
+	if int64(unixNano/1_000_000_000) != createdAt || int64(unixNano%1_000_000_000) != createdAtNs {
+		return nil, errors.New("usercontent: timestamp overflow")
+	}
 
 	plaintext := make([]byte, contentIDPlaintextSize)
 	plaintext[0] = contentIDVersion
