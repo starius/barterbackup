@@ -8,12 +8,14 @@ import (
 	"github.com/starius/barterbackup/storedpb"
 )
 
+// Constants describing the serialized content identifier layout.
 const (
 	contentIDVersion       = 1
 	contentIDPlaintextSize = 1 + 3 + 8
 	maxMetadataLen         = 0xFFFFFF
 )
 
+// errInvalidContentID indicates failed validation of a content identifier.
 var errInvalidContentID = errors.New("usercontent: invalid content id")
 
 // MakeContentID encrypts the provided revision using the supplied seal helper.

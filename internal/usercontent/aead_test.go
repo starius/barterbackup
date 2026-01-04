@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestAEADVectors exercises deterministic AEAD outputs against fixed vectors.
 func TestAEADVectors(t *testing.T) {
 	t.Parallel()
 
@@ -79,6 +80,7 @@ func TestAEADVectors(t *testing.T) {
 	require.Equal(t, large, recovered)
 }
 
+// mustHex decodes a hex string and fails the test on error.
 func mustHex(t *testing.T, s string) []byte {
 	t.Helper()
 
@@ -88,6 +90,7 @@ func mustHex(t *testing.T, s string) []byte {
 	return b
 }
 
+// randomKey returns a random 32-byte key for tests.
 func randomKey(t *testing.T) []byte {
 	t.Helper()
 	key := make([]byte, 32)
@@ -96,6 +99,7 @@ func randomKey(t *testing.T) []byte {
 	return key
 }
 
+// makeCipherBlock builds an AES cipher block with a random key.
 func makeCipherBlock(t *testing.T) cipher.Block {
 	t.Helper()
 	block, err := aes.NewCipher(randomKey(t))
@@ -103,6 +107,7 @@ func makeCipherBlock(t *testing.T) cipher.Block {
 	return block
 }
 
+// makeContentIDAEAD provides a fresh AEAD pair backed by a random key.
 func makeContentIDAEAD(t *testing.T) (SealFunc, OpenFunc) {
 	t.Helper()
 	seal, open, err := NewAEAD(randomKey(t))
@@ -110,6 +115,7 @@ func makeContentIDAEAD(t *testing.T) (SealFunc, OpenFunc) {
 	return seal, open
 }
 
+// makeTestXOR builds a CTR-based XOR keystream with manual offset skipping.
 func makeTestXOR(t *testing.T) XORKeyStreamAt {
 	block := makeCipherBlock(t)
 	return func(dst, src, iv []byte, offset uint64) {

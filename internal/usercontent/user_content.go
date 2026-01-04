@@ -17,13 +17,16 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// File-level constants for the content file format header.
 const (
 	headerMagic    = "UCNT"
 	currentVersion = 1
 )
 
 var (
-	errInvalidMagic   = errors.New("usercontent: invalid magic")
+	// errInvalidMagic signals an unexpected file header prefix.
+	errInvalidMagic = errors.New("usercontent: invalid magic")
+	// errInvalidContent is returned when decryption or validation fails.
 	errInvalidContent = errors.New("usercontent: invalid content")
 )
 
@@ -143,6 +146,7 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal Sea
 		return nil, err
 	}
 
+	// Bind file keystream derivation to the authenticated metadata ciphertext tag.
 	metadataTag := metaCipher[len(metaCipher)-siv.TagSize:]
 	ivKey, err := revisionIVKey(revision, metadataTag)
 	if err != nil {
@@ -216,6 +220,7 @@ func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc, xor XOR
 		return result, nil, err
 	}
 
+	// Recover file IV material only after authenticating the metadata.
 	metadataTag := metaBuf[len(metaBuf)-siv.TagSize:]
 	ivKey, err := revisionIVKey(revision, metadataTag)
 	if err != nil {
@@ -265,6 +270,7 @@ type fileDescriptor struct {
 	file File
 }
 
+// hashFile computes a SHA-256 digest for the provided file reader.
 func hashFile(file File) ([]byte, error) {
 	if file.Body == nil {
 		return nil, errors.New("usercontent: file body missing for hash")
@@ -278,6 +284,7 @@ func hashFile(file File) ([]byte, error) {
 	return hasher.Sum(nil), nil
 }
 
+// orderedNames returns the sorted list of file names from metadata.
 func orderedNames(metadata *storedpb.Metadata) []string {
 	names := make([]string, 0, len(metadata.GetFiles()))
 	for _, fh := range metadata.GetFiles() {
@@ -287,6 +294,7 @@ func orderedNames(metadata *storedpb.Metadata) []string {
 	return names
 }
 
+// revisionMaterial serializes the revision fields into a fixed buffer.
 func revisionMaterial(revision *storedpb.ContentRevision) ([]byte, error) {
 	if revision == nil {
 		return nil, errors.New("usercontent: nil revision")
@@ -312,6 +320,7 @@ func revisionMaterial(revision *storedpb.ContentRevision) ([]byte, error) {
 	return buf, nil
 }
 
+// revisionIVKey derives the base IV key material from the revision and metadata tag.
 func revisionIVKey(revision *storedpb.ContentRevision, metadataTag []byte) ([]byte, error) {
 	material, err := revisionMaterial(revision)
 	if err != nil {
@@ -331,6 +340,7 @@ func revisionIVKey(revision *storedpb.ContentRevision, metadataTag []byte) ([]by
 	return key, nil
 }
 
+// revisionMetadataAD derives associated data for metadata sealing.
 func revisionMetadataAD(revision *storedpb.ContentRevision) ([]byte, error) {
 	material, err := revisionMaterial(revision)
 	if err != nil {
@@ -346,6 +356,7 @@ func revisionMetadataAD(revision *storedpb.ContentRevision) ([]byte, error) {
 	return ad, nil
 }
 
+// deriveFileIV produces a per-file IV from the base IV key and filename.
 func deriveFileIV(ivKey []byte, name string) ([]byte, error) {
 	if len(ivKey) == 0 {
 		return nil, errors.New("usercontent: missing iv key")
@@ -358,6 +369,7 @@ func deriveFileIV(ivKey []byte, name string) ([]byte, error) {
 	return iv, nil
 }
 
+// writeEncryptedFile streams a file through the XOR keystream and writes the ciphertext.
 func writeEncryptedFile(w io.Writer, desc fileDescriptor, xor XORKeyStreamAt, iv []byte) error {
 	reader := io.NewSectionReader(desc.file.Body, 0, desc.file.Size)
 	buf := make([]byte, 32*1024)
@@ -383,6 +395,7 @@ func writeEncryptedFile(w io.Writer, desc fileDescriptor, xor XORKeyStreamAt, iv
 	return nil
 }
 
+// cipherFile wraps an encrypted section and applies the XOR keystream on reads.
 type cipherFile struct {
 	src    io.ReaderAt
 	xor    XORKeyStreamAt
@@ -392,6 +405,7 @@ type cipherFile struct {
 	size   int64
 }
 
+// newCipherFile constructs a reader that decrypts on the fly using XOR.
 func newCipherFile(src io.ReaderAt, xor XORKeyStreamAt, iv []byte, offset, size int64) (*cipherFile, error) {
 	if offset < 0 || size < 0 {
 		return nil, errors.New("usercontent: invalid file lengths")
@@ -406,6 +420,7 @@ func newCipherFile(src io.ReaderAt, xor XORKeyStreamAt, iv []byte, offset, size 
 	}, nil
 }
 
+// ReadAt reads from the encrypted file, applying the keystream for the given offset.
 func (cf *cipherFile) ReadAt(p []byte, off int64) (int, error) {
 	if off < 0 {
 		return 0, errors.New("usercontent: negative offset")
@@ -431,6 +446,7 @@ func (cf *cipherFile) ReadAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
+// readUint32 reads a uint32 in big-endian order from the reader at offset.
 func readUint32(r io.ReaderAt, offset int64, out *uint32) error {
 	buf := make([]byte, 4)
 	if _, err := r.ReadAt(buf, offset); err != nil {
@@ -440,6 +456,7 @@ func readUint32(r io.ReaderAt, offset int64, out *uint32) error {
 	return nil
 }
 
+// readUint64 reads a uint64 in big-endian order from the reader at offset.
 func readUint64(r io.ReaderAt, offset int64, out *uint64) error {
 	buf := make([]byte, 8)
 	if _, err := r.ReadAt(buf, offset); err != nil {
@@ -449,6 +466,7 @@ func readUint64(r io.ReaderAt, offset int64, out *uint64) error {
 	return nil
 }
 
+// verifyFileHash compares the stored hash with the hash of the decrypted file.
 func verifyFileHash(expected []byte, file File) error {
 	if len(expected) == 0 {
 		return errInvalidContent

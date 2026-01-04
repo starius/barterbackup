@@ -7,9 +7,11 @@ import (
 	"github.com/ericlagergren/siv"
 )
 
+// contentIDNonceString is the fixed nonce used for AES-GCM-SIV operations.
 const contentIDNonceString = "bb-contentID"
 
 // Static assert that the nonce matches the required size.
+// The zero-length array will fail to compile if lengths diverge.
 var _ [0]struct{} = [len(contentIDNonceString) - siv.NonceSize]struct{}{}
 
 // SealFunc encrypts the provided plaintext with optional associated data.

@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestContentRoundTrip ensures content can be written and parsed without loss.
 func TestContentRoundTrip(t *testing.T) {
 	contentSeal, contentOpen := makeContentIDAEAD(t)
 	metadataSeal, metadataOpen := makeContentIDAEAD(t)
@@ -55,6 +56,7 @@ func TestContentRoundTrip(t *testing.T) {
 	}
 }
 
+// TestFileKeystreamDiffersPerFile checks per-file keystream diversity.
 func TestFileKeystreamDiffersPerFile(t *testing.T) {
 	contentSeal, contentOpen := makeContentIDAEAD(t)
 	metadataSeal, _ := makeContentIDAEAD(t)
@@ -89,6 +91,7 @@ func TestFileKeystreamDiffersPerFile(t *testing.T) {
 	require.NotEqual(t, first, second, "ciphertexts should differ for identical plaintexts in the same revision")
 }
 
+// TestFileTamperDetected asserts corrupted file ciphertext is rejected.
 func TestFileTamperDetected(t *testing.T) {
 	contentSeal, contentOpen := makeContentIDAEAD(t)
 	metadataSeal, metadataOpen := makeContentIDAEAD(t)
