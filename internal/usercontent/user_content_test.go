@@ -113,3 +113,69 @@ func addTestCounter(counter []byte, delta uint64) {
 		carry = carry>>8 + sum>>8
 	}
 }
+
+func TestFileKeystreamDiffersPerFile(t *testing.T) {
+	contentSeal, contentOpen := makeContentIDAEAD(t)
+	metadataSeal, _ := makeContentIDAEAD(t)
+	xor := makeTestXOR(t)
+
+	payload := bytes.Repeat([]byte{0x42}, 64)
+	uc := UserContent{
+		CreatedAt: time.Unix(10, 0),
+		Files: map[string]File{
+			"a": {Body: bytes.NewReader(payload), Size: int64(len(payload))},
+			"b": {Body: bytes.NewReader(payload), Size: int64(len(payload))},
+		},
+	}
+
+	var buf bytes.Buffer
+	cid, err := WriteContentFile(&buf, uc, contentSeal, metadataSeal, xor)
+	require.NoError(t, err)
+
+	revision, err := ParseContentID(cid, contentOpen)
+	require.NoError(t, err)
+
+	headerLen := len(headerMagic) + 1
+	metaLen := int(revision.GetMetadataAeadLength())
+	offset := headerLen + len(cid) + metaLen
+
+	fileLen := len(payload)
+	raw := buf.Bytes()
+	require.GreaterOrEqual(t, len(raw), offset+fileLen*2)
+
+	first := raw[offset : offset+fileLen]
+	second := raw[offset+fileLen : offset+fileLen*2]
+	require.NotEqual(t, first, second, "ciphertexts should differ for identical plaintexts in the same revision")
+}
+
+func TestFileTamperDetected(t *testing.T) {
+	contentSeal, contentOpen := makeContentIDAEAD(t)
+	metadataSeal, metadataOpen := makeContentIDAEAD(t)
+	xor := makeTestXOR(t)
+
+	uc := UserContent{
+		CreatedAt: time.Unix(20, 0),
+		Files: map[string]File{
+			"foo": {Body: bytes.NewReader([]byte("barbaz")), Size: 6},
+		},
+	}
+
+	var buf bytes.Buffer
+	cid, err := WriteContentFile(&buf, uc, contentSeal, metadataSeal, xor)
+	require.NoError(t, err)
+
+	revision, err := ParseContentID(cid, contentOpen)
+	require.NoError(t, err)
+
+	headerLen := len(headerMagic) + 1
+	metaLen := int(revision.GetMetadataAeadLength())
+	offset := headerLen + len(cid) + metaLen
+
+	raw := buf.Bytes()
+	require.GreaterOrEqual(t, len(raw), offset+int(uc.Files["foo"].Size))
+
+	raw[offset] ^= 0x01
+
+	_, _, err = ParseContentFile(bytes.NewReader(raw), contentOpen, metadataOpen, xor)
+	require.ErrorIs(t, err, errInvalidContent)
+}

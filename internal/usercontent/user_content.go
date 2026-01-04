@@ -1,6 +1,7 @@
 package usercontent
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/sha256"
 	"encoding/binary"
@@ -148,7 +149,11 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal Sea
 	}
 
 	for _, desc := range descriptors {
-		if err := writeEncryptedFile(w, desc, xor, ivKey); err != nil {
+		fileIV, err := deriveFileIV(ivKey, desc.name)
+		if err != nil {
+			return nil, err
+		}
+		if err := writeEncryptedFile(w, desc, xor, fileIV); err != nil {
 			return nil, err
 		}
 	}
@@ -220,15 +225,31 @@ func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc, xor XOR
 	result.Files = make(map[string]File, len(metadata.GetFiles()))
 
 	names := orderedNames(&metadata)
+	fileHeaders := make(map[string]*storedpb.FileHeader, len(metadata.GetFiles()))
+	for _, fh := range metadata.GetFiles() {
+		fileHeaders[fh.GetName()] = fh
+	}
 	for _, name := range names {
-		size := findFileLength(&metadata, name)
-		file, err := newCipherFile(r, xor, ivKey, offset, size)
+		header, ok := fileHeaders[name]
+		if !ok {
+			return result, nil, errInvalidContent
+		}
+		size := header.GetFileLength()
+		fileIV, err := deriveFileIV(ivKey, name)
 		if err != nil {
 			return result, nil, err
 		}
-		result.Files[name] = File{
+		file, err := newCipherFile(r, xor, fileIV, offset, size)
+		if err != nil {
+			return result, nil, err
+		}
+		f := File{
 			Body: file, Size: size,
 		}
+		if err := verifyFileHash(header.GetFileSha256(), f); err != nil {
+			return result, nil, err
+		}
+		result.Files[name] = f
 		offset += size
 	}
 
@@ -262,15 +283,6 @@ func orderedNames(metadata *storedpb.Metadata) []string {
 	}
 	sort.Strings(names)
 	return names
-}
-
-func findFileLength(metadata *storedpb.Metadata, name string) int64 {
-	for _, fh := range metadata.GetFiles() {
-		if fh.GetName() == name {
-			return fh.GetFileLength()
-		}
-	}
-	return 0
 }
 
 func revisionMaterial(revision *storedpb.ContentRevision) ([]byte, error) {
@@ -328,7 +340,19 @@ func revisionMetadataAD(revision *storedpb.ContentRevision) ([]byte, error) {
 	return ad, nil
 }
 
-func writeEncryptedFile(w io.Writer, desc fileDescriptor, xor XORKeyStreamAt, ivKey []byte) error {
+func deriveFileIV(ivKey []byte, name string) ([]byte, error) {
+	if len(ivKey) == 0 {
+		return nil, errors.New("usercontent: missing iv key")
+	}
+	deriver := hkdf.New(sha256.New, ivKey, nil, []byte("usercontent/file-iv/"+name))
+	iv := make([]byte, aes.BlockSize)
+	if _, err := io.ReadFull(deriver, iv); err != nil {
+		return nil, err
+	}
+	return iv, nil
+}
+
+func writeEncryptedFile(w io.Writer, desc fileDescriptor, xor XORKeyStreamAt, iv []byte) error {
 	reader := io.NewSectionReader(desc.file.Body, 0, desc.file.Size)
 	buf := make([]byte, 32*1024)
 	offset := uint64(0)
@@ -336,7 +360,7 @@ func writeEncryptedFile(w io.Writer, desc fileDescriptor, xor XORKeyStreamAt, iv
 		n, err := reader.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
-			xor(chunk, chunk, ivKey, offset)
+			xor(chunk, chunk, iv, offset)
 			if _, werr := w.Write(chunk); werr != nil {
 				return werr
 			}
@@ -416,5 +440,19 @@ func readUint64(r io.ReaderAt, offset int64, out *uint64) error {
 		return err
 	}
 	*out = binary.BigEndian.Uint64(buf)
+	return nil
+}
+
+func verifyFileHash(expected []byte, file File) error {
+	if len(expected) == 0 {
+		return errInvalidContent
+	}
+	sum, err := hashFile(file)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(sum, expected) {
+		return errInvalidContent
+	}
 	return nil
 }
