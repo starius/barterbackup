@@ -16,6 +16,7 @@ func NewMapFilesystem() *MapFilesystem {
 	return &MapFilesystem{files: make(map[string][]byte)}
 }
 
+// OpenRead opens a file for random-access reads.
 func (m *MapFilesystem) OpenRead(name string) (ReadFile, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -29,6 +30,7 @@ func (m *MapFilesystem) OpenRead(name string) (ReadFile, error) {
 	}, nil
 }
 
+// OpenWrite opens a file for buffered writes.
 func (m *MapFilesystem) OpenWrite(name string) (WriteFile, error) {
 	return &mapWriteHandle{
 		mu:    &m.mu,
@@ -42,14 +44,18 @@ type mapReadHandle struct {
 	size   int64
 }
 
+// mapReadHandle implements ReadFile for in-memory data.
+// ReadAt proxies random-access reads to the underlying buffer.
 func (h *mapReadHandle) ReadAt(p []byte, off int64) (int, error) {
 	return h.reader.ReadAt(p, off)
 }
 
+// Size returns the total length of the buffer.
 func (h *mapReadHandle) Size() int64 {
 	return h.size
 }
 
+// Close is a no-op for the in-memory handle.
 func (h *mapReadHandle) Close() error {
 	return nil
 }
@@ -62,10 +68,13 @@ type mapWriteHandle struct {
 	closed bool
 }
 
+// mapWriteHandle implements WriteFile for in-memory data.
+// Write appends data to the in-memory buffer.
 func (h *mapWriteHandle) Write(p []byte) (int, error) {
 	return h.buf.Write(p)
 }
 
+// Sync commits the buffered data to the map.
 func (h *mapWriteHandle) Sync() error {
 	if h.closed {
 		return nil
@@ -76,6 +85,7 @@ func (h *mapWriteHandle) Sync() error {
 	return nil
 }
 
+// Close finalizes the write and saves the buffer.
 func (h *mapWriteHandle) Close() error {
 	if h.closed {
 		return nil

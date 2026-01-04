@@ -23,6 +23,7 @@ func NewOSFilesystem(dir string) (*OSFilesystem, error) {
 	return &OSFilesystem{root: dir}, nil
 }
 
+// OpenRead opens a file for random-access reads.
 func (fsys *OSFilesystem) OpenRead(name string) (ReadFile, error) {
 	path := filepath.Join(fsys.root, name)
 	f, err := os.Open(path)
@@ -43,6 +44,7 @@ func (fsys *OSFilesystem) OpenRead(name string) (ReadFile, error) {
 	}, nil
 }
 
+// OpenWrite truncates or creates a file for streaming writes.
 func (fsys *OSFilesystem) OpenWrite(name string) (WriteFile, error) {
 	path := filepath.Join(fsys.root, name)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o600)
@@ -52,19 +54,23 @@ func (fsys *OSFilesystem) OpenWrite(name string) (WriteFile, error) {
 	return &osWriteHandle{File: f}, nil
 }
 
+// osReadHandle implements ReadFile on top of an *os.File.
 type osReadHandle struct {
 	*os.File
 	size int64
 }
 
+// Size returns the file length.
 func (h *osReadHandle) Size() int64 {
 	return h.size
 }
 
+// osWriteHandle implements WriteFile on top of an *os.File.
 type osWriteHandle struct {
 	*os.File
 }
 
+// Sync flushes the file contents to stable storage.
 func (h *osWriteHandle) Sync() error {
 	return h.File.Sync()
 }

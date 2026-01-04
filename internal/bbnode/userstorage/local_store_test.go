@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// readAll pulls an entire file into memory for assertions.
 func readAll(t *testing.T, fsys Filesystem, name string) []byte {
 	t.Helper()
 	reader, err := fsys.OpenRead(name)
@@ -19,9 +20,11 @@ func readAll(t *testing.T, fsys Filesystem, name string) []byte {
 	if err != nil && err != io.EOF {
 		require.NoError(t, err)
 	}
-	return buf[:n]
+	require.Equal(t, int(reader.Size()), n)
+	return buf
 }
 
+// TestStoreSetGetDelete exercises the store lifecycle operations.
 func TestStoreSetGetDelete(t *testing.T) {
 	t.Parallel()
 
@@ -58,6 +61,7 @@ func TestStoreSetGetDelete(t *testing.T) {
 	require.NotContains(t, string(blobAfterDelete), "secret payload")
 }
 
+// TestStoreEmptyFilesystemError ensures nil filesystem is rejected.
 func TestStoreEmptyFilesystemError(t *testing.T) {
 	t.Parallel()
 
@@ -65,6 +69,7 @@ func TestStoreEmptyFilesystemError(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestShortMasterRejected ensures low-entropy master keys fail.
 func TestShortMasterRejected(t *testing.T) {
 	t.Parallel()
 

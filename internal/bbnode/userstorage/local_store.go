@@ -16,6 +16,7 @@ import (
 	"github.com/starius/barterbackup/storedpb"
 )
 
+// contentFileName is the on-disk filename for persisted content.
 const contentFileName = "content.bin"
 
 // Filesystem abstracts persistent storage operations for user data using streams.
@@ -38,29 +39,49 @@ type WriteFile interface {
 	Close() error
 }
 
-var (
-	ErrFileNotFound = errors.New("file not found")
-)
+// ErrFileNotFound signals missing files in storage.
+var ErrFileNotFound = errors.New("file not found")
 
 // contentSnapshot captures responder content metadata for quick access.
 type contentSnapshot struct {
-	id     []byte
+	// id is the current content identifier.
+	id []byte
+
+	// length is the byte length of the persisted content blob.
 	length int64
 }
 
 // Store maintains the encrypted user content metadata and files on disk.
 type Store struct {
-	fs           Filesystem
-	files        map[string][]byte
-	content      []byte
-	contentID    []byte
-	contentSeal  usercontent.SealFunc
-	contentOpen  usercontent.OpenFunc
+	// fs is the backing filesystem implementation.
+	fs Filesystem
+
+	// files holds the plaintext file bodies keyed by name.
+	files map[string][]byte
+
+	// contentID is the last persisted content identifier.
+	contentID []byte
+
+	// contentSeal seals content IDs.
+	contentSeal usercontent.SealFunc
+
+	// contentOpen opens content IDs.
+	contentOpen usercontent.OpenFunc
+
+	// metadataSeal seals metadata blobs.
 	metadataSeal usercontent.SealFunc
+
+	// metadataOpen opens metadata blobs.
 	metadataOpen usercontent.OpenFunc
-	xor          usercontent.XORKeyStreamAt
-	peers        []*storedpb.Peer
-	contentLen   int64
+
+	// xor is the per-file keystream function.
+	xor usercontent.XORKeyStreamAt
+
+	// peers are the last persisted peers.
+	peers []*storedpb.Peer
+
+	// contentLen is the byte length of the stored content blob.
+	contentLen int64
 }
 
 // NewStore loads persisted state from the provided filesystem.
@@ -105,9 +126,11 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 	if err := store.load(); err != nil {
 		return nil, err
 	}
+
 	return store, nil
 }
 
+// load hydrates the in-memory store from persisted content if present.
 func (s *Store) load() error {
 	reader, err := s.fs.OpenRead(contentFileName)
 	if err != nil {
@@ -117,7 +140,9 @@ func (s *Store) load() error {
 		return err
 	}
 	defer reader.Close()
-	uc, cid, err := usercontent.ParseContentFile(reader, s.contentOpen, s.metadataOpen, s.xor)
+	uc, cid, err := usercontent.ParseContentFile(
+		reader, s.contentOpen, s.metadataOpen, s.xor,
+	)
 	if err != nil {
 		return err
 	}
@@ -127,7 +152,8 @@ func (s *Store) load() error {
 	for name, file := range uc.Files {
 		buf := make([]byte, file.Size)
 		if file.Size > 0 {
-			if _, err := file.Body.ReadAt(buf, 0); err != nil && !errors.Is(err, io.EOF) {
+			_, err := file.Body.ReadAt(buf, 0)
+			if err != nil && !errors.Is(err, io.EOF) {
 				return err
 			}
 		}
@@ -139,6 +165,7 @@ func (s *Store) load() error {
 	return nil
 }
 
+// setFile stores or updates a plaintext file and re-persists content.
 func (s *Store) setFile(name string, data []byte) error {
 	if name == "" {
 		return errors.New("file name is empty")
@@ -152,6 +179,7 @@ func (s *Store) SetFile(_ context.Context, name string, data []byte) error {
 	return s.setFile(name, data)
 }
 
+// getFile returns a copy of the stored file by name.
 func (s *Store) getFile(name string) ([]byte, error) {
 	data, ok := s.files[name]
 	if !ok {
@@ -165,6 +193,7 @@ func (s *Store) GetFile(_ context.Context, name string) ([]byte, error) {
 	return s.getFile(name)
 }
 
+// deleteFile removes a file and re-persists content.
 func (s *Store) deleteFile(name string) error {
 	if _, ok := s.files[name]; !ok {
 		return ErrFileNotFound
@@ -178,6 +207,7 @@ func (s *Store) DeleteFile(_ context.Context, name string) error {
 	return s.deleteFile(name)
 }
 
+// listFiles returns sorted file names.
 func (s *Store) listFiles() []string {
 	names := make([]string, 0, len(s.files))
 	for name := range s.files {
@@ -192,6 +222,7 @@ func (s *Store) ListFiles(_ context.Context) ([]string, error) {
 	return s.listFiles(), nil
 }
 
+// persist encodes the current state to the backing filesystem.
 func (s *Store) persist() error {
 	now := time.Now()
 	uc := usercontent.UserContent{
@@ -209,7 +240,9 @@ func (s *Store) persist() error {
 	defer writer.Close()
 
 	cw := &countingWriter{w: writer}
-	cid, err := usercontent.WriteContentFile(cw, uc, s.contentSeal, s.metadataSeal, s.xor)
+	cid, err := usercontent.WriteContentFile(
+		cw, uc, s.contentSeal, s.metadataSeal, s.xor,
+	)
 	if err != nil {
 		_ = writer.Close()
 		return err
@@ -226,6 +259,7 @@ func (s *Store) persist() error {
 	return nil
 }
 
+// snapshot captures the current content ID and length.
 func (s *Store) snapshot() contentSnapshot {
 	return contentSnapshot{
 		id:     append([]byte(nil), s.contentID...),
@@ -233,6 +267,7 @@ func (s *Store) snapshot() contentSnapshot {
 	}
 }
 
+// countingWriter wraps an io.Writer to track bytes written.
 type countingWriter struct {
 	w io.Writer
 	n int64
@@ -244,6 +279,7 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// cloneFiles converts plaintext data into usercontent.File wrappers.
 func cloneFiles(files map[string][]byte) map[string]usercontent.File {
 	out := make(map[string]usercontent.File, len(files))
 	for name, data := range files {
@@ -255,6 +291,7 @@ func cloneFiles(files map[string][]byte) map[string]usercontent.File {
 	return out
 }
 
+// newAESBlock constructs an AES block or panics on failure.
 func newAESBlock(key []byte) cipher.Block {
 	blk, err := aes.NewCipher(key)
 	if err != nil {
@@ -263,6 +300,7 @@ func newAESBlock(key []byte) cipher.Block {
 	return blk
 }
 
+// makeXORKeyStream builds a CTR keystream with random access support.
 func makeXORKeyStream(block cipher.Block) usercontent.XORKeyStreamAt {
 	blockSize := block.BlockSize()
 	return func(dst, src, iv []byte, offset uint64) {
@@ -288,6 +326,7 @@ func makeXORKeyStream(block cipher.Block) usercontent.XORKeyStreamAt {
 	}
 }
 
+// addCounter increments a big-endian counter buffer by delta.
 func addCounter(counter []byte, delta uint64) {
 	carry := delta
 	for i := len(counter) - 1; i >= 0 && carry > 0; i-- {
