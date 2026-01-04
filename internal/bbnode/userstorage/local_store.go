@@ -18,15 +18,28 @@ import (
 
 const contentFileName = "content.bin"
 
-// Filesystem abstracts persistent storage operations for user data.
+// Filesystem abstracts persistent storage operations for user data using streams.
 type Filesystem interface {
-	ReadFile(name string) ([]byte, error)
-	WriteFile(name string, data []byte) error
+	OpenRead(name string) (ReadFile, error)
+	OpenWrite(name string) (WriteFile, error)
+}
+
+// ReadFile provides random access to a persisted object.
+type ReadFile interface {
+	io.ReaderAt
+	Size() int64
+	Close() error
+}
+
+// WriteFile allows streaming writes with explicit fsync.
+type WriteFile interface {
+	io.Writer
+	Sync() error
+	Close() error
 }
 
 var (
 	ErrFileNotFound = errors.New("file not found")
-	ErrStopped      = errors.New("storage stopped")
 )
 
 // contentSnapshot captures responder content metadata for quick access.
@@ -47,12 +60,16 @@ type Store struct {
 	metadataOpen usercontent.OpenFunc
 	xor          usercontent.XORKeyStreamAt
 	peers        []*storedpb.Peer
+	contentLen   int64
 }
 
 // NewStore loads persisted state from the provided filesystem.
 func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 	if fsys == nil {
 		return nil, errors.New("filesystem is nil")
+	}
+	if len(master) < 32 {
+		return nil, errors.New("master key too short")
 	}
 	contentKey, err := keys.DeriveKey(master, "usercontent/content-id", 32)
 	if err != nil {
@@ -92,17 +109,19 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 }
 
 func (s *Store) load() error {
-	data, err := s.fs.ReadFile(contentFileName)
+	reader, err := s.fs.OpenRead(contentFileName)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return err
 	}
-	uc, cid, err := usercontent.ParseContentFile(bytes.NewReader(data), s.contentOpen, s.metadataOpen, s.xor)
+	defer reader.Close()
+	uc, cid, err := usercontent.ParseContentFile(reader, s.contentOpen, s.metadataOpen, s.xor)
 	if err != nil {
 		return err
 	}
+	s.contentLen = reader.Size()
 
 	s.files = make(map[string][]byte, len(uc.Files))
 	for name, file := range uc.Files {
@@ -115,7 +134,6 @@ func (s *Store) load() error {
 		s.files[name] = buf
 	}
 
-	s.content = bytes.Clone(data)
 	s.contentID = append([]byte(nil), cid...)
 	s.peers = append([]*storedpb.Peer(nil), uc.Peers...)
 	return nil
@@ -184,18 +202,25 @@ func (s *Store) persist() error {
 		uc.Peers = append([]*storedpb.Peer(nil), s.peers...)
 	}
 
-	var buf bytes.Buffer
-	cid, err := usercontent.WriteContentFile(&buf, uc, s.contentSeal, s.metadataSeal, s.xor)
+	writer, err := s.fs.OpenWrite(contentFileName)
 	if err != nil {
 		return err
 	}
+	defer writer.Close()
 
-	contentBytes := buf.Bytes()
-	if err := s.fs.WriteFile(contentFileName, contentBytes); err != nil {
+	cw := &countingWriter{w: writer}
+	cid, err := usercontent.WriteContentFile(cw, uc, s.contentSeal, s.metadataSeal, s.xor)
+	if err != nil {
+		_ = writer.Close()
 		return err
 	}
 
-	s.content = append([]byte(nil), contentBytes...)
+	if err := writer.Sync(); err != nil {
+		_ = writer.Close()
+		return err
+	}
+	s.contentLen = cw.n
+
 	s.contentID = append([]byte(nil), cid...)
 	s.peers = append([]*storedpb.Peer(nil), uc.Peers...)
 	return nil
@@ -204,8 +229,19 @@ func (s *Store) persist() error {
 func (s *Store) snapshot() contentSnapshot {
 	return contentSnapshot{
 		id:     append([]byte(nil), s.contentID...),
-		length: int64(len(s.content)),
+		length: s.contentLen,
 	}
+}
+
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.n += int64(n)
+	return n, err
 }
 
 func cloneFiles(files map[string][]byte) map[string]usercontent.File {

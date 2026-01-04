@@ -1,16 +1,32 @@
 package userstorage
 
 import (
+	"io"
 	"testing"
 
+	"github.com/starius/barterbackup/internal/keys"
 	"github.com/stretchr/testify/require"
 )
+
+func readAll(t *testing.T, fsys Filesystem, name string) []byte {
+	t.Helper()
+	reader, err := fsys.OpenRead(name)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	buf := make([]byte, reader.Size())
+	n, err := reader.ReadAt(buf, 0)
+	if err != nil && err != io.EOF {
+		require.NoError(t, err)
+	}
+	return buf[:n]
+}
 
 func TestStoreSetGetDelete(t *testing.T) {
 	t.Parallel()
 
 	fsys := NewMapFilesystem()
-	master := []byte("local-store-master")
+	master := keys.DeriveMasterPriv("local-store-master")
 
 	store, err := NewStore(fsys, master)
 	require.NoError(t, err)
@@ -21,8 +37,7 @@ func TestStoreSetGetDelete(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("secret payload"), data)
 
-	blob, err := fsys.ReadFile(contentFileName)
-	require.NoError(t, err)
+	blob := readAll(t, fsys, contentFileName)
 	require.NotContains(t, string(blob), "secret payload")
 
 	reloaded, err := NewStore(fsys, master)
@@ -39,8 +54,7 @@ func TestStoreSetGetDelete(t *testing.T) {
 	require.ErrorIs(t, err, ErrFileNotFound)
 	require.Empty(t, reloaded.listFiles())
 
-	blobAfterDelete, err := fsys.ReadFile(contentFileName)
-	require.NoError(t, err)
+	blobAfterDelete := readAll(t, fsys, contentFileName)
 	require.NotContains(t, string(blobAfterDelete), "secret payload")
 }
 
@@ -48,5 +62,13 @@ func TestStoreEmptyFilesystemError(t *testing.T) {
 	t.Parallel()
 
 	_, err := NewStore(nil, []byte("master"))
+	require.Error(t, err)
+}
+
+func TestShortMasterRejected(t *testing.T) {
+	t.Parallel()
+
+	fsys := NewMapFilesystem()
+	_, err := NewStore(fsys, []byte("short"))
 	require.Error(t, err)
 }
