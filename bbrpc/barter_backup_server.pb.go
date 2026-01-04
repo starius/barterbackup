@@ -831,445 +831,6 @@ func (x *EncryptedDownloadResponse) GetEncryptedDownloadResponse() []byte {
 	return nil
 }
 
-type ChatRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// chat_id is chosen arbitrarily and uniquely identifies a chat session.
-	ChatId int64 `protobuf:"varint,1,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
-	// Types that are valid to be assigned to Action:
-	//
-	//	*ChatRequest_Init
-	//	*ChatRequest_Msg
-	//	*ChatRequest_File
-	//	*ChatRequest_Stop
-	Action        isChatRequest_Action `protobuf_oneof:"action"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatRequest) Reset() {
-	*x = ChatRequest{}
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[16]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatRequest) ProtoMessage() {}
-
-func (x *ChatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[16]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatRequest.ProtoReflect.Descriptor instead.
-func (*ChatRequest) Descriptor() ([]byte, []int) {
-	return file_bbrpc_barter_backup_server_proto_rawDescGZIP(), []int{16}
-}
-
-func (x *ChatRequest) GetChatId() int64 {
-	if x != nil {
-		return x.ChatId
-	}
-	return 0
-}
-
-func (x *ChatRequest) GetAction() isChatRequest_Action {
-	if x != nil {
-		return x.Action
-	}
-	return nil
-}
-
-func (x *ChatRequest) GetInit() *ChatInit {
-	if x != nil {
-		if x, ok := x.Action.(*ChatRequest_Init); ok {
-			return x.Init
-		}
-	}
-	return nil
-}
-
-func (x *ChatRequest) GetMsg() *ChatMessage {
-	if x != nil {
-		if x, ok := x.Action.(*ChatRequest_Msg); ok {
-			return x.Msg
-		}
-	}
-	return nil
-}
-
-func (x *ChatRequest) GetFile() *ChatFile {
-	if x != nil {
-		if x, ok := x.Action.(*ChatRequest_File); ok {
-			return x.File
-		}
-	}
-	return nil
-}
-
-func (x *ChatRequest) GetStop() *ChatStop {
-	if x != nil {
-		if x, ok := x.Action.(*ChatRequest_Stop); ok {
-			return x.Stop
-		}
-	}
-	return nil
-}
-
-type isChatRequest_Action interface {
-	isChatRequest_Action()
-}
-
-type ChatRequest_Init struct {
-	// init is the first action in a chat session. Other chat actions
-	// fail until another node makes ChatInit with this chat_id. Each
-	// chat_id can be used once in a ChatInit action.
-	Init *ChatInit `protobuf:"bytes,2,opt,name=init,proto3,oneof"`
-}
-
-type ChatRequest_Msg struct {
-	// msg is a regular text message in the chat.
-	Msg *ChatMessage `protobuf:"bytes,3,opt,name=msg,proto3,oneof"`
-}
-
-type ChatRequest_File struct {
-	// file gives the other side the content_id of a local file to
-	// download.
-	File *ChatFile `protobuf:"bytes,4,opt,name=file,proto3,oneof"`
-}
-
-type ChatRequest_Stop struct {
-	// stop interrupts a chat. Shutting down the CLI or the daemon
-	// closes all chats.
-	Stop *ChatStop `protobuf:"bytes,5,opt,name=stop,proto3,oneof"`
-}
-
-func (*ChatRequest_Init) isChatRequest_Action() {}
-
-func (*ChatRequest_Msg) isChatRequest_Action() {}
-
-func (*ChatRequest_File) isChatRequest_Action() {}
-
-func (*ChatRequest_Stop) isChatRequest_Action() {}
-
-type ChatInit struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatInit) Reset() {
-	*x = ChatInit{}
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[17]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatInit) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatInit) ProtoMessage() {}
-
-func (x *ChatInit) ProtoReflect() protoreflect.Message {
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[17]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatInit.ProtoReflect.Descriptor instead.
-func (*ChatInit) Descriptor() ([]byte, []int) {
-	return file_bbrpc_barter_backup_server_proto_rawDescGZIP(), []int{17}
-}
-
-type ChatMessage struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// msg is a text message. Maximum size: 2048 bytes. It must be a valid
-	// UTF-8 string with printable terminal characters and no line breaks.
-	// It can be encrypted using AEAD if symmetric_encryption is enabled.
-	Msg           string `protobuf:"bytes,1,opt,name=msg,proto3" json:"msg,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatMessage) Reset() {
-	*x = ChatMessage{}
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[18]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatMessage) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatMessage) ProtoMessage() {}
-
-func (x *ChatMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[18]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatMessage.ProtoReflect.Descriptor instead.
-func (*ChatMessage) Descriptor() ([]byte, []int) {
-	return file_bbrpc_barter_backup_server_proto_rawDescGZIP(), []int{18}
-}
-
-func (x *ChatMessage) GetMsg() string {
-	if x != nil {
-		return x.Msg
-	}
-	return ""
-}
-
-type ChatFile struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// content_id uniquely identifies a file on the sending side. The file
-	// stays available for downloading until this chat is stopped.
-	ContentId []byte `protobuf:"bytes,1,opt,name=content_id,json=contentId,proto3" json:"content_id,omitempty"`
-	// sha256 is sha256 hash sum of the file.
-	Sha256        []byte `protobuf:"bytes,2,opt,name=sha256,proto3" json:"sha256,omitempty"`
-	ContentLength int64  `protobuf:"varint,3,opt,name=content_length,json=contentLength,proto3" json:"content_length,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatFile) Reset() {
-	*x = ChatFile{}
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[19]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatFile) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatFile) ProtoMessage() {}
-
-func (x *ChatFile) ProtoReflect() protoreflect.Message {
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[19]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatFile.ProtoReflect.Descriptor instead.
-func (*ChatFile) Descriptor() ([]byte, []int) {
-	return file_bbrpc_barter_backup_server_proto_rawDescGZIP(), []int{19}
-}
-
-func (x *ChatFile) GetContentId() []byte {
-	if x != nil {
-		return x.ContentId
-	}
-	return nil
-}
-
-func (x *ChatFile) GetSha256() []byte {
-	if x != nil {
-		return x.Sha256
-	}
-	return nil
-}
-
-func (x *ChatFile) GetContentLength() int64 {
-	if x != nil {
-		return x.ContentLength
-	}
-	return 0
-}
-
-type ChatStop struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatStop) Reset() {
-	*x = ChatStop{}
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[20]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatStop) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatStop) ProtoMessage() {}
-
-func (x *ChatStop) ProtoReflect() protoreflect.Message {
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[20]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatStop.ProtoReflect.Descriptor instead.
-func (*ChatStop) Descriptor() ([]byte, []int) {
-	return file_bbrpc_barter_backup_server_proto_rawDescGZIP(), []int{20}
-}
-
-type ChatResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatResponse) Reset() {
-	*x = ChatResponse{}
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[21]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatResponse) ProtoMessage() {}
-
-func (x *ChatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[21]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatResponse.ProtoReflect.Descriptor instead.
-func (*ChatResponse) Descriptor() ([]byte, []int) {
-	return file_bbrpc_barter_backup_server_proto_rawDescGZIP(), []int{21}
-}
-
-type EncryptedChatRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// encrypted_chat_request is AEAD(ChatRequest).
-	EncryptedChatRequest []byte `protobuf:"bytes,1,opt,name=encrypted_chat_request,json=encryptedChatRequest,proto3" json:"encrypted_chat_request,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
-}
-
-func (x *EncryptedChatRequest) Reset() {
-	*x = EncryptedChatRequest{}
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[22]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *EncryptedChatRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*EncryptedChatRequest) ProtoMessage() {}
-
-func (x *EncryptedChatRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[22]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use EncryptedChatRequest.ProtoReflect.Descriptor instead.
-func (*EncryptedChatRequest) Descriptor() ([]byte, []int) {
-	return file_bbrpc_barter_backup_server_proto_rawDescGZIP(), []int{22}
-}
-
-func (x *EncryptedChatRequest) GetEncryptedChatRequest() []byte {
-	if x != nil {
-		return x.EncryptedChatRequest
-	}
-	return nil
-}
-
-type EncryptedChatResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// encrypted_chat_response is AEAD(ChatResponse).
-	EncryptedChatResponse []byte `protobuf:"bytes,1,opt,name=encrypted_chat_response,json=encryptedChatResponse,proto3" json:"encrypted_chat_response,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
-}
-
-func (x *EncryptedChatResponse) Reset() {
-	*x = EncryptedChatResponse{}
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[23]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *EncryptedChatResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*EncryptedChatResponse) ProtoMessage() {}
-
-func (x *EncryptedChatResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[23]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use EncryptedChatResponse.ProtoReflect.Descriptor instead.
-func (*EncryptedChatResponse) Descriptor() ([]byte, []int) {
-	return file_bbrpc_barter_backup_server_proto_rawDescGZIP(), []int{23}
-}
-
-func (x *EncryptedChatResponse) GetEncryptedChatResponse() []byte {
-	if x != nil {
-		return x.EncryptedChatResponse
-	}
-	return nil
-}
-
 var File_bbrpc_barter_backup_server_proto protoreflect.FileDescriptor
 
 const file_bbrpc_barter_backup_server_proto_rawDesc = "" +
@@ -1316,39 +877,14 @@ const file_bbrpc_barter_backup_server_proto_rawDesc = "" +
 	"\x18EncryptedDownloadRequest\x12<\n" +
 	"\x1aencrypted_download_request\x18\x01 \x01(\fR\x18encryptedDownloadRequest\"[\n" +
 	"\x19EncryptedDownloadResponse\x12>\n" +
-	"\x1bencrypted_download_response\x18\x01 \x01(\fR\x19encryptedDownloadResponse\"\xcd\x01\n" +
-	"\vChatRequest\x12\x17\n" +
-	"\achat_id\x18\x01 \x01(\x03R\x06chatId\x12%\n" +
-	"\x04init\x18\x02 \x01(\v2\x0f.bbrpc.ChatInitH\x00R\x04init\x12&\n" +
-	"\x03msg\x18\x03 \x01(\v2\x12.bbrpc.ChatMessageH\x00R\x03msg\x12%\n" +
-	"\x04file\x18\x04 \x01(\v2\x0f.bbrpc.ChatFileH\x00R\x04file\x12%\n" +
-	"\x04stop\x18\x05 \x01(\v2\x0f.bbrpc.ChatStopH\x00R\x04stopB\b\n" +
-	"\x06action\"\n" +
-	"\n" +
-	"\bChatInit\"\x1f\n" +
-	"\vChatMessage\x12\x10\n" +
-	"\x03msg\x18\x01 \x01(\tR\x03msg\"h\n" +
-	"\bChatFile\x12\x1d\n" +
-	"\n" +
-	"content_id\x18\x01 \x01(\fR\tcontentId\x12\x16\n" +
-	"\x06sha256\x18\x02 \x01(\fR\x06sha256\x12%\n" +
-	"\x0econtent_length\x18\x03 \x01(\x03R\rcontentLength\"\n" +
-	"\n" +
-	"\bChatStop\"\x0e\n" +
-	"\fChatResponse\"L\n" +
-	"\x14EncryptedChatRequest\x124\n" +
-	"\x16encrypted_chat_request\x18\x01 \x01(\fR\x14encryptedChatRequest\"O\n" +
-	"\x15EncryptedChatResponse\x126\n" +
-	"\x17encrypted_chat_response\x18\x01 \x01(\fR\x15encryptedChatResponse2\xeb\x04\n" +
+	"\x1bencrypted_download_response\x18\x01 \x01(\fR\x19encryptedDownloadResponse2\xee\x03\n" +
 	"\x12BarterBackupServer\x12D\n" +
 	"\vHealthCheck\x12\x19.bbrpc.HealthCheckRequest\x1a\x1a.bbrpc.HealthCheckResponse\x12G\n" +
 	"\fPeerExchange\x12\x1a.bbrpc.PeerExchangeRequest\x1a\x1b.bbrpc.PeerExchangeResponse\x12Y\n" +
 	"\x12GetContentRevision\x12 .bbrpc.GetContentRevisionRequest\x1a!.bbrpc.GetContentRevisionResponse\x12Y\n" +
 	"\x12SetContentRevision\x12 .bbrpc.SetContentRevisionRequest\x1a!.bbrpc.SetContentRevisionResponse\x12;\n" +
 	"\bDownload\x12\x16.bbrpc.DownloadRequest\x1a\x17.bbrpc.DownloadResponse\x12V\n" +
-	"\x11EncryptedDownload\x12\x1f.bbrpc.EncryptedDownloadRequest\x1a .bbrpc.EncryptedDownloadResponse\x12/\n" +
-	"\x04Chat\x12\x12.bbrpc.ChatRequest\x1a\x13.bbrpc.ChatResponse\x12J\n" +
-	"\rEncryptedChat\x12\x1b.bbrpc.EncryptedChatRequest\x1a\x1c.bbrpc.EncryptedChatResponseB'Z%github.com/starius/barterbackup/bbrpcb\x06proto3"
+	"\x11EncryptedDownload\x12\x1f.bbrpc.EncryptedDownloadRequest\x1a .bbrpc.EncryptedDownloadResponseB'Z%github.com/starius/barterbackup/bbrpcb\x06proto3"
 
 var (
 	file_bbrpc_barter_backup_server_proto_rawDescOnce sync.Once
@@ -1362,7 +898,7 @@ func file_bbrpc_barter_backup_server_proto_rawDescGZIP() []byte {
 	return file_bbrpc_barter_backup_server_proto_rawDescData
 }
 
-var file_bbrpc_barter_backup_server_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_bbrpc_barter_backup_server_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_bbrpc_barter_backup_server_proto_goTypes = []any{
 	(*HealthCheckRequest)(nil),         // 0: bbrpc.HealthCheckRequest
 	(*HealthCheckResponse)(nil),        // 1: bbrpc.HealthCheckResponse
@@ -1380,14 +916,6 @@ var file_bbrpc_barter_backup_server_proto_goTypes = []any{
 	(*DownloadResponse)(nil),           // 13: bbrpc.DownloadResponse
 	(*EncryptedDownloadRequest)(nil),   // 14: bbrpc.EncryptedDownloadRequest
 	(*EncryptedDownloadResponse)(nil),  // 15: bbrpc.EncryptedDownloadResponse
-	(*ChatRequest)(nil),                // 16: bbrpc.ChatRequest
-	(*ChatInit)(nil),                   // 17: bbrpc.ChatInit
-	(*ChatMessage)(nil),                // 18: bbrpc.ChatMessage
-	(*ChatFile)(nil),                   // 19: bbrpc.ChatFile
-	(*ChatStop)(nil),                   // 20: bbrpc.ChatStop
-	(*ChatResponse)(nil),               // 21: bbrpc.ChatResponse
-	(*EncryptedChatRequest)(nil),       // 22: bbrpc.EncryptedChatRequest
-	(*EncryptedChatResponse)(nil),      // 23: bbrpc.EncryptedChatResponse
 }
 var file_bbrpc_barter_backup_server_proto_depIdxs = []int32{
 	2,  // 0: bbrpc.PeerExchangeRequest.peers:type_name -> bbrpc.Peer
@@ -1397,31 +925,23 @@ var file_bbrpc_barter_backup_server_proto_depIdxs = []int32{
 	5,  // 4: bbrpc.SetContentRevisionRequest.requester_content:type_name -> bbrpc.ContentInfo
 	11, // 5: bbrpc.DownloadResponse.raw_bytes:type_name -> bbrpc.RawBytes
 	12, // 6: bbrpc.DownloadResponse.reference:type_name -> bbrpc.Reference
-	17, // 7: bbrpc.ChatRequest.init:type_name -> bbrpc.ChatInit
-	18, // 8: bbrpc.ChatRequest.msg:type_name -> bbrpc.ChatMessage
-	19, // 9: bbrpc.ChatRequest.file:type_name -> bbrpc.ChatFile
-	20, // 10: bbrpc.ChatRequest.stop:type_name -> bbrpc.ChatStop
-	0,  // 11: bbrpc.BarterBackupServer.HealthCheck:input_type -> bbrpc.HealthCheckRequest
-	3,  // 12: bbrpc.BarterBackupServer.PeerExchange:input_type -> bbrpc.PeerExchangeRequest
-	6,  // 13: bbrpc.BarterBackupServer.GetContentRevision:input_type -> bbrpc.GetContentRevisionRequest
-	8,  // 14: bbrpc.BarterBackupServer.SetContentRevision:input_type -> bbrpc.SetContentRevisionRequest
-	10, // 15: bbrpc.BarterBackupServer.Download:input_type -> bbrpc.DownloadRequest
-	14, // 16: bbrpc.BarterBackupServer.EncryptedDownload:input_type -> bbrpc.EncryptedDownloadRequest
-	16, // 17: bbrpc.BarterBackupServer.Chat:input_type -> bbrpc.ChatRequest
-	22, // 18: bbrpc.BarterBackupServer.EncryptedChat:input_type -> bbrpc.EncryptedChatRequest
-	1,  // 19: bbrpc.BarterBackupServer.HealthCheck:output_type -> bbrpc.HealthCheckResponse
-	4,  // 20: bbrpc.BarterBackupServer.PeerExchange:output_type -> bbrpc.PeerExchangeResponse
-	7,  // 21: bbrpc.BarterBackupServer.GetContentRevision:output_type -> bbrpc.GetContentRevisionResponse
-	9,  // 22: bbrpc.BarterBackupServer.SetContentRevision:output_type -> bbrpc.SetContentRevisionResponse
-	13, // 23: bbrpc.BarterBackupServer.Download:output_type -> bbrpc.DownloadResponse
-	15, // 24: bbrpc.BarterBackupServer.EncryptedDownload:output_type -> bbrpc.EncryptedDownloadResponse
-	21, // 25: bbrpc.BarterBackupServer.Chat:output_type -> bbrpc.ChatResponse
-	23, // 26: bbrpc.BarterBackupServer.EncryptedChat:output_type -> bbrpc.EncryptedChatResponse
-	19, // [19:27] is the sub-list for method output_type
-	11, // [11:19] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	0,  // 7: bbrpc.BarterBackupServer.HealthCheck:input_type -> bbrpc.HealthCheckRequest
+	3,  // 8: bbrpc.BarterBackupServer.PeerExchange:input_type -> bbrpc.PeerExchangeRequest
+	6,  // 9: bbrpc.BarterBackupServer.GetContentRevision:input_type -> bbrpc.GetContentRevisionRequest
+	8,  // 10: bbrpc.BarterBackupServer.SetContentRevision:input_type -> bbrpc.SetContentRevisionRequest
+	10, // 11: bbrpc.BarterBackupServer.Download:input_type -> bbrpc.DownloadRequest
+	14, // 12: bbrpc.BarterBackupServer.EncryptedDownload:input_type -> bbrpc.EncryptedDownloadRequest
+	1,  // 13: bbrpc.BarterBackupServer.HealthCheck:output_type -> bbrpc.HealthCheckResponse
+	4,  // 14: bbrpc.BarterBackupServer.PeerExchange:output_type -> bbrpc.PeerExchangeResponse
+	7,  // 15: bbrpc.BarterBackupServer.GetContentRevision:output_type -> bbrpc.GetContentRevisionResponse
+	9,  // 16: bbrpc.BarterBackupServer.SetContentRevision:output_type -> bbrpc.SetContentRevisionResponse
+	13, // 17: bbrpc.BarterBackupServer.Download:output_type -> bbrpc.DownloadResponse
+	15, // 18: bbrpc.BarterBackupServer.EncryptedDownload:output_type -> bbrpc.EncryptedDownloadResponse
+	13, // [13:19] is the sub-list for method output_type
+	7,  // [7:13] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_bbrpc_barter_backup_server_proto_init() }
@@ -1433,19 +953,13 @@ func file_bbrpc_barter_backup_server_proto_init() {
 		(*DownloadResponse_RawBytes)(nil),
 		(*DownloadResponse_Reference)(nil),
 	}
-	file_bbrpc_barter_backup_server_proto_msgTypes[16].OneofWrappers = []any{
-		(*ChatRequest_Init)(nil),
-		(*ChatRequest_Msg)(nil),
-		(*ChatRequest_File)(nil),
-		(*ChatRequest_Stop)(nil),
-	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bbrpc_barter_backup_server_proto_rawDesc), len(file_bbrpc_barter_backup_server_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   24,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

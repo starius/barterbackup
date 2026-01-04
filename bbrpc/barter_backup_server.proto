@@ -27,21 +27,13 @@ service BarterBackupServer {
         returns (SetContentRevisionResponse);
 
     // Download downloads a section of a file which can be content of either
-    // the requester or the responder or a file sent in chat by the responder.
+    // the requester or the responder.
     rpc Download(DownloadRequest) returns (DownloadResponse);
 
     // EncryptedDownload makes encrypted download request. The encryption
-    // password needs to be setup out-of-band. This is used only within an
-    // encrypted chat.
+    // password needs to be setup out-of-band.
     rpc EncryptedDownload(EncryptedDownloadRequest)
         returns (EncryptedDownloadResponse);
-
-    // Chat sends a chat action to another side.
-    rpc Chat(ChatRequest) returns (ChatResponse);
-
-    // EncryptedChat sends a symmetrically encrypted chat action. The
-    // encryption password needs to be setup out-of-band.
-    rpc EncryptedChat(EncryptedChatRequest) returns (EncryptedChatResponse);
 }
 
 // HealthCheckRequest is an empty health check request.
@@ -139,61 +131,4 @@ message EncryptedDownloadRequest {
 message EncryptedDownloadResponse {
     // encrypted_download_response is AEAD(DownloadResponse).
     bytes encrypted_download_response = 1;
-}
-
-message ChatRequest {
-    // chat_id is chosen arbitrarily and uniquely identifies a chat session.
-    int64 chat_id = 1;
-
-    oneof action {
-        // init is the first action in a chat session. Other chat actions
-        // fail until another node makes ChatInit with this chat_id. Each
-        // chat_id can be used once in a ChatInit action.
-        ChatInit init = 2;
-
-        // msg is a regular text message in the chat.
-        ChatMessage msg = 3;
-
-        // file gives the other side the content_id of a local file to
-        // download.
-        ChatFile file = 4;
-
-        // stop interrupts a chat. Shutting down the CLI or the daemon
-        // closes all chats.
-        ChatStop stop = 5;
-    }
-}
-
-message ChatInit {}
-
-message ChatMessage {
-    // msg is a text message. Maximum size: 2048 bytes. It must be a valid
-    // UTF-8 string with printable terminal characters and no line breaks.
-    // It can be encrypted using AEAD if symmetric_encryption is enabled.
-    string msg = 1;
-}
-
-message ChatFile {
-    // content_id uniquely identifies a file on the sending side. The file
-    // stays available for downloading until this chat is stopped.
-    bytes content_id = 1;
-
-    // sha256 is sha256 hash sum of the file.
-    bytes sha256 = 2;
-
-    int64 content_length = 3;
-}
-
-message ChatStop {}
-
-message ChatResponse {}
-
-message EncryptedChatRequest {
-    // encrypted_chat_request is AEAD(ChatRequest).
-    bytes encrypted_chat_request = 1;
-}
-
-message EncryptedChatResponse {
-    // encrypted_chat_response is AEAD(ChatResponse).
-    bytes encrypted_chat_response = 1;
 }

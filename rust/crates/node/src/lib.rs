@@ -72,7 +72,6 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
     type ProposeContractStream = Pin<Box<dyn Stream<Item = Result<clirpc::ProposeContractUpdate, tonic::Status>> + Send + 'static>>;
     type CheckContractStream = Pin<Box<dyn Stream<Item = Result<clirpc::CheckContractUpdate, tonic::Status>> + Send + 'static>>;
     type RecoverContentStream = Pin<Box<dyn Stream<Item = Result<clirpc::RecoverContentUpdate, tonic::Status>> + Send + 'static>>;
-    type CliChatStream = Pin<Box<dyn Stream<Item = Result<clirpc::ChatEvent, tonic::Status>> + Send + 'static>>;
 
     async fn local_health_check(
         &self,
@@ -171,21 +170,6 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         let s = stream::empty();
         Ok(Response::new(Box::pin(s)))
     }
-
-    async fn set_aead_key_for_peer(
-        &self,
-        _request: tonic::Request<clirpc::SetAeadKeyForPeerRequest>,
-    ) -> Result<tonic::Response<clirpc::SetAeadKeyForPeerResponse>, tonic::Status> {
-        Err(Status::unimplemented("SetAeadKeyForPeer not implemented in prototype"))
-    }
-
-    async fn cli_chat(
-        &self,
-        _request: tonic::Request<tonic::Streaming<clirpc::ChatAction>>,
-    ) -> Result<tonic::Response<Self::CliChatStream>, tonic::Status> {
-        let s = stream::empty();
-        Ok(Response::new(Box::pin(s)))
-    }
 }
 
 // -------------------- bbrpc --------------------
@@ -247,20 +231,6 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         _request: tonic::Request<bbrpc::EncryptedDownloadRequest>,
     ) -> Result<tonic::Response<bbrpc::EncryptedDownloadResponse>, tonic::Status> {
         Err(Status::unimplemented("EncryptedDownload not implemented in prototype"))
-    }
-
-    async fn chat(
-        &self,
-        _request: tonic::Request<bbrpc::ChatRequest>,
-    ) -> Result<tonic::Response<bbrpc::ChatResponse>, tonic::Status> {
-        Err(Status::unimplemented("Chat not implemented in prototype"))
-    }
-
-    async fn encrypted_chat(
-        &self,
-        _request: tonic::Request<bbrpc::EncryptedChatRequest>,
-    ) -> Result<tonic::Response<bbrpc::EncryptedChatResponse>, tonic::Status> {
-        Err(Status::unimplemented("EncryptedChat not implemented in prototype"))
     }
 }
 

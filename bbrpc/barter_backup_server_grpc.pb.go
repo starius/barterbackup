@@ -25,8 +25,6 @@ const (
 	BarterBackupServer_SetContentRevision_FullMethodName = "/bbrpc.BarterBackupServer/SetContentRevision"
 	BarterBackupServer_Download_FullMethodName           = "/bbrpc.BarterBackupServer/Download"
 	BarterBackupServer_EncryptedDownload_FullMethodName  = "/bbrpc.BarterBackupServer/EncryptedDownload"
-	BarterBackupServer_Chat_FullMethodName               = "/bbrpc.BarterBackupServer/Chat"
-	BarterBackupServer_EncryptedChat_FullMethodName      = "/bbrpc.BarterBackupServer/EncryptedChat"
 )
 
 // BarterBackupServerClient is the client API for BarterBackupServer service.
@@ -50,17 +48,11 @@ type BarterBackupServerClient interface {
 	// referenced in the request. If peer agrees, it will respond successfully.
 	SetContentRevision(ctx context.Context, in *SetContentRevisionRequest, opts ...grpc.CallOption) (*SetContentRevisionResponse, error)
 	// Download downloads a section of a file which can be content of either
-	// the requester or the responder or a file sent in chat by the responder.
+	// the requester or the responder.
 	Download(ctx context.Context, in *DownloadRequest, opts ...grpc.CallOption) (*DownloadResponse, error)
 	// EncryptedDownload makes encrypted download request. The encryption
-	// password needs to be setup out-of-band. This is used only within an
-	// encrypted chat.
+	// password needs to be setup out-of-band.
 	EncryptedDownload(ctx context.Context, in *EncryptedDownloadRequest, opts ...grpc.CallOption) (*EncryptedDownloadResponse, error)
-	// Chat sends a chat action to another side.
-	Chat(ctx context.Context, in *ChatRequest, opts ...grpc.CallOption) (*ChatResponse, error)
-	// EncryptedChat sends a symmetrically encrypted chat action. The
-	// encryption password needs to be setup out-of-band.
-	EncryptedChat(ctx context.Context, in *EncryptedChatRequest, opts ...grpc.CallOption) (*EncryptedChatResponse, error)
 }
 
 type barterBackupServerClient struct {
@@ -131,26 +123,6 @@ func (c *barterBackupServerClient) EncryptedDownload(ctx context.Context, in *En
 	return out, nil
 }
 
-func (c *barterBackupServerClient) Chat(ctx context.Context, in *ChatRequest, opts ...grpc.CallOption) (*ChatResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ChatResponse)
-	err := c.cc.Invoke(ctx, BarterBackupServer_Chat_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *barterBackupServerClient) EncryptedChat(ctx context.Context, in *EncryptedChatRequest, opts ...grpc.CallOption) (*EncryptedChatResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(EncryptedChatResponse)
-	err := c.cc.Invoke(ctx, BarterBackupServer_EncryptedChat_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 // BarterBackupServerServer is the server API for BarterBackupServer service.
 // All implementations must embed UnimplementedBarterBackupServerServer
 // for forward compatibility.
@@ -172,17 +144,11 @@ type BarterBackupServerServer interface {
 	// referenced in the request. If peer agrees, it will respond successfully.
 	SetContentRevision(context.Context, *SetContentRevisionRequest) (*SetContentRevisionResponse, error)
 	// Download downloads a section of a file which can be content of either
-	// the requester or the responder or a file sent in chat by the responder.
+	// the requester or the responder.
 	Download(context.Context, *DownloadRequest) (*DownloadResponse, error)
 	// EncryptedDownload makes encrypted download request. The encryption
-	// password needs to be setup out-of-band. This is used only within an
-	// encrypted chat.
+	// password needs to be setup out-of-band.
 	EncryptedDownload(context.Context, *EncryptedDownloadRequest) (*EncryptedDownloadResponse, error)
-	// Chat sends a chat action to another side.
-	Chat(context.Context, *ChatRequest) (*ChatResponse, error)
-	// EncryptedChat sends a symmetrically encrypted chat action. The
-	// encryption password needs to be setup out-of-band.
-	EncryptedChat(context.Context, *EncryptedChatRequest) (*EncryptedChatResponse, error)
 	mustEmbedUnimplementedBarterBackupServerServer()
 }
 
@@ -210,12 +176,6 @@ func (UnimplementedBarterBackupServerServer) Download(context.Context, *Download
 }
 func (UnimplementedBarterBackupServerServer) EncryptedDownload(context.Context, *EncryptedDownloadRequest) (*EncryptedDownloadResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method EncryptedDownload not implemented")
-}
-func (UnimplementedBarterBackupServerServer) Chat(context.Context, *ChatRequest) (*ChatResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Chat not implemented")
-}
-func (UnimplementedBarterBackupServerServer) EncryptedChat(context.Context, *EncryptedChatRequest) (*EncryptedChatResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method EncryptedChat not implemented")
 }
 func (UnimplementedBarterBackupServerServer) mustEmbedUnimplementedBarterBackupServerServer() {}
 func (UnimplementedBarterBackupServerServer) testEmbeddedByValue()                            {}
@@ -346,42 +306,6 @@ func _BarterBackupServer_EncryptedDownload_Handler(srv interface{}, ctx context.
 	return interceptor(ctx, in, info, handler)
 }
 
-func _BarterBackupServer_Chat_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ChatRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(BarterBackupServerServer).Chat(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: BarterBackupServer_Chat_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(BarterBackupServerServer).Chat(ctx, req.(*ChatRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _BarterBackupServer_EncryptedChat_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(EncryptedChatRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(BarterBackupServerServer).EncryptedChat(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: BarterBackupServer_EncryptedChat_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(BarterBackupServerServer).EncryptedChat(ctx, req.(*EncryptedChatRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 // BarterBackupServer_ServiceDesc is the grpc.ServiceDesc for BarterBackupServer service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -412,14 +336,6 @@ var BarterBackupServer_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "EncryptedDownload",
 			Handler:    _BarterBackupServer_EncryptedDownload_Handler,
-		},
-		{
-			MethodName: "Chat",
-			Handler:    _BarterBackupServer_Chat_Handler,
-		},
-		{
-			MethodName: "EncryptedChat",
-			Handler:    _BarterBackupServer_EncryptedChat_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -30,9 +30,6 @@ Mutual backup system: you store my data, I store yours.
   - GetContracts: View current storage contracts with peers.
   - ProposeContract, CheckContract, RecoverContent: Long‑running/streaming
     operations to form, verify, and recover content from peers.
-  - SetAeadKeyForPeer: Configure symmetric key for encrypted chat with a
-    specific peer.
-  - Chat: Bidirectional stream for messages and file offers.
 
 - bbrpc service
   - PeerExchange: Share peer onion identities for discovery.
@@ -40,9 +37,7 @@ Mutual backup system: you store my data, I store yours.
     stored on each side and propose updates/deletions.
   - Download: Retrieve sections of content, optionally using reference
     sections for efficient deltas. Response includes a SHA-256 hash.
-  - EncryptedDownload: AEAD‑wrapped variant used inside encrypted chats.
-  - Chat, EncryptedChat: Send chat actions (init, message, file, stop).
-    Tag numbers are msg = 3, file = 4, stop = 5.
+  - EncryptedDownload: AEAD‑wrapped variant using an out‑of‑band password.
 
 - storedpb messages
   - ContentRevision: Marks a concrete version produced by SetFile; its AEAD
@@ -50,15 +45,15 @@ Mutual backup system: you store my data, I store yours.
     Metadata (AEAD) and content (AES‑CTR).
   - Metadata: Tracks the most recent revision, content_length, content_sha256,
     and per‑peer records.
-  - Peer: Stores onion_pubkey, optional aead_key for chat, and scoring fields
-    used to evaluate peers over time.
+  - Peer: Stores onion_pubkey and scoring fields used to evaluate peers over
+    time.
 
 **Security Model**
 - Unlock derives a master secret from the main password. Keys from this secret
   encrypt content and metadata and identify the node’s onion service.
 - Content is encrypted; Metadata is AEAD‑encrypted; content payload uses
-  AES‑CTR. Chats and encrypted downloads can be AEAD‑protected using a per‑peer
-  symmetric key configured out‑of‑band via SetAeadKeyForPeer.
+  AES‑CTR. Encrypted downloads can be AEAD‑protected using a shared password
+  configured out‑of‑band.
 - All inter‑node communication happens over Tor onion services.
 
 **Developer Notes**
@@ -75,14 +70,13 @@ Mutual backup system: you store my data, I store yours.
   - Comments are English sentences: start with a capital letter and end with
     punctuation.
   - Field comments must start with the field name (for example, "name is …",
-    "encrypted_chat_request is …").
+    "encrypted_download_request is …").
   - Wrap comments at about 80 characters (tabs count as 8 spaces).
 
 **Status and TODOs**
 - Client API uses SetFile/GetFile/ListFiles for file management.
-- clirpc message types for contract management, recovery, and chat are
-  defined; implementations may still evolve.
-- bbrpc ChatRequest tag numbers corrected (msg = 3, file = 4, stop = 5).
+- clirpc message types for contract management and recovery are defined;
+  implementations may still evolve.
 - Next steps:
   - Implement contract lifecycle and background verification.
   - Enforce storage allocation and replica policies.
@@ -95,5 +89,4 @@ Mutual backup system: you store my data, I store yours.
   - Unlock with the main password.
   - Connect to peers by onion ID.
   - Add files with SetFile; inspect with ListFiles/GetFile.
-  - Optionally set a per‑peer AEAD key for encrypted chat/transfers.
   - Propose/verify contracts; recovery runs automatically in the background.

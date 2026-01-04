@@ -1828,796 +1828,6 @@ func (x *RecoverContentUpdate) GetRecoveredMostRecentVersion() bool {
 	return false
 }
 
-// SetAeadKeyForPeerRequest configures a password-derived symmetric key for a
-// peer chat.
-type SetAeadKeyForPeerRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// peer is the peer for which to set the key.
-	Peer *Peer `protobuf:"bytes,1,opt,name=peer,proto3" json:"peer,omitempty"`
-	// password is the shared password to derive the AEAD key.
-	Password      string `protobuf:"bytes,2,opt,name=password,proto3" json:"password,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *SetAeadKeyForPeerRequest) Reset() {
-	*x = SetAeadKeyForPeerRequest{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[33]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SetAeadKeyForPeerRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SetAeadKeyForPeerRequest) ProtoMessage() {}
-
-func (x *SetAeadKeyForPeerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[33]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SetAeadKeyForPeerRequest.ProtoReflect.Descriptor instead.
-func (*SetAeadKeyForPeerRequest) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{33}
-}
-
-func (x *SetAeadKeyForPeerRequest) GetPeer() *Peer {
-	if x != nil {
-		return x.Peer
-	}
-	return nil
-}
-
-func (x *SetAeadKeyForPeerRequest) GetPassword() string {
-	if x != nil {
-		return x.Password
-	}
-	return ""
-}
-
-// SetAeadKeyForPeerResponse is returned when the key is set.
-type SetAeadKeyForPeerResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *SetAeadKeyForPeerResponse) Reset() {
-	*x = SetAeadKeyForPeerResponse{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[34]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *SetAeadKeyForPeerResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*SetAeadKeyForPeerResponse) ProtoMessage() {}
-
-func (x *SetAeadKeyForPeerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[34]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use SetAeadKeyForPeerResponse.ProtoReflect.Descriptor instead.
-func (*SetAeadKeyForPeerResponse) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{34}
-}
-
-// ChatAction carries an action initiated by the CLI.
-type ChatAction struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// chat_id uniquely identifies the chat session.
-	ChatId int64 `protobuf:"varint,1,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
-	// peer is the chat counterpart onion service identifier.
-	Peer *Peer `protobuf:"bytes,2,opt,name=peer,proto3" json:"peer,omitempty"`
-	// Types that are valid to be assigned to Action:
-	//
-	//	*ChatAction_Init
-	//	*ChatAction_SendMsg
-	//	*ChatAction_SendFile
-	//	*ChatAction_Stop
-	Action        isChatAction_Action `protobuf_oneof:"action"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatAction) Reset() {
-	*x = ChatAction{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[35]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatAction) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatAction) ProtoMessage() {}
-
-func (x *ChatAction) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[35]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatAction.ProtoReflect.Descriptor instead.
-func (*ChatAction) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{35}
-}
-
-func (x *ChatAction) GetChatId() int64 {
-	if x != nil {
-		return x.ChatId
-	}
-	return 0
-}
-
-func (x *ChatAction) GetPeer() *Peer {
-	if x != nil {
-		return x.Peer
-	}
-	return nil
-}
-
-func (x *ChatAction) GetAction() isChatAction_Action {
-	if x != nil {
-		return x.Action
-	}
-	return nil
-}
-
-func (x *ChatAction) GetInit() *ChatInit {
-	if x != nil {
-		if x, ok := x.Action.(*ChatAction_Init); ok {
-			return x.Init
-		}
-	}
-	return nil
-}
-
-func (x *ChatAction) GetSendMsg() *ChatSendMsg {
-	if x != nil {
-		if x, ok := x.Action.(*ChatAction_SendMsg); ok {
-			return x.SendMsg
-		}
-	}
-	return nil
-}
-
-func (x *ChatAction) GetSendFile() *ChatSendFile {
-	if x != nil {
-		if x, ok := x.Action.(*ChatAction_SendFile); ok {
-			return x.SendFile
-		}
-	}
-	return nil
-}
-
-func (x *ChatAction) GetStop() *ChatStop {
-	if x != nil {
-		if x, ok := x.Action.(*ChatAction_Stop); ok {
-			return x.Stop
-		}
-	}
-	return nil
-}
-
-type isChatAction_Action interface {
-	isChatAction_Action()
-}
-
-type ChatAction_Init struct {
-	// init starts a chat session or joins a pending chat request.
-	Init *ChatInit `protobuf:"bytes,3,opt,name=init,proto3,oneof"`
-}
-
-type ChatAction_SendMsg struct {
-	// send_msg sends a text message.
-	SendMsg *ChatSendMsg `protobuf:"bytes,4,opt,name=send_msg,json=sendMsg,proto3,oneof"`
-}
-
-type ChatAction_SendFile struct {
-	// send_file offers a file to the peer.
-	SendFile *ChatSendFile `protobuf:"bytes,5,opt,name=send_file,json=sendFile,proto3,oneof"`
-}
-
-type ChatAction_Stop struct {
-	// stop ends the chat session.
-	Stop *ChatStop `protobuf:"bytes,6,opt,name=stop,proto3,oneof"`
-}
-
-func (*ChatAction_Init) isChatAction_Action() {}
-
-func (*ChatAction_SendMsg) isChatAction_Action() {}
-
-func (*ChatAction_SendFile) isChatAction_Action() {}
-
-func (*ChatAction_Stop) isChatAction_Action() {}
-
-// ChatEvent carries an event produced by the daemon.
-type ChatEvent struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// chat_id is the chat session identifier.
-	ChatId int64 `protobuf:"varint,1,opt,name=chat_id,json=chatId,proto3" json:"chat_id,omitempty"`
-	// Types that are valid to be assigned to Event:
-	//
-	//	*ChatEvent_Opened
-	//	*ChatEvent_IncomingMsg
-	//	*ChatEvent_FileOffered
-	//	*ChatEvent_Closed
-	//	*ChatEvent_Error
-	Event         isChatEvent_Event `protobuf_oneof:"event"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatEvent) Reset() {
-	*x = ChatEvent{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[36]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatEvent) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatEvent) ProtoMessage() {}
-
-func (x *ChatEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[36]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatEvent.ProtoReflect.Descriptor instead.
-func (*ChatEvent) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{36}
-}
-
-func (x *ChatEvent) GetChatId() int64 {
-	if x != nil {
-		return x.ChatId
-	}
-	return 0
-}
-
-func (x *ChatEvent) GetEvent() isChatEvent_Event {
-	if x != nil {
-		return x.Event
-	}
-	return nil
-}
-
-func (x *ChatEvent) GetOpened() *ChatOpened {
-	if x != nil {
-		if x, ok := x.Event.(*ChatEvent_Opened); ok {
-			return x.Opened
-		}
-	}
-	return nil
-}
-
-func (x *ChatEvent) GetIncomingMsg() *ChatIncomingMsg {
-	if x != nil {
-		if x, ok := x.Event.(*ChatEvent_IncomingMsg); ok {
-			return x.IncomingMsg
-		}
-	}
-	return nil
-}
-
-func (x *ChatEvent) GetFileOffered() *ChatFileOffered {
-	if x != nil {
-		if x, ok := x.Event.(*ChatEvent_FileOffered); ok {
-			return x.FileOffered
-		}
-	}
-	return nil
-}
-
-func (x *ChatEvent) GetClosed() *ChatClosed {
-	if x != nil {
-		if x, ok := x.Event.(*ChatEvent_Closed); ok {
-			return x.Closed
-		}
-	}
-	return nil
-}
-
-func (x *ChatEvent) GetError() *ChatError {
-	if x != nil {
-		if x, ok := x.Event.(*ChatEvent_Error); ok {
-			return x.Error
-		}
-	}
-	return nil
-}
-
-type isChatEvent_Event interface {
-	isChatEvent_Event()
-}
-
-type ChatEvent_Opened struct {
-	// opened confirms that the chat session is open.
-	Opened *ChatOpened `protobuf:"bytes,2,opt,name=opened,proto3,oneof"`
-}
-
-type ChatEvent_IncomingMsg struct {
-	// incoming_msg is an incoming text message.
-	IncomingMsg *ChatIncomingMsg `protobuf:"bytes,3,opt,name=incoming_msg,json=incomingMsg,proto3,oneof"`
-}
-
-type ChatEvent_FileOffered struct {
-	// file_offered is a file the peer made available to download.
-	FileOffered *ChatFileOffered `protobuf:"bytes,4,opt,name=file_offered,json=fileOffered,proto3,oneof"`
-}
-
-type ChatEvent_Closed struct {
-	// closed indicates that the chat session has ended.
-	Closed *ChatClosed `protobuf:"bytes,5,opt,name=closed,proto3,oneof"`
-}
-
-type ChatEvent_Error struct {
-	// error is a human-readable error string.
-	Error *ChatError `protobuf:"bytes,6,opt,name=error,proto3,oneof"`
-}
-
-func (*ChatEvent_Opened) isChatEvent_Event() {}
-
-func (*ChatEvent_IncomingMsg) isChatEvent_Event() {}
-
-func (*ChatEvent_FileOffered) isChatEvent_Event() {}
-
-func (*ChatEvent_Closed) isChatEvent_Event() {}
-
-func (*ChatEvent_Error) isChatEvent_Event() {}
-
-// ChatInit starts a chat.
-type ChatInit struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatInit) Reset() {
-	*x = ChatInit{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[37]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatInit) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatInit) ProtoMessage() {}
-
-func (x *ChatInit) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[37]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatInit.ProtoReflect.Descriptor instead.
-func (*ChatInit) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{37}
-}
-
-// ChatSendMsg contains an outgoing message body.
-type ChatSendMsg struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// msg is the text message to send.
-	Msg           string `protobuf:"bytes,1,opt,name=msg,proto3" json:"msg,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatSendMsg) Reset() {
-	*x = ChatSendMsg{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[38]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatSendMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatSendMsg) ProtoMessage() {}
-
-func (x *ChatSendMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[38]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatSendMsg.ProtoReflect.Descriptor instead.
-func (*ChatSendMsg) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{38}
-}
-
-func (x *ChatSendMsg) GetMsg() string {
-	if x != nil {
-		return x.Msg
-	}
-	return ""
-}
-
-// ChatSendFile contains an outgoing file to offer via the chat.
-type ChatSendFile struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// name is a descriptive file name shown to the receiving user.
-	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// local_file_path is local file path of the file to send. It is not
-	// seen by the receiving user.
-	LocalFilePath string `protobuf:"bytes,2,opt,name=local_file_path,json=localFilePath,proto3" json:"local_file_path,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatSendFile) Reset() {
-	*x = ChatSendFile{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[39]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatSendFile) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatSendFile) ProtoMessage() {}
-
-func (x *ChatSendFile) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[39]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatSendFile.ProtoReflect.Descriptor instead.
-func (*ChatSendFile) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{39}
-}
-
-func (x *ChatSendFile) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *ChatSendFile) GetLocalFilePath() string {
-	if x != nil {
-		return x.LocalFilePath
-	}
-	return ""
-}
-
-// ChatStop requests the chat to stop.
-type ChatStop struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatStop) Reset() {
-	*x = ChatStop{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[40]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatStop) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatStop) ProtoMessage() {}
-
-func (x *ChatStop) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[40]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatStop.ProtoReflect.Descriptor instead.
-func (*ChatStop) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{40}
-}
-
-// ChatOpened acknowledges an opened chat.
-type ChatOpened struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatOpened) Reset() {
-	*x = ChatOpened{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[41]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatOpened) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatOpened) ProtoMessage() {}
-
-func (x *ChatOpened) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[41]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatOpened.ProtoReflect.Descriptor instead.
-func (*ChatOpened) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{41}
-}
-
-// ChatIncomingMsg contains an incoming text message.
-type ChatIncomingMsg struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// msg is a text message from the peer.
-	Msg           string `protobuf:"bytes,1,opt,name=msg,proto3" json:"msg,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatIncomingMsg) Reset() {
-	*x = ChatIncomingMsg{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[42]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatIncomingMsg) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatIncomingMsg) ProtoMessage() {}
-
-func (x *ChatIncomingMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[42]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatIncomingMsg.ProtoReflect.Descriptor instead.
-func (*ChatIncomingMsg) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{42}
-}
-
-func (x *ChatIncomingMsg) GetMsg() string {
-	if x != nil {
-		return x.Msg
-	}
-	return ""
-}
-
-// ChatFileOffered describes a file available for download from the peer.
-type ChatFileOffered struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// name is a descriptive file name shown to the user.
-	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// content_id is the identifier used for Download in bbrpc.
-	ContentId []byte `protobuf:"bytes,2,opt,name=content_id,json=contentId,proto3" json:"content_id,omitempty"`
-	// sha256 is the SHA-256 hash of the file.
-	Sha256 []byte `protobuf:"bytes,3,opt,name=sha256,proto3" json:"sha256,omitempty"`
-	// content_length is the total file size in bytes.
-	ContentLength int64 `protobuf:"varint,4,opt,name=content_length,json=contentLength,proto3" json:"content_length,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatFileOffered) Reset() {
-	*x = ChatFileOffered{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[43]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatFileOffered) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatFileOffered) ProtoMessage() {}
-
-func (x *ChatFileOffered) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[43]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatFileOffered.ProtoReflect.Descriptor instead.
-func (*ChatFileOffered) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{43}
-}
-
-func (x *ChatFileOffered) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *ChatFileOffered) GetContentId() []byte {
-	if x != nil {
-		return x.ContentId
-	}
-	return nil
-}
-
-func (x *ChatFileOffered) GetSha256() []byte {
-	if x != nil {
-		return x.Sha256
-	}
-	return nil
-}
-
-func (x *ChatFileOffered) GetContentLength() int64 {
-	if x != nil {
-		return x.ContentLength
-	}
-	return 0
-}
-
-// ChatClosed signals the end of a chat.
-type ChatClosed struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatClosed) Reset() {
-	*x = ChatClosed{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[44]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatClosed) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatClosed) ProtoMessage() {}
-
-func (x *ChatClosed) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[44]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatClosed.ProtoReflect.Descriptor instead.
-func (*ChatClosed) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{44}
-}
-
-// ChatError carries an error string related to the chat.
-type ChatError struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// error is a human-readable error message.
-	Error         string `protobuf:"bytes,1,opt,name=error,proto3" json:"error,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ChatError) Reset() {
-	*x = ChatError{}
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[45]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ChatError) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ChatError) ProtoMessage() {}
-
-func (x *ChatError) ProtoReflect() protoreflect.Message {
-	mi := &file_clirpc_barter_backup_client_proto_msgTypes[45]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ChatError.ProtoReflect.Descriptor instead.
-func (*ChatError) Descriptor() ([]byte, []int) {
-	return file_clirpc_barter_backup_client_proto_rawDescGZIP(), []int{45}
-}
-
-func (x *ChatError) GetError() string {
-	if x != nil {
-		return x.Error
-	}
-	return ""
-}
-
 var File_clirpc_barter_backup_client_proto protoreflect.FileDescriptor
 
 const file_clirpc_barter_backup_client_proto_rawDesc = "" +
@@ -2712,51 +1922,7 @@ const file_clirpc_barter_backup_client_proto_rawDesc = "" +
 	"\x1cmost_recent_downloaded_files\x18\t \x01(\x03R\x19mostRecentDownloadedFiles\x124\n" +
 	"\x16total_downloaded_bytes\x18\n" +
 	" \x01(\x03R\x14totalDownloadedBytes\x12A\n" +
-	"\x1drecovered_most_recent_version\x18\v \x01(\bR\x1arecoveredMostRecentVersion\"X\n" +
-	"\x18SetAeadKeyForPeerRequest\x12 \n" +
-	"\x04peer\x18\x01 \x01(\v2\f.clirpc.PeerR\x04peer\x12\x1a\n" +
-	"\bpassword\x18\x02 \x01(\tR\bpassword\"\x1b\n" +
-	"\x19SetAeadKeyForPeerResponse\"\x88\x02\n" +
-	"\n" +
-	"ChatAction\x12\x17\n" +
-	"\achat_id\x18\x01 \x01(\x03R\x06chatId\x12 \n" +
-	"\x04peer\x18\x02 \x01(\v2\f.clirpc.PeerR\x04peer\x12&\n" +
-	"\x04init\x18\x03 \x01(\v2\x10.clirpc.ChatInitH\x00R\x04init\x120\n" +
-	"\bsend_msg\x18\x04 \x01(\v2\x13.clirpc.ChatSendMsgH\x00R\asendMsg\x123\n" +
-	"\tsend_file\x18\x05 \x01(\v2\x14.clirpc.ChatSendFileH\x00R\bsendFile\x12&\n" +
-	"\x04stop\x18\x06 \x01(\v2\x10.clirpc.ChatStopH\x00R\x04stopB\b\n" +
-	"\x06action\"\xb0\x02\n" +
-	"\tChatEvent\x12\x17\n" +
-	"\achat_id\x18\x01 \x01(\x03R\x06chatId\x12,\n" +
-	"\x06opened\x18\x02 \x01(\v2\x12.clirpc.ChatOpenedH\x00R\x06opened\x12<\n" +
-	"\fincoming_msg\x18\x03 \x01(\v2\x17.clirpc.ChatIncomingMsgH\x00R\vincomingMsg\x12<\n" +
-	"\ffile_offered\x18\x04 \x01(\v2\x17.clirpc.ChatFileOfferedH\x00R\vfileOffered\x12,\n" +
-	"\x06closed\x18\x05 \x01(\v2\x12.clirpc.ChatClosedH\x00R\x06closed\x12)\n" +
-	"\x05error\x18\x06 \x01(\v2\x11.clirpc.ChatErrorH\x00R\x05errorB\a\n" +
-	"\x05event\"\n" +
-	"\n" +
-	"\bChatInit\"\x1f\n" +
-	"\vChatSendMsg\x12\x10\n" +
-	"\x03msg\x18\x01 \x01(\tR\x03msg\"J\n" +
-	"\fChatSendFile\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12&\n" +
-	"\x0flocal_file_path\x18\x02 \x01(\tR\rlocalFilePath\"\n" +
-	"\n" +
-	"\bChatStop\"\f\n" +
-	"\n" +
-	"ChatOpened\"#\n" +
-	"\x0fChatIncomingMsg\x12\x10\n" +
-	"\x03msg\x18\x01 \x01(\tR\x03msg\"\x83\x01\n" +
-	"\x0fChatFileOffered\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
-	"\n" +
-	"content_id\x18\x02 \x01(\fR\tcontentId\x12\x16\n" +
-	"\x06sha256\x18\x03 \x01(\fR\x06sha256\x12%\n" +
-	"\x0econtent_length\x18\x04 \x01(\x03R\rcontentLength\"\f\n" +
-	"\n" +
-	"ChatClosed\"!\n" +
-	"\tChatError\x12\x14\n" +
-	"\x05error\x18\x01 \x01(\tR\x05error*\xde\x01\n" +
+	"\x1drecovered_most_recent_version\x18\v \x01(\bR\x1arecoveredMostRecentVersion*\xde\x01\n" +
 	"\rContractState\x12\x0f\n" +
 	"\vNOT_STARTED\x10\x00\x12\x16\n" +
 	"\x12CONNECTING_TO_PEER\x10\x01\x12\x16\n" +
@@ -2766,7 +1932,7 @@ const file_clirpc_barter_backup_client_proto_rawDesc = "" +
 	"\x11CHECKING_CONTENTS\x10\x05\x12 \n" +
 	"\x1cOUR_CONTENT_REVISION_MISSING\x10\x06\x12\x1c\n" +
 	"\x18INVALID_CONTENT_RETURNED\x10\a\x12\r\n" +
-	"\tCOMPLETED\x10\b2\xae\t\n" +
+	"\tCOMPLETED\x10\b2\x9e\b\n" +
 	"\x12BarterBackupClient\x12K\n" +
 	"\x10LocalHealthCheck\x12\x1a.clirpc.HealthCheckRequest\x1a\x1b.clirpc.HealthCheckResponse\x127\n" +
 	"\x06Unlock\x12\x15.clirpc.UnlockRequest\x1a\x16.clirpc.UnlockResponse\x12F\n" +
@@ -2782,9 +1948,7 @@ const file_clirpc_barter_backup_client_proto_rawDesc = "" +
 	"\fGetContracts\x12\x1b.clirpc.GetContractsRequest\x1a\x1c.clirpc.GetContractsResponse\x12R\n" +
 	"\x0fProposeContract\x12\x1e.clirpc.ProposeContractRequest\x1a\x1d.clirpc.ProposeContractUpdate0\x01\x12L\n" +
 	"\rCheckContract\x12\x1c.clirpc.CheckContractRequest\x1a\x1b.clirpc.CheckContractUpdate0\x01\x12O\n" +
-	"\x0eRecoverContent\x12\x1d.clirpc.RecoverContentRequest\x1a\x1c.clirpc.RecoverContentUpdate0\x01\x12X\n" +
-	"\x11SetAeadKeyForPeer\x12 .clirpc.SetAeadKeyForPeerRequest\x1a!.clirpc.SetAeadKeyForPeerResponse\x124\n" +
-	"\aCliChat\x12\x12.clirpc.ChatAction\x1a\x11.clirpc.ChatEvent(\x010\x01B(Z&github.com/starius/barterbackup/clirpcb\x06proto3"
+	"\x0eRecoverContent\x12\x1d.clirpc.RecoverContentRequest\x1a\x1c.clirpc.RecoverContentUpdate0\x01B(Z&github.com/starius/barterbackup/clirpcb\x06proto3"
 
 var (
 	file_clirpc_barter_backup_client_proto_rawDescOnce sync.Once
@@ -2799,55 +1963,42 @@ func file_clirpc_barter_backup_client_proto_rawDescGZIP() []byte {
 }
 
 var file_clirpc_barter_backup_client_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_clirpc_barter_backup_client_proto_msgTypes = make([]protoimpl.MessageInfo, 46)
+var file_clirpc_barter_backup_client_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
 var file_clirpc_barter_backup_client_proto_goTypes = []any{
-	(ContractState)(0),                // 0: clirpc.ContractState
-	(*HealthCheckRequest)(nil),        // 1: clirpc.HealthCheckRequest
-	(*HealthCheckResponse)(nil),       // 2: clirpc.HealthCheckResponse
-	(*UnlockRequest)(nil),             // 3: clirpc.UnlockRequest
-	(*UnlockResponse)(nil),            // 4: clirpc.UnlockResponse
-	(*Peer)(nil),                      // 5: clirpc.Peer
-	(*ConnectPeerRequest)(nil),        // 6: clirpc.ConnectPeerRequest
-	(*ConnectPeerResponse)(nil),       // 7: clirpc.ConnectPeerResponse
-	(*ConnectedPeersRequest)(nil),     // 8: clirpc.ConnectedPeersRequest
-	(*ConnectedPeersResponse)(nil),    // 9: clirpc.ConnectedPeersResponse
-	(*File)(nil),                      // 10: clirpc.File
-	(*SetFileRequest)(nil),            // 11: clirpc.SetFileRequest
-	(*SetFileResponse)(nil),           // 12: clirpc.SetFileResponse
-	(*DeleteFileRequest)(nil),         // 13: clirpc.DeleteFileRequest
-	(*DeleteFileResponse)(nil),        // 14: clirpc.DeleteFileResponse
-	(*GetFileRequest)(nil),            // 15: clirpc.GetFileRequest
-	(*GetFileResponse)(nil),           // 16: clirpc.GetFileResponse
-	(*ListFilesRequest)(nil),          // 17: clirpc.ListFilesRequest
-	(*ListFilesResponse)(nil),         // 18: clirpc.ListFilesResponse
-	(*StorageConfig)(nil),             // 19: clirpc.StorageConfig
-	(*StorageInfo)(nil),               // 20: clirpc.StorageInfo
-	(*SetStorageConfigRequest)(nil),   // 21: clirpc.SetStorageConfigRequest
-	(*SetStorageConfigResponse)(nil),  // 22: clirpc.SetStorageConfigResponse
-	(*GetStorageConfigRequest)(nil),   // 23: clirpc.GetStorageConfigRequest
-	(*GetStorageConfigResponse)(nil),  // 24: clirpc.GetStorageConfigResponse
-	(*GetContractsRequest)(nil),       // 25: clirpc.GetContractsRequest
-	(*ContractInfo)(nil),              // 26: clirpc.ContractInfo
-	(*GetContractsResponse)(nil),      // 27: clirpc.GetContractsResponse
-	(*ProposeContractRequest)(nil),    // 28: clirpc.ProposeContractRequest
-	(*ProposeContractUpdate)(nil),     // 29: clirpc.ProposeContractUpdate
-	(*CheckContractRequest)(nil),      // 30: clirpc.CheckContractRequest
-	(*CheckContractUpdate)(nil),       // 31: clirpc.CheckContractUpdate
-	(*RecoverContentRequest)(nil),     // 32: clirpc.RecoverContentRequest
-	(*RecoverContentUpdate)(nil),      // 33: clirpc.RecoverContentUpdate
-	(*SetAeadKeyForPeerRequest)(nil),  // 34: clirpc.SetAeadKeyForPeerRequest
-	(*SetAeadKeyForPeerResponse)(nil), // 35: clirpc.SetAeadKeyForPeerResponse
-	(*ChatAction)(nil),                // 36: clirpc.ChatAction
-	(*ChatEvent)(nil),                 // 37: clirpc.ChatEvent
-	(*ChatInit)(nil),                  // 38: clirpc.ChatInit
-	(*ChatSendMsg)(nil),               // 39: clirpc.ChatSendMsg
-	(*ChatSendFile)(nil),              // 40: clirpc.ChatSendFile
-	(*ChatStop)(nil),                  // 41: clirpc.ChatStop
-	(*ChatOpened)(nil),                // 42: clirpc.ChatOpened
-	(*ChatIncomingMsg)(nil),           // 43: clirpc.ChatIncomingMsg
-	(*ChatFileOffered)(nil),           // 44: clirpc.ChatFileOffered
-	(*ChatClosed)(nil),                // 45: clirpc.ChatClosed
-	(*ChatError)(nil),                 // 46: clirpc.ChatError
+	(ContractState)(0),               // 0: clirpc.ContractState
+	(*HealthCheckRequest)(nil),       // 1: clirpc.HealthCheckRequest
+	(*HealthCheckResponse)(nil),      // 2: clirpc.HealthCheckResponse
+	(*UnlockRequest)(nil),            // 3: clirpc.UnlockRequest
+	(*UnlockResponse)(nil),           // 4: clirpc.UnlockResponse
+	(*Peer)(nil),                     // 5: clirpc.Peer
+	(*ConnectPeerRequest)(nil),       // 6: clirpc.ConnectPeerRequest
+	(*ConnectPeerResponse)(nil),      // 7: clirpc.ConnectPeerResponse
+	(*ConnectedPeersRequest)(nil),    // 8: clirpc.ConnectedPeersRequest
+	(*ConnectedPeersResponse)(nil),   // 9: clirpc.ConnectedPeersResponse
+	(*File)(nil),                     // 10: clirpc.File
+	(*SetFileRequest)(nil),           // 11: clirpc.SetFileRequest
+	(*SetFileResponse)(nil),          // 12: clirpc.SetFileResponse
+	(*DeleteFileRequest)(nil),        // 13: clirpc.DeleteFileRequest
+	(*DeleteFileResponse)(nil),       // 14: clirpc.DeleteFileResponse
+	(*GetFileRequest)(nil),           // 15: clirpc.GetFileRequest
+	(*GetFileResponse)(nil),          // 16: clirpc.GetFileResponse
+	(*ListFilesRequest)(nil),         // 17: clirpc.ListFilesRequest
+	(*ListFilesResponse)(nil),        // 18: clirpc.ListFilesResponse
+	(*StorageConfig)(nil),            // 19: clirpc.StorageConfig
+	(*StorageInfo)(nil),              // 20: clirpc.StorageInfo
+	(*SetStorageConfigRequest)(nil),  // 21: clirpc.SetStorageConfigRequest
+	(*SetStorageConfigResponse)(nil), // 22: clirpc.SetStorageConfigResponse
+	(*GetStorageConfigRequest)(nil),  // 23: clirpc.GetStorageConfigRequest
+	(*GetStorageConfigResponse)(nil), // 24: clirpc.GetStorageConfigResponse
+	(*GetContractsRequest)(nil),      // 25: clirpc.GetContractsRequest
+	(*ContractInfo)(nil),             // 26: clirpc.ContractInfo
+	(*GetContractsResponse)(nil),     // 27: clirpc.GetContractsResponse
+	(*ProposeContractRequest)(nil),   // 28: clirpc.ProposeContractRequest
+	(*ProposeContractUpdate)(nil),    // 29: clirpc.ProposeContractUpdate
+	(*CheckContractRequest)(nil),     // 30: clirpc.CheckContractRequest
+	(*CheckContractUpdate)(nil),      // 31: clirpc.CheckContractUpdate
+	(*RecoverContentRequest)(nil),    // 32: clirpc.RecoverContentRequest
+	(*RecoverContentUpdate)(nil),     // 33: clirpc.RecoverContentUpdate
 }
 var file_clirpc_barter_backup_client_proto_depIdxs = []int32{
 	5,  // 0: clirpc.ConnectPeerRequest.peer:type_name -> clirpc.Peer
@@ -2865,54 +2016,39 @@ var file_clirpc_barter_backup_client_proto_depIdxs = []int32{
 	0,  // 12: clirpc.ProposeContractUpdate.state:type_name -> clirpc.ContractState
 	5,  // 13: clirpc.CheckContractRequest.peer:type_name -> clirpc.Peer
 	0,  // 14: clirpc.CheckContractUpdate.state:type_name -> clirpc.ContractState
-	5,  // 15: clirpc.SetAeadKeyForPeerRequest.peer:type_name -> clirpc.Peer
-	5,  // 16: clirpc.ChatAction.peer:type_name -> clirpc.Peer
-	38, // 17: clirpc.ChatAction.init:type_name -> clirpc.ChatInit
-	39, // 18: clirpc.ChatAction.send_msg:type_name -> clirpc.ChatSendMsg
-	40, // 19: clirpc.ChatAction.send_file:type_name -> clirpc.ChatSendFile
-	41, // 20: clirpc.ChatAction.stop:type_name -> clirpc.ChatStop
-	42, // 21: clirpc.ChatEvent.opened:type_name -> clirpc.ChatOpened
-	43, // 22: clirpc.ChatEvent.incoming_msg:type_name -> clirpc.ChatIncomingMsg
-	44, // 23: clirpc.ChatEvent.file_offered:type_name -> clirpc.ChatFileOffered
-	45, // 24: clirpc.ChatEvent.closed:type_name -> clirpc.ChatClosed
-	46, // 25: clirpc.ChatEvent.error:type_name -> clirpc.ChatError
-	1,  // 26: clirpc.BarterBackupClient.LocalHealthCheck:input_type -> clirpc.HealthCheckRequest
-	3,  // 27: clirpc.BarterBackupClient.Unlock:input_type -> clirpc.UnlockRequest
-	6,  // 28: clirpc.BarterBackupClient.ConnectPeer:input_type -> clirpc.ConnectPeerRequest
-	8,  // 29: clirpc.BarterBackupClient.ConnectedPeers:input_type -> clirpc.ConnectedPeersRequest
-	11, // 30: clirpc.BarterBackupClient.SetFile:input_type -> clirpc.SetFileRequest
-	13, // 31: clirpc.BarterBackupClient.DeleteFile:input_type -> clirpc.DeleteFileRequest
-	15, // 32: clirpc.BarterBackupClient.GetFile:input_type -> clirpc.GetFileRequest
-	17, // 33: clirpc.BarterBackupClient.ListFiles:input_type -> clirpc.ListFilesRequest
-	21, // 34: clirpc.BarterBackupClient.SetStorageConfig:input_type -> clirpc.SetStorageConfigRequest
-	23, // 35: clirpc.BarterBackupClient.GetStorageConfig:input_type -> clirpc.GetStorageConfigRequest
-	25, // 36: clirpc.BarterBackupClient.GetContracts:input_type -> clirpc.GetContractsRequest
-	28, // 37: clirpc.BarterBackupClient.ProposeContract:input_type -> clirpc.ProposeContractRequest
-	30, // 38: clirpc.BarterBackupClient.CheckContract:input_type -> clirpc.CheckContractRequest
-	32, // 39: clirpc.BarterBackupClient.RecoverContent:input_type -> clirpc.RecoverContentRequest
-	34, // 40: clirpc.BarterBackupClient.SetAeadKeyForPeer:input_type -> clirpc.SetAeadKeyForPeerRequest
-	36, // 41: clirpc.BarterBackupClient.CliChat:input_type -> clirpc.ChatAction
-	2,  // 42: clirpc.BarterBackupClient.LocalHealthCheck:output_type -> clirpc.HealthCheckResponse
-	4,  // 43: clirpc.BarterBackupClient.Unlock:output_type -> clirpc.UnlockResponse
-	7,  // 44: clirpc.BarterBackupClient.ConnectPeer:output_type -> clirpc.ConnectPeerResponse
-	9,  // 45: clirpc.BarterBackupClient.ConnectedPeers:output_type -> clirpc.ConnectedPeersResponse
-	12, // 46: clirpc.BarterBackupClient.SetFile:output_type -> clirpc.SetFileResponse
-	14, // 47: clirpc.BarterBackupClient.DeleteFile:output_type -> clirpc.DeleteFileResponse
-	16, // 48: clirpc.BarterBackupClient.GetFile:output_type -> clirpc.GetFileResponse
-	18, // 49: clirpc.BarterBackupClient.ListFiles:output_type -> clirpc.ListFilesResponse
-	22, // 50: clirpc.BarterBackupClient.SetStorageConfig:output_type -> clirpc.SetStorageConfigResponse
-	24, // 51: clirpc.BarterBackupClient.GetStorageConfig:output_type -> clirpc.GetStorageConfigResponse
-	27, // 52: clirpc.BarterBackupClient.GetContracts:output_type -> clirpc.GetContractsResponse
-	29, // 53: clirpc.BarterBackupClient.ProposeContract:output_type -> clirpc.ProposeContractUpdate
-	31, // 54: clirpc.BarterBackupClient.CheckContract:output_type -> clirpc.CheckContractUpdate
-	33, // 55: clirpc.BarterBackupClient.RecoverContent:output_type -> clirpc.RecoverContentUpdate
-	35, // 56: clirpc.BarterBackupClient.SetAeadKeyForPeer:output_type -> clirpc.SetAeadKeyForPeerResponse
-	37, // 57: clirpc.BarterBackupClient.CliChat:output_type -> clirpc.ChatEvent
-	42, // [42:58] is the sub-list for method output_type
-	26, // [26:42] is the sub-list for method input_type
-	26, // [26:26] is the sub-list for extension type_name
-	26, // [26:26] is the sub-list for extension extendee
-	0,  // [0:26] is the sub-list for field type_name
+	1,  // 15: clirpc.BarterBackupClient.LocalHealthCheck:input_type -> clirpc.HealthCheckRequest
+	3,  // 16: clirpc.BarterBackupClient.Unlock:input_type -> clirpc.UnlockRequest
+	6,  // 17: clirpc.BarterBackupClient.ConnectPeer:input_type -> clirpc.ConnectPeerRequest
+	8,  // 18: clirpc.BarterBackupClient.ConnectedPeers:input_type -> clirpc.ConnectedPeersRequest
+	11, // 19: clirpc.BarterBackupClient.SetFile:input_type -> clirpc.SetFileRequest
+	13, // 20: clirpc.BarterBackupClient.DeleteFile:input_type -> clirpc.DeleteFileRequest
+	15, // 21: clirpc.BarterBackupClient.GetFile:input_type -> clirpc.GetFileRequest
+	17, // 22: clirpc.BarterBackupClient.ListFiles:input_type -> clirpc.ListFilesRequest
+	21, // 23: clirpc.BarterBackupClient.SetStorageConfig:input_type -> clirpc.SetStorageConfigRequest
+	23, // 24: clirpc.BarterBackupClient.GetStorageConfig:input_type -> clirpc.GetStorageConfigRequest
+	25, // 25: clirpc.BarterBackupClient.GetContracts:input_type -> clirpc.GetContractsRequest
+	28, // 26: clirpc.BarterBackupClient.ProposeContract:input_type -> clirpc.ProposeContractRequest
+	30, // 27: clirpc.BarterBackupClient.CheckContract:input_type -> clirpc.CheckContractRequest
+	32, // 28: clirpc.BarterBackupClient.RecoverContent:input_type -> clirpc.RecoverContentRequest
+	2,  // 29: clirpc.BarterBackupClient.LocalHealthCheck:output_type -> clirpc.HealthCheckResponse
+	4,  // 30: clirpc.BarterBackupClient.Unlock:output_type -> clirpc.UnlockResponse
+	7,  // 31: clirpc.BarterBackupClient.ConnectPeer:output_type -> clirpc.ConnectPeerResponse
+	9,  // 32: clirpc.BarterBackupClient.ConnectedPeers:output_type -> clirpc.ConnectedPeersResponse
+	12, // 33: clirpc.BarterBackupClient.SetFile:output_type -> clirpc.SetFileResponse
+	14, // 34: clirpc.BarterBackupClient.DeleteFile:output_type -> clirpc.DeleteFileResponse
+	16, // 35: clirpc.BarterBackupClient.GetFile:output_type -> clirpc.GetFileResponse
+	18, // 36: clirpc.BarterBackupClient.ListFiles:output_type -> clirpc.ListFilesResponse
+	22, // 37: clirpc.BarterBackupClient.SetStorageConfig:output_type -> clirpc.SetStorageConfigResponse
+	24, // 38: clirpc.BarterBackupClient.GetStorageConfig:output_type -> clirpc.GetStorageConfigResponse
+	27, // 39: clirpc.BarterBackupClient.GetContracts:output_type -> clirpc.GetContractsResponse
+	29, // 40: clirpc.BarterBackupClient.ProposeContract:output_type -> clirpc.ProposeContractUpdate
+	31, // 41: clirpc.BarterBackupClient.CheckContract:output_type -> clirpc.CheckContractUpdate
+	33, // 42: clirpc.BarterBackupClient.RecoverContent:output_type -> clirpc.RecoverContentUpdate
+	29, // [29:43] is the sub-list for method output_type
+	15, // [15:29] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_clirpc_barter_backup_client_proto_init() }
@@ -2920,26 +2056,13 @@ func file_clirpc_barter_backup_client_proto_init() {
 	if File_clirpc_barter_backup_client_proto != nil {
 		return
 	}
-	file_clirpc_barter_backup_client_proto_msgTypes[35].OneofWrappers = []any{
-		(*ChatAction_Init)(nil),
-		(*ChatAction_SendMsg)(nil),
-		(*ChatAction_SendFile)(nil),
-		(*ChatAction_Stop)(nil),
-	}
-	file_clirpc_barter_backup_client_proto_msgTypes[36].OneofWrappers = []any{
-		(*ChatEvent_Opened)(nil),
-		(*ChatEvent_IncomingMsg)(nil),
-		(*ChatEvent_FileOffered)(nil),
-		(*ChatEvent_Closed)(nil),
-		(*ChatEvent_Error)(nil),
-	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_clirpc_barter_backup_client_proto_rawDesc), len(file_clirpc_barter_backup_client_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   46,
+			NumMessages:   33,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -19,22 +19,20 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	BarterBackupClient_LocalHealthCheck_FullMethodName  = "/clirpc.BarterBackupClient/LocalHealthCheck"
-	BarterBackupClient_Unlock_FullMethodName            = "/clirpc.BarterBackupClient/Unlock"
-	BarterBackupClient_ConnectPeer_FullMethodName       = "/clirpc.BarterBackupClient/ConnectPeer"
-	BarterBackupClient_ConnectedPeers_FullMethodName    = "/clirpc.BarterBackupClient/ConnectedPeers"
-	BarterBackupClient_SetFile_FullMethodName           = "/clirpc.BarterBackupClient/SetFile"
-	BarterBackupClient_DeleteFile_FullMethodName        = "/clirpc.BarterBackupClient/DeleteFile"
-	BarterBackupClient_GetFile_FullMethodName           = "/clirpc.BarterBackupClient/GetFile"
-	BarterBackupClient_ListFiles_FullMethodName         = "/clirpc.BarterBackupClient/ListFiles"
-	BarterBackupClient_SetStorageConfig_FullMethodName  = "/clirpc.BarterBackupClient/SetStorageConfig"
-	BarterBackupClient_GetStorageConfig_FullMethodName  = "/clirpc.BarterBackupClient/GetStorageConfig"
-	BarterBackupClient_GetContracts_FullMethodName      = "/clirpc.BarterBackupClient/GetContracts"
-	BarterBackupClient_ProposeContract_FullMethodName   = "/clirpc.BarterBackupClient/ProposeContract"
-	BarterBackupClient_CheckContract_FullMethodName     = "/clirpc.BarterBackupClient/CheckContract"
-	BarterBackupClient_RecoverContent_FullMethodName    = "/clirpc.BarterBackupClient/RecoverContent"
-	BarterBackupClient_SetAeadKeyForPeer_FullMethodName = "/clirpc.BarterBackupClient/SetAeadKeyForPeer"
-	BarterBackupClient_CliChat_FullMethodName           = "/clirpc.BarterBackupClient/CliChat"
+	BarterBackupClient_LocalHealthCheck_FullMethodName = "/clirpc.BarterBackupClient/LocalHealthCheck"
+	BarterBackupClient_Unlock_FullMethodName           = "/clirpc.BarterBackupClient/Unlock"
+	BarterBackupClient_ConnectPeer_FullMethodName      = "/clirpc.BarterBackupClient/ConnectPeer"
+	BarterBackupClient_ConnectedPeers_FullMethodName   = "/clirpc.BarterBackupClient/ConnectedPeers"
+	BarterBackupClient_SetFile_FullMethodName          = "/clirpc.BarterBackupClient/SetFile"
+	BarterBackupClient_DeleteFile_FullMethodName       = "/clirpc.BarterBackupClient/DeleteFile"
+	BarterBackupClient_GetFile_FullMethodName          = "/clirpc.BarterBackupClient/GetFile"
+	BarterBackupClient_ListFiles_FullMethodName        = "/clirpc.BarterBackupClient/ListFiles"
+	BarterBackupClient_SetStorageConfig_FullMethodName = "/clirpc.BarterBackupClient/SetStorageConfig"
+	BarterBackupClient_GetStorageConfig_FullMethodName = "/clirpc.BarterBackupClient/GetStorageConfig"
+	BarterBackupClient_GetContracts_FullMethodName     = "/clirpc.BarterBackupClient/GetContracts"
+	BarterBackupClient_ProposeContract_FullMethodName  = "/clirpc.BarterBackupClient/ProposeContract"
+	BarterBackupClient_CheckContract_FullMethodName    = "/clirpc.BarterBackupClient/CheckContract"
+	BarterBackupClient_RecoverContent_FullMethodName   = "/clirpc.BarterBackupClient/RecoverContent"
 )
 
 // BarterBackupClientClient is the client API for BarterBackupClient service.
@@ -101,19 +99,6 @@ type BarterBackupClientClient interface {
 	// it on its own after starting and in the background. This just triggers
 	// it. The stream works forever sending new recovery events.
 	RecoverContent(ctx context.Context, in *RecoverContentRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RecoverContentUpdate], error)
-	// SetAeadKeyForPeer sets a password for symmetric encryption of chats
-	// with the peer. This is an additional measure to secure communications.
-	// The password has to be shared between the peers out-of-band. The key
-	// derived from the password is encrypted and added to the stored content
-	// so it will survive a node reset together with the main content.
-	SetAeadKeyForPeer(ctx context.Context, in *SetAeadKeyForPeerRequest, opts ...grpc.CallOption) (*SetAeadKeyForPeerResponse, error)
-	// CliChat initiates a chat with a node. When the stream is closed, the
-	// chat is ended. It uses a symmetrically encrypted chat if the AEAD key
-	// is set for the node. File transfers over the chat are passed through
-	// the stream.
-	// Renamed from Chat to avoid a method name collision with bbrpc on the
-	// shared Node implementation.
-	CliChat(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ChatAction, ChatEvent], error)
 }
 
 type barterBackupClientClient struct {
@@ -291,29 +276,6 @@ func (c *barterBackupClientClient) RecoverContent(ctx context.Context, in *Recov
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type BarterBackupClient_RecoverContentClient = grpc.ServerStreamingClient[RecoverContentUpdate]
 
-func (c *barterBackupClientClient) SetAeadKeyForPeer(ctx context.Context, in *SetAeadKeyForPeerRequest, opts ...grpc.CallOption) (*SetAeadKeyForPeerResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SetAeadKeyForPeerResponse)
-	err := c.cc.Invoke(ctx, BarterBackupClient_SetAeadKeyForPeer_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *barterBackupClientClient) CliChat(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[ChatAction, ChatEvent], error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &BarterBackupClient_ServiceDesc.Streams[3], BarterBackupClient_CliChat_FullMethodName, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	x := &grpc.GenericClientStream[ChatAction, ChatEvent]{ClientStream: stream}
-	return x, nil
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type BarterBackupClient_CliChatClient = grpc.BidiStreamingClient[ChatAction, ChatEvent]
-
 // BarterBackupClientServer is the server API for BarterBackupClient service.
 // All implementations must embed UnimplementedBarterBackupClientServer
 // for forward compatibility.
@@ -378,19 +340,6 @@ type BarterBackupClientServer interface {
 	// it on its own after starting and in the background. This just triggers
 	// it. The stream works forever sending new recovery events.
 	RecoverContent(*RecoverContentRequest, grpc.ServerStreamingServer[RecoverContentUpdate]) error
-	// SetAeadKeyForPeer sets a password for symmetric encryption of chats
-	// with the peer. This is an additional measure to secure communications.
-	// The password has to be shared between the peers out-of-band. The key
-	// derived from the password is encrypted and added to the stored content
-	// so it will survive a node reset together with the main content.
-	SetAeadKeyForPeer(context.Context, *SetAeadKeyForPeerRequest) (*SetAeadKeyForPeerResponse, error)
-	// CliChat initiates a chat with a node. When the stream is closed, the
-	// chat is ended. It uses a symmetrically encrypted chat if the AEAD key
-	// is set for the node. File transfers over the chat are passed through
-	// the stream.
-	// Renamed from Chat to avoid a method name collision with bbrpc on the
-	// shared Node implementation.
-	CliChat(grpc.BidiStreamingServer[ChatAction, ChatEvent]) error
 	mustEmbedUnimplementedBarterBackupClientServer()
 }
 
@@ -442,12 +391,6 @@ func (UnimplementedBarterBackupClientServer) CheckContract(*CheckContractRequest
 }
 func (UnimplementedBarterBackupClientServer) RecoverContent(*RecoverContentRequest, grpc.ServerStreamingServer[RecoverContentUpdate]) error {
 	return status.Errorf(codes.Unimplemented, "method RecoverContent not implemented")
-}
-func (UnimplementedBarterBackupClientServer) SetAeadKeyForPeer(context.Context, *SetAeadKeyForPeerRequest) (*SetAeadKeyForPeerResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method SetAeadKeyForPeer not implemented")
-}
-func (UnimplementedBarterBackupClientServer) CliChat(grpc.BidiStreamingServer[ChatAction, ChatEvent]) error {
-	return status.Errorf(codes.Unimplemented, "method CliChat not implemented")
 }
 func (UnimplementedBarterBackupClientServer) mustEmbedUnimplementedBarterBackupClientServer() {}
 func (UnimplementedBarterBackupClientServer) testEmbeddedByValue()                            {}
@@ -701,31 +644,6 @@ func _BarterBackupClient_RecoverContent_Handler(srv interface{}, stream grpc.Ser
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type BarterBackupClient_RecoverContentServer = grpc.ServerStreamingServer[RecoverContentUpdate]
 
-func _BarterBackupClient_SetAeadKeyForPeer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SetAeadKeyForPeerRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(BarterBackupClientServer).SetAeadKeyForPeer(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: BarterBackupClient_SetAeadKeyForPeer_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(BarterBackupClientServer).SetAeadKeyForPeer(ctx, req.(*SetAeadKeyForPeerRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _BarterBackupClient_CliChat_Handler(srv interface{}, stream grpc.ServerStream) error {
-	return srv.(BarterBackupClientServer).CliChat(&grpc.GenericServerStream[ChatAction, ChatEvent]{ServerStream: stream})
-}
-
-// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
-type BarterBackupClient_CliChatServer = grpc.BidiStreamingServer[ChatAction, ChatEvent]
-
 // BarterBackupClient_ServiceDesc is the grpc.ServiceDesc for BarterBackupClient service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -777,10 +695,6 @@ var BarterBackupClient_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "GetContracts",
 			Handler:    _BarterBackupClient_GetContracts_Handler,
 		},
-		{
-			MethodName: "SetAeadKeyForPeer",
-			Handler:    _BarterBackupClient_SetAeadKeyForPeer_Handler,
-		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
@@ -797,12 +711,6 @@ var BarterBackupClient_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "RecoverContent",
 			Handler:       _BarterBackupClient_RecoverContent_Handler,
 			ServerStreams: true,
-		},
-		{
-			StreamName:    "CliChat",
-			Handler:       _BarterBackupClient_CliChat_Handler,
-			ServerStreams: true,
-			ClientStreams: true,
 		},
 	},
 	Metadata: "clirpc/barter_backup_client.proto",

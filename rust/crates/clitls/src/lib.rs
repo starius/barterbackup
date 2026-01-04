@@ -245,7 +245,6 @@ mod tests {
         type ProposeContractStream = std::pin::Pin<Box<dyn futures::Stream<Item = std::result::Result<protos::clirpc::ProposeContractUpdate, Status>> + Send + 'static>>;
         type CheckContractStream = std::pin::Pin<Box<dyn futures::Stream<Item = std::result::Result<protos::clirpc::CheckContractUpdate, Status>> + Send + 'static>>;
         type RecoverContentStream = std::pin::Pin<Box<dyn futures::Stream<Item = std::result::Result<protos::clirpc::RecoverContentUpdate, Status>> + Send + 'static>>;
-        type CliChatStream = std::pin::Pin<Box<dyn futures::Stream<Item = std::result::Result<protos::clirpc::ChatEvent, Status>> + Send + 'static>>;
         async fn unlock(&self, _: Request<protos::clirpc::UnlockRequest>) -> std::result::Result<tonic::Response<protos::clirpc::UnlockResponse>, Status> { Err(Status::unimplemented("")) }
         async fn connect_peer(&self, _: Request<protos::clirpc::ConnectPeerRequest>) -> std::result::Result<tonic::Response<protos::clirpc::ConnectPeerResponse>, Status> { Err(Status::unimplemented("")) }
         async fn connected_peers(&self, _: Request<protos::clirpc::ConnectedPeersRequest>) -> std::result::Result<tonic::Response<protos::clirpc::ConnectedPeersResponse>, Status> { Err(Status::unimplemented("")) }
@@ -258,8 +257,6 @@ mod tests {
         async fn propose_contract(&self, _: Request<protos::clirpc::ProposeContractRequest>) -> std::result::Result<tonic::Response<Self::ProposeContractStream>, Status> { Err(Status::unimplemented("")) }
         async fn check_contract(&self, _: Request<protos::clirpc::CheckContractRequest>) -> std::result::Result<tonic::Response<Self::CheckContractStream>, Status> { Err(Status::unimplemented("")) }
         async fn recover_content(&self, _: Request<protos::clirpc::RecoverContentRequest>) -> std::result::Result<tonic::Response<Self::RecoverContentStream>, Status> { Err(Status::unimplemented("")) }
-        async fn set_aead_key_for_peer(&self, _: Request<protos::clirpc::SetAeadKeyForPeerRequest>) -> std::result::Result<tonic::Response<protos::clirpc::SetAeadKeyForPeerResponse>, Status> { Err(Status::unimplemented("")) }
-        async fn cli_chat(&self, _: Request<tonic::Streaming<protos::clirpc::ChatAction>>) -> std::result::Result<tonic::Response<Self::CliChatStream>, Status> { Err(Status::unimplemented("")) }
     }
 
     #[tokio::test(flavor = "multi_thread")]

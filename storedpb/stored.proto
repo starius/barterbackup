@@ -40,15 +40,12 @@ message Peer {
     // onion_pubkey is the peer's onion service public key.
     bytes onion_pubkey = 1;
 
-    // aead_key is the per-peer symmetric key for chat, encrypted for storage.
-    bytes aead_key = 2;
-
     // score_seconds is the accumulated availability score in seconds. The
     // higher, the better this peer was for us.
-    int64 score_seconds = 3;
+    int64 score_seconds = 2;
 
     // score_measured_at is a Unix timestamp (seconds) when score was measured.
-    int64 score_measured_at = 4;
+    int64 score_measured_at = 3;
 }
 
 // Metadata is short data that is stored together with the main content on

@@ -161,13 +161,11 @@ type Peer struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// onion_pubkey is the peer's onion service public key.
 	OnionPubkey []byte `protobuf:"bytes,1,opt,name=onion_pubkey,json=onionPubkey,proto3" json:"onion_pubkey,omitempty"`
-	// aead_key is the per-peer symmetric key for chat, encrypted for storage.
-	AeadKey []byte `protobuf:"bytes,2,opt,name=aead_key,json=aeadKey,proto3" json:"aead_key,omitempty"`
 	// score_seconds is the accumulated availability score in seconds. The
 	// higher, the better this peer was for us.
-	ScoreSeconds int64 `protobuf:"varint,3,opt,name=score_seconds,json=scoreSeconds,proto3" json:"score_seconds,omitempty"`
+	ScoreSeconds int64 `protobuf:"varint,2,opt,name=score_seconds,json=scoreSeconds,proto3" json:"score_seconds,omitempty"`
 	// score_measured_at is a Unix timestamp (seconds) when score was measured.
-	ScoreMeasuredAt int64 `protobuf:"varint,4,opt,name=score_measured_at,json=scoreMeasuredAt,proto3" json:"score_measured_at,omitempty"`
+	ScoreMeasuredAt int64 `protobuf:"varint,3,opt,name=score_measured_at,json=scoreMeasuredAt,proto3" json:"score_measured_at,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -205,13 +203,6 @@ func (*Peer) Descriptor() ([]byte, []int) {
 func (x *Peer) GetOnionPubkey() []byte {
 	if x != nil {
 		return x.OnionPubkey
-	}
-	return nil
-}
-
-func (x *Peer) GetAeadKey() []byte {
-	if x != nil {
-		return x.AeadKey
 	}
 	return nil
 }
@@ -303,12 +294,11 @@ const file_storedpb_stored_proto_rawDesc = "" +
 	"\vfile_length\x18\x02 \x01(\x03R\n" +
 	"fileLength\x12\x1f\n" +
 	"\vfile_sha256\x18\x03 \x01(\fR\n" +
-	"fileSha256\"\x95\x01\n" +
+	"fileSha256\"z\n" +
 	"\x04Peer\x12!\n" +
-	"\fonion_pubkey\x18\x01 \x01(\fR\vonionPubkey\x12\x19\n" +
-	"\baead_key\x18\x02 \x01(\fR\aaeadKey\x12#\n" +
-	"\rscore_seconds\x18\x03 \x01(\x03R\fscoreSeconds\x12*\n" +
-	"\x11score_measured_at\x18\x04 \x01(\x03R\x0fscoreMeasuredAt\"\\\n" +
+	"\fonion_pubkey\x18\x01 \x01(\fR\vonionPubkey\x12#\n" +
+	"\rscore_seconds\x18\x02 \x01(\x03R\fscoreSeconds\x12*\n" +
+	"\x11score_measured_at\x18\x03 \x01(\x03R\x0fscoreMeasuredAt\"\\\n" +
 	"\bMetadata\x12*\n" +
 	"\x05files\x18\x01 \x03(\v2\x14.storedpb.FileHeaderR\x05files\x12$\n" +
 	"\x05peers\x18\x02 \x03(\v2\x0e.storedpb.PeerR\x05peersB*Z(github.com/starius/barterbackup/storedpbb\x06proto3"
