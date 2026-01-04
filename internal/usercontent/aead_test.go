@@ -2,6 +2,9 @@ package usercontent
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"encoding/hex"
 	"testing"
 
@@ -83,4 +86,50 @@ func mustHex(t *testing.T, s string) []byte {
 	require.NoError(t, err)
 
 	return b
+}
+
+func randomKey(t *testing.T) []byte {
+	t.Helper()
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	return key
+}
+
+func makeCipherBlock(t *testing.T) cipher.Block {
+	t.Helper()
+	block, err := aes.NewCipher(randomKey(t))
+	require.NoError(t, err)
+	return block
+}
+
+func makeContentIDAEAD(t *testing.T) (SealFunc, OpenFunc) {
+	t.Helper()
+	seal, open, err := NewAEAD(randomKey(t))
+	require.NoError(t, err)
+	return seal, open
+}
+
+func makeTestXOR(t *testing.T) XORKeyStreamAt {
+	block := makeCipherBlock(t)
+	return func(dst, src, iv []byte, offset uint64) {
+		if len(dst) != len(src) {
+			panic("xor: len mismatch")
+		}
+		stream := cipher.NewCTR(block, iv)
+		if offset > 0 {
+			const chunkSize = 32 * 1024
+			buf := make([]byte, chunkSize)
+			remaining := offset
+			for remaining > 0 {
+				n := chunkSize
+				if remaining < uint64(n) {
+					n = int(remaining)
+				}
+				stream.XORKeyStream(buf[:n], buf[:n])
+				remaining -= uint64(n)
+			}
+		}
+		stream.XORKeyStream(dst, src)
+	}
 }
