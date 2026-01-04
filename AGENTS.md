@@ -15,8 +15,8 @@ Scope
 - internal/nettor: Tor transport (bine) implementation of the Network interface.
 - internal/netmock: In‑memory transport for tests.
 - cmd/bbd: Daemon entry and app.
-- scripts: Helper scripts (e.g., RPC code generation).
-- Makefile, Dockerfile.rpc: Reproducible RPC generation with Docker.
+- scripts: Helper scripts.
+- flake.nix, Makefile: Reproducible RPC generation with Nix dev shell.
 
 Terminology
 
@@ -36,10 +36,6 @@ Client API (clirpc)
   - ListFilesResponse returns `repeated string name`.
 - Older SetContent/SetFiles and GetContent/GetFiles were replaced by the above
   to clarify “file” vs “content”.
-- Chat: Bidirectional stream is defined via `ChatAction` and `ChatEvent`.
-  RPC method name is `CliChat` (renamed from `Chat`) to avoid a name
-  collision with the bbrpc `Chat` method when both services are implemented on
-  `Node`.
 - Health check: RPC method name is `LocalHealthCheck` (renamed from
   `HealthCheck`) to avoid a collision with bbrpc `HealthCheck` on `Node`.
   Local health check returns `server_onion` and `uptime_seconds`.
@@ -57,9 +53,8 @@ Stored metadata (storedpb)
 
 Server API (bbrpc)
 
-- Peer discovery, content revision sync, downloads, and chat remain as in the
+- Peer discovery, content revision sync, and downloads remain as in the
   proto for now.
-- ChatRequest oneof tags are fixed: msg = 3, file = 4, stop = 5.
 - HealthCheck returns basic liveness and addresses:
   - Request: `HealthCheckRequest {}` (empty).
   - Response: `HealthCheckResponse { string client_onion; string server_onion; }`.
@@ -76,7 +71,7 @@ Proto style rules
 - Wrap lines at about 80 characters. If tabs are used, consider them as 8
   spaces for wrapping. Prefer spaces in comments.
 - Field comments must start with the field name followed by a sentence, e.g.,
-  "encrypted_chat_request is AEAD(ChatRequest)." and "name is ...".
+  "encrypted_download_request is AEAD(DownloadRequest)." and "name is ...".
 - Always separate fields in messages with a single empty line for readability.
 
 Next steps for contributors
@@ -87,24 +82,21 @@ Next steps for contributors
 - Run `make unit` to execute unit tests.
 - Update daemon and CLI implementations to the new SetFile/GetFile/ListFiles
   API.
-- Message schemas for ProposeContract*, CheckContract*, RecoverContent*, and
-  ChatAction/ChatEvent are defined; wire up and refine implementations.
-- No action needed for ChatRequest tags; they are already fixed.
+- Message schemas for ProposeContract*, CheckContract*, and RecoverContent*
+  are defined; wire up and refine implementations.
 
 RPC generation
 
-- Use Docker for reproducible proto builds; do not install protoc or plugins
-  on the host.
-- Generate stubs: `make rpc`.
-- protoc comes from Debian bookworm. Go plugins are pinned by Go 1.24 `tool`
-  directives in `go.mod` and installed in the Docker image via `go install`.
-- Subsequent runs only execute protoc; tools are preinstalled in the image.
+- Use the Nix dev shell for reproducible proto builds; do not install protoc
+  or plugins on the host.
+- Generate stubs: `make rpc` (runs under `nix develop --command ...`).
+- Tools are pinned via `flake.lock`; rerun `make rpc` after proto edits.
 - Commit generated `.pb.go` files.
 
 Development workflow
 
 - Implement both bbrpc and clirpc services as methods on `internal/bbnode.Node`.
-  - To avoid Go method name collisions, clirpc RPCs that would collide with bbrpc are renamed: `LocalHealthCheck`, `CliChat`.
+  - To avoid Go method name collisions, clirpc RPCs that would collide with bbrpc are renamed: `LocalHealthCheck`.
 - Keep server handlers in separate files (`internal/bbnode/bbrpc_server.go`, `internal/bbnode/clirpc_server.go`).
 - Register both services in `Node.Start`.
 - Peer-to-peer dials use the internal `dialPeer` method.

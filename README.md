@@ -58,13 +58,11 @@ Mutual backup system: you store my data, I store yours.
 
 **Developer Notes**
 - RPC code generation (reproducible):
-  - Tools are installed inside Docker, not on your host.
-  - Generate stubs: `make rpc`.
+  - Tools come from the Nix dev shell (`flake.nix`); no host installs needed.
+  - Generate stubs: `make rpc` (runs via `nix develop --command ...`).
   - Generated `.pb.go` files are committed to the repo.
-  - protoc comes from Debian (bookworm). Go plugins are pinned by Go 1.23
-    `tool` directives in `go.mod`, and installed during the Docker image
-    build via `go install`.
-  - If you change proto files, re-run `make rpc` and commit changes.
+  - Tools are pinned by `flake.lock`. If you change proto files, re-run
+    `make rpc` and commit changes.
   - Go package options are set in each `.proto` via `option go_package`.
 - Proto style rules:
   - Comments are English sentences: start with a capital letter and end with

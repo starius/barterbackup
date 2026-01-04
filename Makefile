@@ -1,6 +1,4 @@
-RPC_IMAGE ?= barterbackup-rpc:bookworm
-
-.PHONY: install unit rpc rpc-image fmt
+.PHONY: install unit rpc fmt
 
 # Install the daemon binary.
 install:
@@ -11,17 +9,11 @@ install:
 unit:
 	CGO_ENABLED=0 go test ./...
 
-# Build the Docker image that contains Debian's protoc and Go plugins pinned
-# by the tool directives in go.mod.
-rpc-image:
-	docker build --network=host -f Dockerfile.rpc -t $(RPC_IMAGE) .
-
-# Generate Go protobuf and gRPC stubs inside Docker for reproducibility.
-rpc: rpc-image
-	docker run --network=host --rm \
-	  -v $(PWD):/work \
-	  -w /work \
-	  $(RPC_IMAGE)
+# Generate Go protobuf and gRPC stubs inside the Nix dev shell.
+rpc:
+	nix develop --command sh -c '\
+	  protoc --go_out=paths=source_relative:. --go-grpc_out=paths=source_relative:. clirpc/*.proto bbrpc/*.proto storedpb/*.proto \
+	'
 
 fmt:
 	clang-format -i */*.proto
