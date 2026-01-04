@@ -24,9 +24,10 @@ const (
 // ContentRevision specifies a particular version of user content produced
 // from client-provided files and set by a clirpc.SetFile call.
 // AEAD(ContentRevision) is used as content_id in bbrpc. The content of this
-// struct is used to derive the keys used for AEAD encryption of Metadata and
-// for AES_CTR encryption of the files. Files don't need AEAD, because their
-// hashes are stored in Metadata.
+// struct is used to derive the keys used for AEAD encryption of Metadata.
+// The AEAD tag of Metadata is mixed into the derivation of the AES-CTR IV
+// material for files. Files don't need AEAD, because their hashes are stored
+// in Metadata.
 type ContentRevision struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// created_at is a Unix timestamp (seconds) at the time of a SetFile call.

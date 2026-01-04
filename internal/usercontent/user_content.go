@@ -121,11 +121,6 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal Sea
 		return nil, fmt.Errorf("usercontent: metadata aead length mismatch: expected %d got %d", revision.MetadataAeadLength, len(metaCipher))
 	}
 
-	ivKey, err := revisionIVKey(revision)
-	if err != nil {
-		return nil, err
-	}
-
 	contentID, err := MakeContentID(revision, contentSeal)
 	if err != nil {
 		return nil, err
@@ -145,6 +140,12 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal Sea
 	}
 
 	if _, err := w.Write(metaCipher); err != nil {
+		return nil, err
+	}
+
+	metadataTag := metaCipher[len(metaCipher)-siv.TagSize:]
+	ivKey, err := revisionIVKey(revision, metadataTag)
+	if err != nil {
 		return nil, err
 	}
 
@@ -195,11 +196,6 @@ func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc, xor XOR
 		return result, nil, err
 	}
 
-	ivKey, err := revisionIVKey(revision)
-	if err != nil {
-		return result, nil, err
-	}
-
 	metaLen := revision.GetMetadataAeadLength()
 	metaBuf := make([]byte, metaLen)
 	if _, err := r.ReadAt(metaBuf, offset); err != nil {
@@ -217,6 +213,12 @@ func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc, xor XOR
 	}
 	var metadata storedpb.Metadata
 	if err := proto.Unmarshal(metaPlain, &metadata); err != nil {
+		return result, nil, err
+	}
+
+	metadataTag := metaBuf[len(metaBuf)-siv.TagSize:]
+	ivKey, err := revisionIVKey(revision, metadataTag)
+	if err != nil {
 		return result, nil, err
 	}
 
@@ -310,13 +312,17 @@ func revisionMaterial(revision *storedpb.ContentRevision) ([]byte, error) {
 	return buf, nil
 }
 
-func revisionIVKey(revision *storedpb.ContentRevision) ([]byte, error) {
+func revisionIVKey(revision *storedpb.ContentRevision, metadataTag []byte) ([]byte, error) {
 	material, err := revisionMaterial(revision)
 	if err != nil {
 		return nil, err
 	}
 
-	deriver := hkdf.New(sha256.New, material, nil, []byte("usercontent/file-iv"))
+	if len(metadataTag) != siv.TagSize {
+		return nil, errors.New("usercontent: invalid metadata tag length")
+	}
+
+	deriver := hkdf.New(sha256.New, material, metadataTag, []byte("usercontent/file-iv"))
 	key := make([]byte, aes.BlockSize)
 	if _, err := io.ReadFull(deriver, key); err != nil {
 		return nil, err
