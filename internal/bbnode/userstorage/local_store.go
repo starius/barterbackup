@@ -3,7 +3,6 @@ package userstorage
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -304,8 +303,15 @@ func (s *Store) persist() error {
 	if err != nil {
 		return err
 	}
+	closed := false
+	success := false
 	defer func() {
-		_ = writer.Close()
+		if !closed {
+			_ = writer.Close()
+		}
+		if !success {
+			_ = s.fs.Remove(tmpName)
+		}
 	}()
 
 	cw := &countingWriter{w: writer}
@@ -329,6 +335,7 @@ func (s *Store) persist() error {
 	if err := writer.Close(); err != nil {
 		return err
 	}
+	closed = true
 
 	newName := contentFileNameFor(cid)
 	if err := s.fs.Rename(tmpName, newName); err != nil {
@@ -349,6 +356,7 @@ func (s *Store) persist() error {
 		}
 	}
 	s.contentName = newName
+	success = true
 
 	return nil
 }
@@ -403,7 +411,7 @@ func (s *Store) replaceContent(reader ReadFile, cid []byte, name string,
 }
 
 func contentFileNameFor(cid []byte) string {
-	return hex.EncodeToString(cid)
+	return string(cid)
 }
 
 func chooseLatest(a, b contentCandidate) contentCandidate {
@@ -435,11 +443,6 @@ func (s *Store) scanContentFiles() ([]contentCandidate, []contentCandidate, erro
 	valid := make([]contentCandidate, 0)
 	invalid := make([]contentCandidate, 0)
 	for _, name := range names {
-		expectCID, err := hex.DecodeString(name)
-		if err != nil {
-			continue
-		}
-
 		reader, err := s.fs.OpenRead(name)
 		if err != nil {
 			continue
@@ -475,14 +478,14 @@ func (s *Store) scanContentFiles() ([]contentCandidate, []contentCandidate, erro
 		}
 
 		revision, _ := usercontent.ParseContentID(cid, s.contentOpen)
-		if !bytes.Equal(cid, expectCID) {
+		if !bytes.Equal(cid, []byte(name)) {
 			if cerr := reader.Close(); cerr != nil {
 				return nil, nil, cerr
 			}
 			invalid = append(invalid, contentCandidate{
 				name:  name,
 				size:  reader.Size(),
-				err:   fmt.Errorf("content id mismatch; expected %s", hex.EncodeToString(expectCID)),
+				err:   fmt.Errorf("content id mismatch; expected %s", expectedName),
 				valid: false,
 			})
 			continue
