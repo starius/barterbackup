@@ -2,6 +2,7 @@ package userstorage
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -35,7 +36,11 @@ func (fsys *OSFilesystem) OpenRead(name string) (ReadFile, error) {
 	}
 	info, err := f.Stat()
 	if err != nil {
-		_ = f.Close()
+		closeErr := f.Close()
+		if closeErr != nil {
+			return nil, fmt.Errorf("stat error: %v (close error: %w)",
+				err, closeErr)
+		}
 		return nil, err
 	}
 	return &osReadHandle{
@@ -52,6 +57,25 @@ func (fsys *OSFilesystem) OpenWrite(name string) (WriteFile, error) {
 		return nil, err
 	}
 	return &osWriteHandle{File: f}, nil
+}
+
+// Remove deletes a named file.
+func (fsys *OSFilesystem) Remove(name string) error {
+	path := filepath.Join(fsys.root, name)
+	return os.Remove(path)
+}
+
+// List returns filenames in the root directory.
+func (fsys *OSFilesystem) List() ([]string, error) {
+	entries, err := os.ReadDir(fsys.root)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names, nil
 }
 
 // Rename atomically renames a file within the root.

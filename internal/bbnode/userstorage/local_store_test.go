@@ -1,11 +1,16 @@
 package userstorage
 
 import (
+	"bytes"
 	"errors"
 	"io"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/starius/aesctrat"
 	"github.com/starius/barterbackup/internal/keys"
+	"github.com/starius/barterbackup/internal/usercontent"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,7 +46,7 @@ func TestStoreSetGetDelete(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("secret payload"), data)
 
-	blob := readAll(t, fsys, contentFileName)
+	blob := readAll(t, fsys, firstContentFile(t, fsys))
 	require.NotContains(t, string(blob), "secret payload")
 
 	reloaded, err := NewStore(fsys, master)
@@ -58,7 +63,7 @@ func TestStoreSetGetDelete(t *testing.T) {
 	require.ErrorIs(t, err, ErrFileNotFound)
 	require.Empty(t, mustList(t, reloaded))
 
-	blobAfterDelete := readAll(t, fsys, contentFileName)
+	blobAfterDelete := readAll(t, fsys, firstContentFile(t, fsys))
 	require.NotContains(t, string(blobAfterDelete), "secret payload")
 }
 
@@ -105,12 +110,224 @@ func TestAtomicPersistFailureDoesNotClobberExisting(t *testing.T) {
 	require.Equal(t, []byte("v1"), data)
 }
 
+func TestLoadChoosesNewerAndDeletesOlder(t *testing.T) {
+	t.Parallel()
+
+	fsys := NewMapFilesystem()
+	master := keys.DeriveMasterPriv("choose-newer")
+
+	writeContentFile(t, fsys, master, time.Unix(10, 0), "old.txt", []byte("old"))
+	newCID, newName := writeContentFile(t, fsys, master, time.Unix(20, 0), "new.txt", []byte("new"))
+
+	store, err := NewStore(fsys, master)
+	require.NoError(t, err)
+	require.Equal(t, newCID, store.CurrentContentID())
+
+	names, err := fsys.List()
+	require.NoError(t, err)
+	require.Equal(t, []string{newName}, names)
+}
+
+func TestLoadAmbiguousMultipleValidFails(t *testing.T) {
+	t.Parallel()
+
+	fsys := NewMapFilesystem()
+	master := keys.DeriveMasterPriv("ambiguous")
+
+	writeContentFile(t, fsys, master, time.Unix(10, 0), "a", []byte("a"))
+	writeContentFile(t, fsys, master, time.Unix(20, 0), "b", []byte("b"))
+	writeContentFile(t, fsys, master, time.Unix(30, 0), "c", []byte("c"))
+
+	_, err := NewStore(fsys, master)
+	require.Error(t, err)
+}
+
+// TestRecoveryInfoSummaries ensures recovery output lists expected files.
+func TestRecoveryInfoSummaries(t *testing.T) {
+	t.Parallel()
+
+	master := keys.DeriveMasterPriv("recovery")
+
+	t.Run("two-valid-recommend-newest", func(t *testing.T) {
+		fsys := NewMapFilesystem()
+		writeContentFile(t, fsys, master, time.Unix(10, 0), "a", []byte("a"))
+		_, newName := writeContentFile(t, fsys, master, time.Unix(20, 0), "b", []byte("b"))
+
+		store := bareStore(t, fsys, master)
+		info := store.RecoveryInfo()
+		require.Contains(t, info, "Recommendation: keep "+newName)
+	})
+
+	t.Run("valid-and-invalid", func(t *testing.T) {
+		fsys := NewMapFilesystem()
+		_, name := writeContentFile(t, fsys, master, time.Unix(10, 0), "a", []byte("a"))
+		_, badName := writeContentFile(t, fsys, master, time.Unix(20, 0), "b", []byte("b"))
+		truncateLastByte(t, fsys, badName)
+
+		store := bareStore(t, fsys, master)
+		info := store.RecoveryInfo()
+		require.Contains(t, info, name)
+		require.Contains(t, info, badName)
+		require.Contains(t, info, "invalid")
+		require.Contains(t, info, "manual intervention")
+	})
+
+	t.Run("three-valid", func(t *testing.T) {
+		fsys := NewMapFilesystem()
+		writeContentFile(t, fsys, master, time.Unix(10, 0), "a", []byte("a"))
+		writeContentFile(t, fsys, master, time.Unix(20, 0), "b", []byte("b"))
+		writeContentFile(t, fsys, master, time.Unix(30, 0), "c", []byte("c"))
+
+		store := bareStore(t, fsys, master)
+		info := store.RecoveryInfo()
+		require.Contains(t, info, "manual intervention")
+	})
+}
+
+// TestFilenameContentIDMismatchFails ensures mismatched filename/CID is rejected.
+func TestFilenameContentIDMismatchFails(t *testing.T) {
+	t.Parallel()
+
+	fsys := NewMapFilesystem()
+	master := keys.DeriveMasterPriv("mismatch")
+
+	store, err := NewStore(fsys, master)
+	require.NoError(t, err)
+
+	store.now = func() time.Time { return time.Unix(10, 0) }
+	require.NoError(t, store.SetFile(t.Context(), "a.txt", []byte("v1")))
+	firstName := currentContentName(t, fsys)
+
+	_, secondName := writeContentFile(t, fsys, master, time.Unix(20, 0), "a.txt", []byte("v2"))
+	require.NotEqual(t, firstName, secondName)
+
+	// Corrupt: rename newer content to the old filename, so CID implied by name mismatches body.
+	require.NoError(t, fsys.Remove(firstName))
+	require.NoError(t, fsys.Rename(secondName, firstName))
+
+	_, err = NewStore(fsys, master)
+	require.Error(t, err)
+}
+
 // mustList wraps ListFiles and fails the test on error.
 func mustList(t *testing.T, store *Store) []string {
 	t.Helper()
 	names, err := store.ListFiles(t.Context())
 	require.NoError(t, err)
 	return names
+}
+
+// writeContentFile produces a single-file content blob at the given time.
+func writeContentFile(t *testing.T, fsys Filesystem, master []byte, createdAt time.Time, name string, data []byte) ([]byte, string) {
+	t.Helper()
+	contentKey, err := keys.DeriveKey(master, "usercontent/content-id", 32)
+	require.NoError(t, err)
+	metaKey, err := keys.DeriveKey(master, "usercontent/metadata", 32)
+	require.NoError(t, err)
+	fileKey, err := keys.DeriveKey(master, "usercontent/files", 32)
+	require.NoError(t, err)
+
+	contentSeal, _, err := usercontent.NewAEAD(contentKey)
+	require.NoError(t, err)
+	metadataSeal, _, err := usercontent.NewAEAD(metaKey)
+	require.NoError(t, err)
+	xor := aesctrat.NewAesCtr(fileKey).XORKeyStreamAt
+
+	uc := usercontent.UserContent{
+		CreatedAt: createdAt,
+		Files: map[string]usercontent.File{
+			name: {
+				Body: bytes.NewReader(data),
+				Size: int64(len(data)),
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	cid, err := usercontent.WriteContentFile(&buf, uc, contentSeal, metadataSeal, xor)
+	require.NoError(t, err)
+
+	finalName := contentFileNameFor(cid)
+	w, err := fsys.OpenWrite(finalName)
+	require.NoError(t, err)
+	_, err = w.Write(buf.Bytes())
+	require.NoError(t, err)
+	require.NoError(t, w.Sync())
+	require.NoError(t, w.Close())
+
+	return cid, finalName
+}
+
+// truncateLastByte removes the last byte from a stored content file.
+func truncateLastByte(t *testing.T, fsys Filesystem, name string) {
+	t.Helper()
+	reader, err := fsys.OpenRead(name)
+	require.NoError(t, err)
+	defer reader.Close()
+
+	data := make([]byte, reader.Size())
+	n, err := reader.ReadAt(data, 0)
+	if err != nil && err != io.EOF {
+		require.NoError(t, err)
+	}
+	data = data[:n]
+	require.Greater(t, len(data), 0)
+
+	require.NoError(t, fsys.Remove(name))
+	w, err := fsys.OpenWrite(name)
+	require.NoError(t, err)
+	_, err = w.Write(data[:len(data)-1])
+	require.NoError(t, err)
+	require.NoError(t, w.Sync())
+	require.NoError(t, w.Close())
+}
+
+// bareStore constructs a Store with provided primitives for testing.
+func bareStore(t *testing.T, fsys Filesystem, master []byte) *Store {
+	t.Helper()
+	contentKey, err := keys.DeriveKey(master, "usercontent/content-id", 32)
+	require.NoError(t, err)
+	metaKey, err := keys.DeriveKey(master, "usercontent/metadata", 32)
+	require.NoError(t, err)
+	fileKey, err := keys.DeriveKey(master, "usercontent/files", 32)
+	require.NoError(t, err)
+
+	contentSeal, contentOpen, err := usercontent.NewAEAD(contentKey)
+	require.NoError(t, err)
+	metadataSeal, metadataOpen, err := usercontent.NewAEAD(metaKey)
+	require.NoError(t, err)
+	xor := aesctrat.NewAesCtr(fileKey).XORKeyStreamAt
+
+	return &Store{
+		fs:           fsys,
+		files:        make(map[string]usercontent.File),
+		contentSeal:  contentSeal,
+		contentOpen:  contentOpen,
+		metadataSeal: metadataSeal,
+		metadataOpen: metadataOpen,
+		xor:          xor,
+		now:          time.Now,
+	}
+}
+
+// firstContentFile returns the first content file found in the filesystem.
+func firstContentFile(t *testing.T, fsys Filesystem) string {
+	t.Helper()
+	names, err := fsys.List()
+	require.NoError(t, err)
+	for _, name := range names {
+		if strings.HasPrefix(name, contentFilePrefix) && strings.HasSuffix(name, ".bin") {
+			return name
+		}
+	}
+	t.Fatalf("no content files found")
+	return ""
+}
+
+// currentContentName returns the only content file name in the filesystem.
+func currentContentName(t *testing.T, fsys Filesystem) string {
+	t.Helper()
+	return firstContentFile(t, fsys)
 }
 
 // failingFS injects a write failure on the next write.
@@ -139,6 +356,16 @@ func (f *failingFS) OpenWrite(name string) (WriteFile, error) {
 // Rename delegates to the underlying filesystem.
 func (f *failingFS) Rename(oldName, newName string) error {
 	return f.delegate.Rename(oldName, newName)
+}
+
+// List delegates to the underlying filesystem.
+func (f *failingFS) List() ([]string, error) {
+	return f.delegate.List()
+}
+
+// Remove delegates to the underlying filesystem.
+func (f *failingFS) Remove(name string) error {
+	return f.delegate.Remove(name)
 }
 
 // failingWrite injects a failure on the first Write when triggered.

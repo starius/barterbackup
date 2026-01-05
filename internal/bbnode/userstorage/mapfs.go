@@ -52,6 +52,28 @@ func (m *MapFilesystem) Rename(oldName, newName string) error {
 	return nil
 }
 
+// Remove deletes a named file.
+func (m *MapFilesystem) Remove(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.files[name]; !ok {
+		return fs.ErrNotExist
+	}
+	delete(m.files, name)
+	return nil
+}
+
+// List returns all stored filenames.
+func (m *MapFilesystem) List() ([]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	names := make([]string, 0, len(m.files))
+	for name := range m.files {
+		names = append(names, name)
+	}
+	return names, nil
+}
+
 type mapReadHandle struct {
 	reader *bytes.Reader
 	size   int64

@@ -3,10 +3,12 @@ package userstorage
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
-	"io/fs"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/starius/aesctrat"
@@ -15,13 +17,15 @@ import (
 	"github.com/starius/barterbackup/storedpb"
 )
 
-// contentFileName is the on-disk filename for persisted content.
-const contentFileName = "content.bin"
+// contentFilePrefix is the filename prefix for persisted content blobs.
+const contentFilePrefix = "content_"
 
 // Filesystem abstracts persistent storage operations for user data using streams.
 type Filesystem interface {
 	OpenRead(name string) (ReadFile, error)
 	OpenWrite(name string) (WriteFile, error)
+	Remove(name string) error
+	List() ([]string, error)
 	Rename(oldName, newName string) error
 }
 
@@ -85,6 +89,38 @@ type Store struct {
 
 	// contentRead keeps the current content file open for random access.
 	contentRead ReadFile
+
+	// now returns the current time (overridable for tests).
+	now func() time.Time
+
+	// contentName is the filename of the current content blob.
+	contentName string
+}
+
+type contentCandidate struct {
+	// name is the filename on disk.
+	name string
+
+	// size is the byte length of the file.
+	size int64
+
+	// revision describes the content revision if valid.
+	revision *storedpb.ContentRevision
+
+	// content is the parsed user content if valid.
+	content usercontent.UserContent
+
+	// cid is the parsed content identifier.
+	cid []byte
+
+	// reader holds the open file handle when valid.
+	reader ReadFile
+
+	// valid reports whether the file parsed successfully.
+	valid bool
+
+	// err captures the parse error for invalid files.
+	err error
 }
 
 // NewStore loads persisted state from the provided filesystem.
@@ -125,6 +161,7 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 		metadataSeal: metadataSeal,
 		metadataOpen: metadataOpen,
 		xor:          xor,
+		now:          time.Now,
 	}
 	if err := store.load(); err != nil {
 		return nil, err
@@ -135,15 +172,50 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 
 // load hydrates the in-memory store from persisted content if present.
 func (s *Store) load() error {
-	reader, err := s.fs.OpenRead(contentFileName)
+	valid, invalid, err := s.scanContentFiles()
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
 		return err
 	}
 
-	return s.replaceContent(reader)
+	if len(valid) == 0 {
+		if len(invalid) == 0 {
+			return nil
+		}
+		return errors.New("no valid content files found")
+	}
+
+	if len(valid) == 1 && len(invalid) == 0 {
+		v := valid[0]
+		return s.replaceContent(v.reader, v.cid, v.name, v.revision, v.content)
+	}
+
+	if len(valid) == 2 && len(invalid) == 0 {
+		newest := chooseLatest(valid[0], valid[1])
+		var older contentCandidate
+		if newest.name == valid[0].name {
+			older = valid[1]
+		} else {
+			older = valid[0]
+		}
+		if err := older.reader.Close(); err != nil {
+			return err
+		}
+		if err := s.fs.Remove(older.name); err != nil {
+			return err
+		}
+		return s.replaceContent(
+			newest.reader, newest.cid, newest.name,
+			newest.revision, newest.content,
+		)
+	}
+
+	for _, v := range valid {
+		if err := v.reader.Close(); err != nil {
+			return err
+		}
+	}
+
+	return errors.New("ambiguous content files present; run recovery")
 }
 
 // SetFile persists or updates a file.
@@ -155,6 +227,7 @@ func (s *Store) SetFile(_ context.Context, name string, data []byte) error {
 		Body: bytes.NewReader(data),
 		Size: int64(len(data)),
 	}
+
 	return s.persist()
 }
 
@@ -164,6 +237,7 @@ func (s *Store) GetFile(_ context.Context, name string) ([]byte, error) {
 	if !ok {
 		return nil, ErrFileNotFound
 	}
+
 	buf := make([]byte, data.Size)
 	read := int64(0)
 	for read < data.Size {
@@ -179,6 +253,7 @@ func (s *Store) GetFile(_ context.Context, name string) ([]byte, error) {
 	if read != data.Size {
 		return nil, errors.New("short read")
 	}
+
 	return buf, nil
 }
 
@@ -188,6 +263,7 @@ func (s *Store) DeleteFile(_ context.Context, name string) error {
 		return ErrFileNotFound
 	}
 	delete(s.files, name)
+
 	return s.persist()
 }
 
@@ -202,9 +278,14 @@ func (s *Store) ListFiles(_ context.Context) ([]string, error) {
 	return names, nil
 }
 
+// CurrentContentID returns the latest persisted content identifier.
+func (s *Store) CurrentContentID() []byte {
+	return append([]byte(nil), s.contentID...)
+}
+
 // persist encodes the current state to the backing filesystem.
 func (s *Store) persist() error {
-	now := time.Now()
+	now := s.now()
 	uc := usercontent.UserContent{
 		CreatedAt: now,
 		Files:     s.files,
@@ -213,24 +294,30 @@ func (s *Store) persist() error {
 		uc.Peers = append([]*storedpb.Peer(nil), s.peers...)
 	}
 
-	tmpName := contentFileName + ".new"
+	tmpName := contentFilePrefix + "tmp"
 	writer, err := s.fs.OpenWrite(tmpName)
 	if err != nil {
 		return err
 	}
-	defer writer.Close()
+	defer func() {
+		_ = writer.Close()
+	}()
 
 	cw := &countingWriter{w: writer}
 	cid, err := usercontent.WriteContentFile(
 		cw, uc, s.contentSeal, s.metadataSeal, s.xor,
 	)
 	if err != nil {
-		_ = writer.Close()
+		if cerr := writer.Close(); cerr != nil {
+			return fmt.Errorf("write failed: %v (close error: %w)", err, cerr)
+		}
 		return err
 	}
 
 	if err := writer.Sync(); err != nil {
-		_ = writer.Close()
+		if cerr := writer.Close(); cerr != nil {
+			return fmt.Errorf("sync failed: %v (close error: %w)", err, cerr)
+		}
 		return err
 	}
 	s.contentLen = cw.n
@@ -238,19 +325,25 @@ func (s *Store) persist() error {
 		return err
 	}
 
-	reader, err := s.fs.OpenRead(tmpName)
+	newName := contentFileNameFor(cid)
+	if err := s.fs.Rename(tmpName, newName); err != nil {
+		return err
+	}
+
+	reader, err := s.fs.OpenRead(newName)
 	if err != nil {
 		return err
 	}
-	if err := s.replaceContent(reader); err != nil {
+	if err := s.replaceContent(reader, cid, newName, nil, uc); err != nil {
 		return err
 	}
 
-	if err := s.fs.Rename(tmpName, contentFileName); err != nil {
-		return err
+	if s.contentName != "" && s.contentName != newName {
+		if err := s.fs.Remove(s.contentName); err != nil {
+			return err
+		}
 	}
-
-	s.contentID = append([]byte(nil), cid...)
+	s.contentName = newName
 
 	return nil
 }
@@ -273,26 +366,165 @@ type countingWriter struct {
 func (cw *countingWriter) Write(p []byte) (int, error) {
 	n, err := cw.w.Write(p)
 	cw.n += int64(n)
+
 	return n, err
 }
 
 // replaceContent swaps in a new content reader and rebuilds in-memory state.
-func (s *Store) replaceContent(reader ReadFile) error {
-	uc, cid, err := usercontent.ParseContentFile(
-		reader, s.contentOpen, s.metadataOpen, s.xor,
-	)
-	if err != nil {
-		_ = reader.Close()
-		return err
+func (s *Store) replaceContent(reader ReadFile, cid []byte, name string,
+	revision *storedpb.ContentRevision, uc usercontent.UserContent) error {
+
+	if revision == nil {
+		rev, err := usercontent.ParseContentID(cid, s.contentOpen)
+		if err != nil {
+			_ = reader.Close()
+			return err
+		}
+		revision = rev
 	}
 	if s.contentRead != nil {
-		_ = s.contentRead.Close()
+		if err := s.contentRead.Close(); err != nil {
+			return err
+		}
 	}
 	s.contentRead = reader
 	s.contentLen = reader.Size()
 	s.files = uc.Files
 	s.contentID = append([]byte(nil), cid...)
 	s.peers = append([]*storedpb.Peer(nil), uc.Peers...)
+	s.contentName = name
 
 	return nil
+}
+
+func contentFileNameFor(cid []byte) string {
+	return fmt.Sprintf("%s%s.bin", contentFilePrefix, hex.EncodeToString(cid))
+}
+
+func chooseLatest(a, b contentCandidate) contentCandidate {
+	if a.revision.GetCreatedAt() > b.revision.GetCreatedAt() {
+		return a
+	}
+	if a.revision.GetCreatedAt() < b.revision.GetCreatedAt() {
+		return b
+	}
+	if a.revision.GetCreatedAtNs() > b.revision.GetCreatedAtNs() {
+		return a
+	}
+	if a.revision.GetCreatedAtNs() < b.revision.GetCreatedAtNs() {
+		return b
+	}
+	if a.name > b.name {
+		return a
+	}
+	return b
+}
+
+// scanContentFiles enumerates persisted content files and categorizes them.
+func (s *Store) scanContentFiles() ([]contentCandidate, []contentCandidate, error) {
+	names, err := s.fs.List()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	valid := make([]contentCandidate, 0)
+	invalid := make([]contentCandidate, 0)
+	for _, name := range names {
+		if !strings.HasPrefix(name, contentFilePrefix) || !strings.HasSuffix(name, ".bin") {
+			continue
+		}
+
+		reader, err := s.fs.OpenRead(name)
+		if err != nil {
+			continue
+		}
+
+		uc, cid, perr := usercontent.ParseContentFile(
+			reader, s.contentOpen, s.metadataOpen, s.xor,
+		)
+		if perr != nil {
+			if cerr := reader.Close(); cerr != nil {
+				return nil, nil, cerr
+			}
+			invalid = append(invalid, contentCandidate{
+				name:  name,
+				size:  reader.Size(),
+				err:   perr,
+				valid: false,
+			})
+			continue
+		}
+		expectedName := contentFileNameFor(cid)
+		if expectedName != name {
+			if cerr := reader.Close(); cerr != nil {
+				return nil, nil, cerr
+			}
+			invalid = append(invalid, contentCandidate{
+				name:  name,
+				size:  reader.Size(),
+				err:   fmt.Errorf("content id mismatch; expected %s", expectedName),
+				valid: false,
+			})
+			continue
+		}
+
+		revision, _ := usercontent.ParseContentID(cid, s.contentOpen)
+		valid = append(valid, contentCandidate{
+			name:     name,
+			size:     reader.Size(),
+			revision: revision,
+			content:  uc,
+			cid:      cid,
+			reader:   reader,
+			valid:    true,
+		})
+	}
+
+	return valid, invalid, nil
+}
+
+// RecoveryInfo summarizes on-disk content files and recommends an action if clear.
+func (s *Store) RecoveryInfo() string {
+	valid, invalid, _ := s.scanContentFiles()
+	var b strings.Builder
+	if len(valid)+len(invalid) == 0 {
+		b.WriteString("No content files found.\n")
+		return b.String()
+	}
+
+	b.WriteString("Content files:\n")
+	for _, v := range valid {
+		ts := time.Unix(
+			v.revision.GetCreatedAt(),
+			v.revision.GetCreatedAtNs(),
+		).UTC()
+		fmt.Fprintf(&b, "- %s: size=%d valid created_at=%s\n",
+			v.name, v.size, ts.Format(time.RFC3339Nano))
+	}
+	for _, iv := range invalid {
+		fmt.Fprintf(&b, "- %s: size=%d invalid: %v\n",
+			iv.name, iv.size, iv.err)
+	}
+
+	for _, v := range valid {
+		if err := v.reader.Close(); err != nil {
+			fmt.Fprintf(&b, "Close error on %s: %v\n", v.name, err)
+		}
+	}
+
+	if len(valid) == 2 && len(invalid) == 0 {
+		newest := chooseLatest(valid[0], valid[1])
+		var older contentCandidate
+		if newest.name == valid[0].name {
+			older = valid[1]
+		} else {
+			older = valid[0]
+		}
+		fmt.Fprintf(&b, "Recommendation: keep %s, remove %s.\n",
+			newest.name, older.name)
+	} else {
+		b.WriteString("Recommendation: manual intervention required.\n")
+	}
+
+	return b.String()
 }
