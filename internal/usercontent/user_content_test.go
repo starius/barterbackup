@@ -28,7 +28,9 @@ func TestContentRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, cid)
 
-	parsed, parsedCID, err := ParseContentFile(bytes.NewReader(buf.Bytes()), contentOpen, metadataOpen, xor)
+	parsed, parsedCID, err := ParseContentFile(
+		bytes.NewReader(buf.Bytes()), contentOpen, metadataOpen, xor,
+	)
 	require.NoError(t, err)
 	require.Equal(t, cid, parsedCID)
 	require.Equal(t, uc.CreatedAt.UTC(), parsed.CreatedAt.UTC())
@@ -88,7 +90,10 @@ func TestFileKeystreamDiffersPerFile(t *testing.T) {
 
 	first := raw[offset : offset+fileLen]
 	second := raw[offset+fileLen : offset+fileLen*2]
-	require.NotEqual(t, first, second, "ciphertexts should differ for identical plaintexts in the same revision")
+	require.NotEqual(
+		t, first, second,
+		"ciphertexts should differ for identical plaintexts in the same revision",
+	)
 }
 
 // TestFileTamperDetected asserts corrupted file ciphertext is rejected.
@@ -120,6 +125,8 @@ func TestFileTamperDetected(t *testing.T) {
 
 	raw[offset] ^= 0x01
 
-	_, _, err = ParseContentFile(bytes.NewReader(raw), contentOpen, metadataOpen, xor)
+	_, _, err = ParseContentFile(
+		bytes.NewReader(raw), contentOpen, metadataOpen, xor,
+	)
 	require.ErrorIs(t, err, errInvalidContent)
 }

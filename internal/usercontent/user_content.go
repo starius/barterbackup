@@ -26,6 +26,7 @@ const (
 var (
 	// errInvalidMagic signals an unexpected file header prefix.
 	errInvalidMagic = errors.New("usercontent: invalid magic")
+
 	// errInvalidContent is returned when decryption or validation fails.
 	errInvalidContent = errors.New("usercontent: invalid content")
 )
@@ -49,7 +50,9 @@ type UserContent struct {
 
 // metadataFromUserContent builds the metadata structure for the provided
 // user content and the associated revision descriptor derived from timestamps.
-func metadataFromUserContent(uc UserContent) ([]byte, []fileDescriptor, *storedpb.ContentRevision, error) {
+func metadataFromUserContent(uc UserContent) ([]byte, []fileDescriptor,
+	*storedpb.ContentRevision, error) {
+
 	names := make([]string, 0, len(uc.Files))
 	for name := range uc.Files {
 		names = append(names, name)
@@ -99,7 +102,9 @@ func metadataFromUserContent(uc UserContent) ([]byte, []fileDescriptor, *storedp
 
 // WriteContentFile encodes user content to w using the provided primitives and
 // returns the generated content ID.
-func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal SealFunc, xor XORKeyStreamAt) ([]byte, error) {
+func WriteContentFile(w io.Writer, uc UserContent,
+	contentSeal, metadataSeal SealFunc, xor XORKeyStreamAt) ([]byte, error) {
+
 	if contentSeal == nil || metadataSeal == nil {
 		return nil, errors.New("usercontent: encryption primitives must be provided")
 	}
@@ -121,7 +126,8 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal Sea
 		return nil, err
 	}
 	if int64(len(metaCipher)) != revision.MetadataAeadLength {
-		return nil, fmt.Errorf("usercontent: metadata aead length mismatch: expected %d got %d", revision.MetadataAeadLength, len(metaCipher))
+		return nil, fmt.Errorf("usercontent: metadata aead length mismatch: expected %d got %d",
+			revision.MetadataAeadLength, len(metaCipher))
 	}
 
 	contentID, err := MakeContentID(revision, contentSeal)
@@ -136,7 +142,8 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal Sea
 		return nil, err
 	}
 	if len(contentID) != siv.TagSize+contentIDPlaintextSize {
-		return nil, fmt.Errorf("usercontent: unexpected content id length %d", len(contentID))
+		return nil, fmt.Errorf("usercontent: unexpected content id length %d",
+			len(contentID))
 	}
 	if _, err := w.Write(contentID); err != nil {
 		return nil, err
@@ -168,7 +175,9 @@ func WriteContentFile(w io.Writer, uc UserContent, contentSeal, metadataSeal Sea
 
 // ParseContentFile decodes user content from r and returns the content and
 // serialized content identifier.
-func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc, xor XORKeyStreamAt) (UserContent, []byte, error) {
+func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc,
+	xor XORKeyStreamAt) (UserContent, []byte, error) {
+
 	var result UserContent
 	if contentOpen == nil || metadataOpen == nil {
 		return result, nil, errors.New("usercontent: encryption primitives must be provided")
@@ -185,7 +194,8 @@ func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc, xor XOR
 		return result, nil, errInvalidMagic
 	}
 	if header[len(headerMagic)] != currentVersion {
-		return result, nil, fmt.Errorf("usercontent: unsupported version %d", header[len(headerMagic)])
+		return result, nil, fmt.Errorf("usercontent: unsupported version %d",
+			header[len(headerMagic)])
 	}
 
 	offset := int64(len(header))
@@ -331,7 +341,9 @@ func revisionIVKey(revision *storedpb.ContentRevision, metadataTag []byte) ([]by
 		return nil, errors.New("usercontent: invalid metadata tag length")
 	}
 
-	deriver := hkdf.New(sha256.New, material, metadataTag, []byte("usercontent/file-iv"))
+	deriver := hkdf.New(
+		sha256.New, material, metadataTag, []byte("usercontent/file-iv"),
+	)
 	key := make([]byte, aes.BlockSize)
 	if _, err := io.ReadFull(deriver, key); err != nil {
 		return nil, err
@@ -347,7 +359,9 @@ func revisionMetadataAD(revision *storedpb.ContentRevision) ([]byte, error) {
 		return nil, err
 	}
 
-	deriver := hkdf.New(sha256.New, material, nil, []byte("usercontent/metadata-ad"))
+	deriver := hkdf.New(
+		sha256.New, material, nil, []byte("usercontent/metadata-ad"),
+	)
 	ad := make([]byte, sha256.Size)
 	if _, err := io.ReadFull(deriver, ad); err != nil {
 		return nil, err
@@ -361,7 +375,9 @@ func deriveFileIV(ivKey []byte, name string) ([]byte, error) {
 	if len(ivKey) == 0 {
 		return nil, errors.New("usercontent: missing iv key")
 	}
-	deriver := hkdf.New(sha256.New, ivKey, nil, []byte("usercontent/file-iv/"+name))
+	deriver := hkdf.New(
+		sha256.New, ivKey, nil, []byte("usercontent/file-iv/"+name),
+	)
 	iv := make([]byte, aes.BlockSize)
 	if _, err := io.ReadFull(deriver, iv); err != nil {
 		return nil, err
@@ -370,7 +386,9 @@ func deriveFileIV(ivKey []byte, name string) ([]byte, error) {
 }
 
 // writeEncryptedFile streams a file through the XOR keystream and writes the ciphertext.
-func writeEncryptedFile(w io.Writer, desc fileDescriptor, xor XORKeyStreamAt, iv []byte) error {
+func writeEncryptedFile(w io.Writer, desc fileDescriptor,
+	xor XORKeyStreamAt, iv []byte) error {
+
 	reader := io.NewSectionReader(desc.file.Body, 0, desc.file.Size)
 	buf := make([]byte, 32*1024)
 	offset := uint64(0)
@@ -406,7 +424,9 @@ type cipherFile struct {
 }
 
 // newCipherFile constructs a reader that decrypts on the fly using XOR.
-func newCipherFile(src io.ReaderAt, xor XORKeyStreamAt, iv []byte, offset, size int64) (*cipherFile, error) {
+func newCipherFile(src io.ReaderAt, xor XORKeyStreamAt, iv []byte,
+	offset, size int64) (*cipherFile, error) {
+
 	if offset < 0 || size < 0 {
 		return nil, errors.New("usercontent: invalid file lengths")
 	}
