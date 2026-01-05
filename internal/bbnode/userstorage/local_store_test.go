@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"strings"
 	"testing"
 	"time"
 
@@ -154,7 +153,8 @@ func TestRecoveryInfoSummaries(t *testing.T) {
 		_, newName := writeContentFile(t, fsys, master, time.Unix(20, 0), "b", []byte("b"))
 
 		store := bareStore(t, fsys, master)
-		info := store.RecoveryInfo()
+		info, err := store.RecoveryInfo()
+		require.NoError(t, err)
 		require.Contains(t, info, "Recommendation: keep "+newName)
 	})
 
@@ -165,7 +165,8 @@ func TestRecoveryInfoSummaries(t *testing.T) {
 		truncateLastByte(t, fsys, badName)
 
 		store := bareStore(t, fsys, master)
-		info := store.RecoveryInfo()
+		info, err := store.RecoveryInfo()
+		require.NoError(t, err)
 		require.Contains(t, info, name)
 		require.Contains(t, info, badName)
 		require.Contains(t, info, "invalid")
@@ -179,7 +180,8 @@ func TestRecoveryInfoSummaries(t *testing.T) {
 		writeContentFile(t, fsys, master, time.Unix(30, 0), "c", []byte("c"))
 
 		store := bareStore(t, fsys, master)
-		info := store.RecoveryInfo()
+		info, err := store.RecoveryInfo()
+		require.NoError(t, err)
 		require.Contains(t, info, "manual intervention")
 	})
 }
@@ -316,9 +318,7 @@ func firstContentFile(t *testing.T, fsys Filesystem) string {
 	names, err := fsys.List()
 	require.NoError(t, err)
 	for _, name := range names {
-		if strings.HasPrefix(name, contentFilePrefix) && strings.HasSuffix(name, ".bin") {
-			return name
-		}
+		return name
 	}
 	t.Fatalf("no content files found")
 	return ""

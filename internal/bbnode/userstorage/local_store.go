@@ -17,9 +17,6 @@ import (
 	"github.com/starius/barterbackup/storedpb"
 )
 
-// contentFilePrefix is the filename prefix for persisted content blobs.
-const contentFilePrefix = "content_"
-
 // Filesystem abstracts persistent storage operations for user data using streams.
 type Filesystem interface {
 	OpenRead(name string) (ReadFile, error)
@@ -95,6 +92,14 @@ type Store struct {
 
 	// contentName is the filename of the current content blob.
 	contentName string
+}
+
+// Close releases the current content reader if present.
+func (s *Store) Close() error {
+	if s.contentRead != nil {
+		return s.contentRead.Close()
+	}
+	return nil
 }
 
 type contentCandidate struct {
@@ -294,7 +299,7 @@ func (s *Store) persist() error {
 		uc.Peers = append([]*storedpb.Peer(nil), s.peers...)
 	}
 
-	tmpName := contentFilePrefix + "tmp"
+	tmpName := "tmp"
 	writer, err := s.fs.OpenWrite(tmpName)
 	if err != nil {
 		return err
@@ -398,7 +403,7 @@ func (s *Store) replaceContent(reader ReadFile, cid []byte, name string,
 }
 
 func contentFileNameFor(cid []byte) string {
-	return fmt.Sprintf("%s%s.bin", contentFilePrefix, hex.EncodeToString(cid))
+	return hex.EncodeToString(cid)
 }
 
 func chooseLatest(a, b contentCandidate) contentCandidate {
@@ -430,7 +435,8 @@ func (s *Store) scanContentFiles() ([]contentCandidate, []contentCandidate, erro
 	valid := make([]contentCandidate, 0)
 	invalid := make([]contentCandidate, 0)
 	for _, name := range names {
-		if !strings.HasPrefix(name, contentFilePrefix) || !strings.HasSuffix(name, ".bin") {
+		expectCID, err := hex.DecodeString(name)
+		if err != nil {
 			continue
 		}
 
@@ -469,6 +475,18 @@ func (s *Store) scanContentFiles() ([]contentCandidate, []contentCandidate, erro
 		}
 
 		revision, _ := usercontent.ParseContentID(cid, s.contentOpen)
+		if !bytes.Equal(cid, expectCID) {
+			if cerr := reader.Close(); cerr != nil {
+				return nil, nil, cerr
+			}
+			invalid = append(invalid, contentCandidate{
+				name:  name,
+				size:  reader.Size(),
+				err:   fmt.Errorf("content id mismatch; expected %s", hex.EncodeToString(expectCID)),
+				valid: false,
+			})
+			continue
+		}
 		valid = append(valid, contentCandidate{
 			name:     name,
 			size:     reader.Size(),
@@ -484,12 +502,16 @@ func (s *Store) scanContentFiles() ([]contentCandidate, []contentCandidate, erro
 }
 
 // RecoveryInfo summarizes on-disk content files and recommends an action if clear.
-func (s *Store) RecoveryInfo() string {
-	valid, invalid, _ := s.scanContentFiles()
+func (s *Store) RecoveryInfo() (string, error) {
+	valid, invalid, err := s.scanContentFiles()
+	if err != nil {
+		return "", err
+	}
+
 	var b strings.Builder
 	if len(valid)+len(invalid) == 0 {
 		b.WriteString("No content files found.\n")
-		return b.String()
+		return b.String(), nil
 	}
 
 	b.WriteString("Content files:\n")
@@ -500,16 +522,13 @@ func (s *Store) RecoveryInfo() string {
 		).UTC()
 		fmt.Fprintf(&b, "- %s: size=%d valid created_at=%s\n",
 			v.name, v.size, ts.Format(time.RFC3339Nano))
+		if err := v.reader.Close(); err != nil {
+			return "", err
+		}
 	}
 	for _, iv := range invalid {
 		fmt.Fprintf(&b, "- %s: size=%d invalid: %v\n",
 			iv.name, iv.size, iv.err)
-	}
-
-	for _, v := range valid {
-		if err := v.reader.Close(); err != nil {
-			fmt.Fprintf(&b, "Close error on %s: %v\n", v.name, err)
-		}
 	}
 
 	if len(valid) == 2 && len(invalid) == 0 {
@@ -526,5 +545,5 @@ func (s *Store) RecoveryInfo() string {
 		b.WriteString("Recommendation: manual intervention required.\n")
 	}
 
-	return b.String()
+	return b.String(), nil
 }

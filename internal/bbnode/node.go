@@ -16,6 +16,7 @@ import (
 	"github.com/starius/barterbackup/bbrpc"
 	"github.com/starius/barterbackup/clirpc"
 	"github.com/starius/barterbackup/internal/bbnode/userstorage"
+	"github.com/starius/barterbackup/internal/fswrap"
 	"github.com/starius/barterbackup/internal/keys"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -39,7 +40,6 @@ type Node struct {
 	clirpc.UnimplementedBarterBackupClientServer
 
 	net        Network
-	masterPriv []byte
 	priv       ed25519.PrivateKey
 	addr       string
 	stop       func() error
@@ -80,14 +80,27 @@ func New(seed string, netw Network, storageDir string) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	store, err := userstorage.NewStore(fsys, master)
+
+	keyForWrap, err := keys.DeriveKey(master, "wrap", 32)
+	if err != nil {
+		return nil, err
+	}
+	wrappedFS, err := fswrap.New(fsys, keyForWrap)
+	if err != nil {
+		return nil, err
+	}
+
+	keyForOurContent, err := keys.DeriveKey(master, "our-content", 32)
+	if err != nil {
+		return nil, err
+	}
+	store, err := userstorage.NewStore(wrappedFS, keyForOurContent)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Node{
 		net:        netw,
-		masterPriv: master,
 		priv:       priv,
 		addr:       addr,
 		conns:      make(map[string]*pooledConn),
@@ -159,6 +172,10 @@ func (n *Node) Stop() error {
 		delete(n.conns, a)
 	}
 	n.mu.Unlock()
+
+	if n.store != nil {
+		_ = n.store.Close()
+	}
 
 	if n.state != nil {
 		n.state.Close()
