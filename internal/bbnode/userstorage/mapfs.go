@@ -39,6 +39,19 @@ func (m *MapFilesystem) OpenWrite(name string) (WriteFile, error) {
 	}, nil
 }
 
+// Rename swaps an existing entry to a new name.
+func (m *MapFilesystem) Rename(oldName, newName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	data, ok := m.files[oldName]
+	if !ok {
+		return fs.ErrNotExist
+	}
+	m.files[newName] = append([]byte(nil), data...)
+	delete(m.files, oldName)
+	return nil
+}
+
 type mapReadHandle struct {
 	reader *bytes.Reader
 	size   int64

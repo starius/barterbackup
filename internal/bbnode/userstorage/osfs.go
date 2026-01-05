@@ -54,6 +54,13 @@ func (fsys *OSFilesystem) OpenWrite(name string) (WriteFile, error) {
 	return &osWriteHandle{File: f}, nil
 }
 
+// Rename atomically renames a file within the root.
+func (fsys *OSFilesystem) Rename(oldName, newName string) error {
+	oldPath := filepath.Join(fsys.root, oldName)
+	newPath := filepath.Join(fsys.root, newName)
+	return os.Rename(oldPath, newPath)
+}
+
 // osReadHandle implements ReadFile on top of an *os.File.
 type osReadHandle struct {
 	*os.File

@@ -22,6 +22,7 @@ const contentFileName = "content.bin"
 type Filesystem interface {
 	OpenRead(name string) (ReadFile, error)
 	OpenWrite(name string) (WriteFile, error)
+	Rename(oldName, newName string) error
 }
 
 // ReadFile provides random access to a persisted object.
@@ -212,7 +213,8 @@ func (s *Store) persist() error {
 		uc.Peers = append([]*storedpb.Peer(nil), s.peers...)
 	}
 
-	writer, err := s.fs.OpenWrite(contentFileName)
+	tmpName := contentFileName + ".new"
+	writer, err := s.fs.OpenWrite(tmpName)
 	if err != nil {
 		return err
 	}
@@ -236,11 +238,15 @@ func (s *Store) persist() error {
 		return err
 	}
 
-	reader, err := s.fs.OpenRead(contentFileName)
+	reader, err := s.fs.OpenRead(tmpName)
 	if err != nil {
 		return err
 	}
 	if err := s.replaceContent(reader); err != nil {
+		return err
+	}
+
+	if err := s.fs.Rename(tmpName, contentFileName); err != nil {
 		return err
 	}
 
