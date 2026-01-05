@@ -85,8 +85,3 @@ func (n *Node) SetContentRevision(_ context.Context, req *bbrpc.SetContentRevisi
 func (n *Node) Download(context.Context, *bbrpc.DownloadRequest) (*bbrpc.DownloadResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "download not implemented")
 }
-
-// EncryptedDownload is not yet implemented.
-func (n *Node) EncryptedDownload(context.Context, *bbrpc.EncryptedDownloadRequest) (*bbrpc.EncryptedDownloadResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "encrypted download not implemented")
-}

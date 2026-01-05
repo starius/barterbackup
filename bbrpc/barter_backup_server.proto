@@ -30,10 +30,6 @@ service BarterBackupServer {
     // the requester or the responder.
     rpc Download(DownloadRequest) returns (DownloadResponse);
 
-    // EncryptedDownload makes encrypted download request. The encryption
-    // password needs to be setup out-of-band.
-    rpc EncryptedDownload(EncryptedDownloadRequest)
-        returns (EncryptedDownloadResponse);
 }
 
 // HealthCheckRequest is an empty health check request.
@@ -121,14 +117,4 @@ message DownloadResponse {
         RawBytes raw_bytes = 3;
         Reference reference = 4;
     }
-}
-
-message EncryptedDownloadRequest {
-    // encrypted_download_request is AEAD(DownloadRequest).
-    bytes encrypted_download_request = 1;
-}
-
-message EncryptedDownloadResponse {
-    // encrypted_download_response is AEAD(DownloadResponse).
-    bytes encrypted_download_response = 1;
 }

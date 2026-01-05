@@ -73,7 +73,7 @@ func TestGetContentRevisionReflectsStore(t *testing.T) {
 	})
 }
 
-// TestUnimplementedDownloads ensures Download and EncryptedDownload return unimplemented.
+// TestUnimplementedDownloads ensures Download returns unimplemented.
 func TestUnimplementedDownloads(t *testing.T) {
 	t.Parallel()
 
@@ -82,11 +82,6 @@ func TestUnimplementedDownloads(t *testing.T) {
 
 	_, err := node.Download(context.Background(), &bbrpc.DownloadRequest{})
 	st, ok := status.FromError(err)
-	require.True(t, ok)
-	require.Equal(t, codes.Unimplemented, st.Code())
-
-	_, err = node.EncryptedDownload(context.Background(), &bbrpc.EncryptedDownloadRequest{})
-	st, ok = status.FromError(err)
 	require.True(t, ok)
 	require.Equal(t, codes.Unimplemented, st.Code())
 }

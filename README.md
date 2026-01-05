@@ -37,7 +37,6 @@ Mutual backup system: you store my data, I store yours.
     stored on each side and propose updates/deletions.
   - Download: Retrieve sections of content, optionally using reference
     sections for efficient deltas. Response includes a SHA-256 hash.
-  - EncryptedDownload: AEAD‑wrapped variant using an out‑of‑band password.
 
 - storedpb messages
   - ContentRevision: Marks a concrete version produced by SetFile; its AEAD

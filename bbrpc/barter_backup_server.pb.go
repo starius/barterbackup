@@ -741,96 +741,6 @@ func (*DownloadResponse_RawBytes) isDownloadResponse_Section() {}
 
 func (*DownloadResponse_Reference) isDownloadResponse_Section() {}
 
-type EncryptedDownloadRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// encrypted_download_request is AEAD(DownloadRequest).
-	EncryptedDownloadRequest []byte `protobuf:"bytes,1,opt,name=encrypted_download_request,json=encryptedDownloadRequest,proto3" json:"encrypted_download_request,omitempty"`
-	unknownFields            protoimpl.UnknownFields
-	sizeCache                protoimpl.SizeCache
-}
-
-func (x *EncryptedDownloadRequest) Reset() {
-	*x = EncryptedDownloadRequest{}
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[14]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *EncryptedDownloadRequest) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*EncryptedDownloadRequest) ProtoMessage() {}
-
-func (x *EncryptedDownloadRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[14]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use EncryptedDownloadRequest.ProtoReflect.Descriptor instead.
-func (*EncryptedDownloadRequest) Descriptor() ([]byte, []int) {
-	return file_bbrpc_barter_backup_server_proto_rawDescGZIP(), []int{14}
-}
-
-func (x *EncryptedDownloadRequest) GetEncryptedDownloadRequest() []byte {
-	if x != nil {
-		return x.EncryptedDownloadRequest
-	}
-	return nil
-}
-
-type EncryptedDownloadResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// encrypted_download_response is AEAD(DownloadResponse).
-	EncryptedDownloadResponse []byte `protobuf:"bytes,1,opt,name=encrypted_download_response,json=encryptedDownloadResponse,proto3" json:"encrypted_download_response,omitempty"`
-	unknownFields             protoimpl.UnknownFields
-	sizeCache                 protoimpl.SizeCache
-}
-
-func (x *EncryptedDownloadResponse) Reset() {
-	*x = EncryptedDownloadResponse{}
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[15]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *EncryptedDownloadResponse) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*EncryptedDownloadResponse) ProtoMessage() {}
-
-func (x *EncryptedDownloadResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bbrpc_barter_backup_server_proto_msgTypes[15]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use EncryptedDownloadResponse.ProtoReflect.Descriptor instead.
-func (*EncryptedDownloadResponse) Descriptor() ([]byte, []int) {
-	return file_bbrpc_barter_backup_server_proto_rawDescGZIP(), []int{15}
-}
-
-func (x *EncryptedDownloadResponse) GetEncryptedDownloadResponse() []byte {
-	if x != nil {
-		return x.EncryptedDownloadResponse
-	}
-	return nil
-}
-
 var File_bbrpc_barter_backup_server_proto protoreflect.FileDescriptor
 
 const file_bbrpc_barter_backup_server_proto_rawDesc = "" +
@@ -873,18 +783,13 @@ const file_bbrpc_barter_backup_server_proto_rawDesc = "" +
 	"\x06sha256\x18\x02 \x01(\fR\x06sha256\x12.\n" +
 	"\traw_bytes\x18\x03 \x01(\v2\x0f.bbrpc.RawBytesH\x00R\brawBytes\x120\n" +
 	"\treference\x18\x04 \x01(\v2\x10.bbrpc.ReferenceH\x00R\treferenceB\t\n" +
-	"\asection\"X\n" +
-	"\x18EncryptedDownloadRequest\x12<\n" +
-	"\x1aencrypted_download_request\x18\x01 \x01(\fR\x18encryptedDownloadRequest\"[\n" +
-	"\x19EncryptedDownloadResponse\x12>\n" +
-	"\x1bencrypted_download_response\x18\x01 \x01(\fR\x19encryptedDownloadResponse2\xee\x03\n" +
+	"\asection2\x96\x03\n" +
 	"\x12BarterBackupServer\x12D\n" +
 	"\vHealthCheck\x12\x19.bbrpc.HealthCheckRequest\x1a\x1a.bbrpc.HealthCheckResponse\x12G\n" +
 	"\fPeerExchange\x12\x1a.bbrpc.PeerExchangeRequest\x1a\x1b.bbrpc.PeerExchangeResponse\x12Y\n" +
 	"\x12GetContentRevision\x12 .bbrpc.GetContentRevisionRequest\x1a!.bbrpc.GetContentRevisionResponse\x12Y\n" +
 	"\x12SetContentRevision\x12 .bbrpc.SetContentRevisionRequest\x1a!.bbrpc.SetContentRevisionResponse\x12;\n" +
-	"\bDownload\x12\x16.bbrpc.DownloadRequest\x1a\x17.bbrpc.DownloadResponse\x12V\n" +
-	"\x11EncryptedDownload\x12\x1f.bbrpc.EncryptedDownloadRequest\x1a .bbrpc.EncryptedDownloadResponseB'Z%github.com/starius/barterbackup/bbrpcb\x06proto3"
+	"\bDownload\x12\x16.bbrpc.DownloadRequest\x1a\x17.bbrpc.DownloadResponseB'Z%github.com/starius/barterbackup/bbrpcb\x06proto3"
 
 var (
 	file_bbrpc_barter_backup_server_proto_rawDescOnce sync.Once
@@ -898,7 +803,7 @@ func file_bbrpc_barter_backup_server_proto_rawDescGZIP() []byte {
 	return file_bbrpc_barter_backup_server_proto_rawDescData
 }
 
-var file_bbrpc_barter_backup_server_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_bbrpc_barter_backup_server_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_bbrpc_barter_backup_server_proto_goTypes = []any{
 	(*HealthCheckRequest)(nil),         // 0: bbrpc.HealthCheckRequest
 	(*HealthCheckResponse)(nil),        // 1: bbrpc.HealthCheckResponse
@@ -914,8 +819,6 @@ var file_bbrpc_barter_backup_server_proto_goTypes = []any{
 	(*RawBytes)(nil),                   // 11: bbrpc.RawBytes
 	(*Reference)(nil),                  // 12: bbrpc.Reference
 	(*DownloadResponse)(nil),           // 13: bbrpc.DownloadResponse
-	(*EncryptedDownloadRequest)(nil),   // 14: bbrpc.EncryptedDownloadRequest
-	(*EncryptedDownloadResponse)(nil),  // 15: bbrpc.EncryptedDownloadResponse
 }
 var file_bbrpc_barter_backup_server_proto_depIdxs = []int32{
 	2,  // 0: bbrpc.PeerExchangeRequest.peers:type_name -> bbrpc.Peer
@@ -930,15 +833,13 @@ var file_bbrpc_barter_backup_server_proto_depIdxs = []int32{
 	6,  // 9: bbrpc.BarterBackupServer.GetContentRevision:input_type -> bbrpc.GetContentRevisionRequest
 	8,  // 10: bbrpc.BarterBackupServer.SetContentRevision:input_type -> bbrpc.SetContentRevisionRequest
 	10, // 11: bbrpc.BarterBackupServer.Download:input_type -> bbrpc.DownloadRequest
-	14, // 12: bbrpc.BarterBackupServer.EncryptedDownload:input_type -> bbrpc.EncryptedDownloadRequest
-	1,  // 13: bbrpc.BarterBackupServer.HealthCheck:output_type -> bbrpc.HealthCheckResponse
-	4,  // 14: bbrpc.BarterBackupServer.PeerExchange:output_type -> bbrpc.PeerExchangeResponse
-	7,  // 15: bbrpc.BarterBackupServer.GetContentRevision:output_type -> bbrpc.GetContentRevisionResponse
-	9,  // 16: bbrpc.BarterBackupServer.SetContentRevision:output_type -> bbrpc.SetContentRevisionResponse
-	13, // 17: bbrpc.BarterBackupServer.Download:output_type -> bbrpc.DownloadResponse
-	15, // 18: bbrpc.BarterBackupServer.EncryptedDownload:output_type -> bbrpc.EncryptedDownloadResponse
-	13, // [13:19] is the sub-list for method output_type
-	7,  // [7:13] is the sub-list for method input_type
+	1,  // 12: bbrpc.BarterBackupServer.HealthCheck:output_type -> bbrpc.HealthCheckResponse
+	4,  // 13: bbrpc.BarterBackupServer.PeerExchange:output_type -> bbrpc.PeerExchangeResponse
+	7,  // 14: bbrpc.BarterBackupServer.GetContentRevision:output_type -> bbrpc.GetContentRevisionResponse
+	9,  // 15: bbrpc.BarterBackupServer.SetContentRevision:output_type -> bbrpc.SetContentRevisionResponse
+	13, // 16: bbrpc.BarterBackupServer.Download:output_type -> bbrpc.DownloadResponse
+	12, // [12:17] is the sub-list for method output_type
+	7,  // [7:12] is the sub-list for method input_type
 	7,  // [7:7] is the sub-list for extension type_name
 	7,  // [7:7] is the sub-list for extension extendee
 	0,  // [0:7] is the sub-list for field type_name
@@ -959,7 +860,7 @@ func file_bbrpc_barter_backup_server_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bbrpc_barter_backup_server_proto_rawDesc), len(file_bbrpc_barter_backup_server_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   16,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

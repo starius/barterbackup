@@ -24,7 +24,6 @@ const (
 	BarterBackupServer_GetContentRevision_FullMethodName = "/bbrpc.BarterBackupServer/GetContentRevision"
 	BarterBackupServer_SetContentRevision_FullMethodName = "/bbrpc.BarterBackupServer/SetContentRevision"
 	BarterBackupServer_Download_FullMethodName           = "/bbrpc.BarterBackupServer/Download"
-	BarterBackupServer_EncryptedDownload_FullMethodName  = "/bbrpc.BarterBackupServer/EncryptedDownload"
 )
 
 // BarterBackupServerClient is the client API for BarterBackupServer service.
@@ -50,9 +49,6 @@ type BarterBackupServerClient interface {
 	// Download downloads a section of a file which can be content of either
 	// the requester or the responder.
 	Download(ctx context.Context, in *DownloadRequest, opts ...grpc.CallOption) (*DownloadResponse, error)
-	// EncryptedDownload makes encrypted download request. The encryption
-	// password needs to be setup out-of-band.
-	EncryptedDownload(ctx context.Context, in *EncryptedDownloadRequest, opts ...grpc.CallOption) (*EncryptedDownloadResponse, error)
 }
 
 type barterBackupServerClient struct {
@@ -113,16 +109,6 @@ func (c *barterBackupServerClient) Download(ctx context.Context, in *DownloadReq
 	return out, nil
 }
 
-func (c *barterBackupServerClient) EncryptedDownload(ctx context.Context, in *EncryptedDownloadRequest, opts ...grpc.CallOption) (*EncryptedDownloadResponse, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(EncryptedDownloadResponse)
-	err := c.cc.Invoke(ctx, BarterBackupServer_EncryptedDownload_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 // BarterBackupServerServer is the server API for BarterBackupServer service.
 // All implementations must embed UnimplementedBarterBackupServerServer
 // for forward compatibility.
@@ -146,9 +132,6 @@ type BarterBackupServerServer interface {
 	// Download downloads a section of a file which can be content of either
 	// the requester or the responder.
 	Download(context.Context, *DownloadRequest) (*DownloadResponse, error)
-	// EncryptedDownload makes encrypted download request. The encryption
-	// password needs to be setup out-of-band.
-	EncryptedDownload(context.Context, *EncryptedDownloadRequest) (*EncryptedDownloadResponse, error)
 	mustEmbedUnimplementedBarterBackupServerServer()
 }
 
@@ -173,9 +156,6 @@ func (UnimplementedBarterBackupServerServer) SetContentRevision(context.Context,
 }
 func (UnimplementedBarterBackupServerServer) Download(context.Context, *DownloadRequest) (*DownloadResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Download not implemented")
-}
-func (UnimplementedBarterBackupServerServer) EncryptedDownload(context.Context, *EncryptedDownloadRequest) (*EncryptedDownloadResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method EncryptedDownload not implemented")
 }
 func (UnimplementedBarterBackupServerServer) mustEmbedUnimplementedBarterBackupServerServer() {}
 func (UnimplementedBarterBackupServerServer) testEmbeddedByValue()                            {}
@@ -288,24 +268,6 @@ func _BarterBackupServer_Download_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
-func _BarterBackupServer_EncryptedDownload_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(EncryptedDownloadRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(BarterBackupServerServer).EncryptedDownload(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: BarterBackupServer_EncryptedDownload_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(BarterBackupServerServer).EncryptedDownload(ctx, req.(*EncryptedDownloadRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 // BarterBackupServer_ServiceDesc is the grpc.ServiceDesc for BarterBackupServer service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -332,10 +294,6 @@ var BarterBackupServer_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Download",
 			Handler:    _BarterBackupServer_Download_Handler,
-		},
-		{
-			MethodName: "EncryptedDownload",
-			Handler:    _BarterBackupServer_EncryptedDownload_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
