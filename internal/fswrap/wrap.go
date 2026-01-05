@@ -17,7 +17,8 @@ const (
 	nameNonceString = "fswrap-name"
 )
 
-// Wrapper applies deterministic encryption to filenames and file contents for privacy.
+// Wrapper applies deterministic encryption to filenames and file contents so our
+// locally stored blobs look like every other peer's files in the shared directory.
 type Wrapper struct {
 	// under is the wrapped filesystem.
 	under userstorage.Filesystem

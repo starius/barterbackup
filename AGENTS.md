@@ -199,6 +199,13 @@ Node + Network
   - Constructor: `netmock.NewMockNetwork()`. Implements `Close() error`.
   - Useful for unit/integration tests (see `internal/node/node_mock_test.go`).
 
+Privacy + at-rest storage decisions
+
+- Local content and downloaded peer content live side-by-side in the same directory for cover traffic; filenames are raw content IDs, not prefixed or hex-encoded, so ours are indistinguishable after wrapping.
+- The fswrap layer deterministically SIV-encrypts filenames and AES-CTR wraps file bodies with keys derived from a local secret, letting us keep everything in one directory without leaking which files are ours.
+- Content IDs are bound to metadata length and timestamp; WriteContentFile derives file IVs from the authenticated metadata tag to avoid keystream reuse across files within a revision.
+- Persist writes go to a temp file then rename to the CID-based filename to avoid clobbering on failure; load/recovery drop invalid files and keep the newest valid CID.
+
 CLI and Daemon Apps
 
 - Daemon app (`cmd/bbd/bbdapp`):

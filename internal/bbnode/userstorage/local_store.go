@@ -411,6 +411,8 @@ func (s *Store) replaceContent(reader ReadFile, cid []byte, name string,
 }
 
 func contentFileNameFor(cid []byte) string {
+	// Filenames are the raw content ID bytes so our content is indistinguishable
+	// from peers' files once the filesystem wrapper encrypts names.
 	return string(cid)
 }
 
