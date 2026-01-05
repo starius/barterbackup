@@ -1,7 +1,9 @@
 package bbnode
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"io/fs"
 	"strconv"
 	"sync"
@@ -34,12 +36,89 @@ func (m *stateTestFS) WriteFile(name string, data []byte) error {
 	return nil
 }
 
+func (m *stateTestFS) OpenRead(name string) (userstorage.ReadFile, error) {
+	data, err := m.ReadFile(name)
+	if err != nil {
+		return nil, err
+	}
+	r := bytes.NewReader(data)
+	return &mockReadFile{ReaderAt: r, size: int64(len(data))}, nil
+}
+
+func (m *stateTestFS) OpenWrite(name string) (userstorage.WriteFile, error) {
+	var buf bytes.Buffer
+	return &mockWriteFile{buf: &buf, commit: func() {
+		m.MapFS[name] = &fstest.MapFile{Data: append([]byte(nil), buf.Bytes()...), Mode: 0o600}
+	}}, nil
+}
+
+func (m *stateTestFS) Remove(name string) error {
+	delete(m.MapFS, name)
+	return nil
+}
+
+func (m *stateTestFS) List() ([]string, error) {
+	names := make([]string, 0, len(m.MapFS))
+	for n := range m.MapFS {
+		names = append(names, n)
+	}
+	return names, nil
+}
+
+func (m *stateTestFS) Rename(oldName, newName string) error {
+	f, ok := m.MapFS[oldName]
+	if !ok {
+		return fs.ErrNotExist
+	}
+	m.MapFS[newName] = f
+	delete(m.MapFS, oldName)
+	return nil
+}
+
+type mockReadFile struct {
+	io.ReaderAt
+	size int64
+}
+
+func (m *mockReadFile) Size() int64 {
+	return m.size
+}
+
+func (m *mockReadFile) Close() error {
+	return nil
+}
+
+type mockWriteFile struct {
+	buf    *bytes.Buffer
+	closed bool
+	commit func()
+}
+
+func (m *mockWriteFile) Write(p []byte) (int, error) {
+	return m.buf.Write(p)
+}
+
+func (m *mockWriteFile) Sync() error {
+	return nil
+}
+
+func (m *mockWriteFile) Close() error {
+	if m.closed {
+		return nil
+	}
+	m.closed = true
+	if m.commit != nil {
+		m.commit()
+	}
+	return nil
+}
+
 func TestEventStateConcurrentAccess(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
 		fsys := newStateTestFS()
-		store, err := userstorage.NewStore(fsys, []byte("master"))
+		store, err := userstorage.NewStore(fsys, bytes.Repeat([]byte("m"), 32))
 		require.NoError(t, err)
 
 		state := newEventState(store)

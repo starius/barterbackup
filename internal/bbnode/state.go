@@ -2,9 +2,13 @@ package bbnode
 
 import (
 	"context"
+	"errors"
 
 	"github.com/starius/barterbackup/internal/bbnode/userstorage"
 )
+
+// ErrStopped indicates the node storage/event loop has been stopped.
+var ErrStopped = errors.New("storage stopped")
 
 // nodeState mediates access to mutable node data via the Node event loop.
 type nodeState interface {
@@ -137,7 +141,7 @@ func (es *eventState) sendSet(ctx context.Context, req setReq) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-es.doneCh:
-		return userstorage.ErrStopped
+		return ErrStopped
 	case es.setCh <- req:
 		return nil
 	}
@@ -157,7 +161,7 @@ func (es *eventState) sendDelete(ctx context.Context, req deleteReq) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-es.doneCh:
-		return userstorage.ErrStopped
+		return ErrStopped
 	case es.deleteCh <- req:
 		return nil
 	}
@@ -173,7 +177,7 @@ func (es *eventState) GetFile(ctx context.Context, name string) ([]byte, error) 
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-es.doneCh:
-		return nil, userstorage.ErrStopped
+		return nil, ErrStopped
 	case r := <-resp:
 		if r.err != nil {
 			return nil, r.err
@@ -187,7 +191,7 @@ func (es *eventState) sendGet(ctx context.Context, req getReq) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-es.doneCh:
-		return userstorage.ErrStopped
+		return ErrStopped
 	case es.getCh <- req:
 		return nil
 	}
@@ -203,7 +207,7 @@ func (es *eventState) ListFiles(ctx context.Context) ([]string, error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-es.doneCh:
-		return nil, userstorage.ErrStopped
+		return nil, ErrStopped
 	case r := <-resp:
 		return r.names, r.err
 	}
@@ -214,7 +218,7 @@ func (es *eventState) sendList(ctx context.Context, req listReq) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-es.doneCh:
-		return userstorage.ErrStopped
+		return ErrStopped
 	case es.listCh <- req:
 		return nil
 	}
@@ -225,7 +229,7 @@ func (es *eventState) waitError(ctx context.Context, resp chan error) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-es.doneCh:
-		return userstorage.ErrStopped
+		return ErrStopped
 	case err := <-resp:
 		return err
 	}

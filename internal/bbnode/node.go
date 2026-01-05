@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -216,9 +218,25 @@ func (n *Node) getPeerConn(ctx context.Context, addr string) (*grpc.ClientConn, 
 		return nil, err
 	}
 	clientTLS := &tls.Config{
-		Certificates:       []tls.Certificate{cliCert},
-		MinVersion:         tls.VersionTLS13,
-		CurvePreferences:   []tls.CurveID{tls.X25519MLKEM768},
+		Certificates:     []tls.Certificate{cliCert},
+		MinVersion:       tls.VersionTLS13,
+		CurvePreferences: []tls.CurveID{tls.X25519MLKEM768},
+		ServerName:       addr,
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			verified, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return err
+			}
+			pub, ok := verified.PublicKey.(ed25519.PublicKey)
+			if !ok {
+				return errors.New("peer certificate is not ed25519")
+			}
+			id := torutil.OnionServiceIDFromV3PublicKey(torutiled25519.PublicKey(pub)) + ".onion"
+			if id != addr {
+				return fmt.Errorf("peer onion mismatch: got %s expected %s", id, addr)
+			}
+			return nil
+		},
 		InsecureSkipVerify: true,
 	}
 

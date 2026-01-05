@@ -135,7 +135,7 @@ func mapStorageError(err error) error {
 	switch {
 	case errors.Is(err, userstorage.ErrFileNotFound):
 		return status.Error(codes.NotFound, "file not found")
-	case errors.Is(err, userstorage.ErrStopped):
+	case errors.Is(err, ErrStopped):
 		return status.Error(codes.Unavailable, "storage stopped")
 	default:
 		return status.Errorf(codes.Internal, "storage error: %v", err)
