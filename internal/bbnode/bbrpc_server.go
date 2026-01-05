@@ -3,7 +3,6 @@ package bbnode
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"errors"
 	"io"
 	"sort"
@@ -122,7 +121,7 @@ func (n *Node) Download(ctx context.Context, req *bbrpc.DownloadRequest) (*bbrpc
 		return nil, status.Error(codes.InvalidArgument, "offset beyond end of content")
 	}
 
-	sha, err := hashContent(reader)
+	sha, err := n.store.ContentHash()
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "hash content: %v", err)
 	}
@@ -139,32 +138,6 @@ func (n *Node) Download(ctx context.Context, req *bbrpc.DownloadRequest) (*bbrpc
 			RawBytes: &bbrpc.RawBytes{Value: chunk},
 		},
 	}, nil
-}
-
-// hashContent returns a SHA-256 of the entire content using random-access reads.
-func hashContent(reader userstorage.ReadFile) ([]byte, error) {
-	hasher := sha256.New()
-	buf := make([]byte, 32*1024)
-	var off int64
-	for off < reader.Size() {
-		n, err := reader.ReadAt(buf, off)
-		if n > 0 {
-			if _, werr := hasher.Write(buf[:n]); werr != nil {
-				return nil, werr
-			}
-			off += int64(n)
-		}
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-		if n == 0 {
-			return nil, errors.New("short read while hashing")
-		}
-	}
-	return hasher.Sum(nil), nil
 }
 
 // readChunk reads up to length bytes from offset in the content.

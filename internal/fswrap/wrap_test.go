@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"crypto/sha256"
 	"github.com/starius/barterbackup/internal/bbnode/userstorage"
 	"github.com/stretchr/testify/require"
 )
@@ -100,6 +101,62 @@ func TestWrapperContentCorruption(t *testing.T) {
 	_, err = reader.ReadAt(buf, 0)
 	require.NoError(t, err)
 	require.NotEqual(t, data, buf, "corruption should alter plaintext")
+}
+
+// TestWrapperHashCachesAndInvalidates ensures hashes are cached and invalidated on write/remove/rename.
+func TestWrapperHashCachesAndInvalidates(t *testing.T) {
+	t.Parallel()
+
+	base := userstorage.NewMapFilesystem()
+	w, err := New(base, bytes.Repeat([]byte("k"), 32))
+	require.NoError(t, err)
+
+	name := "file.bin"
+	data := []byte("payload")
+	sum := sha256.Sum256(data)
+
+	write := func(content []byte) {
+		writer, err := w.OpenWrite(name)
+		require.NoError(t, err)
+		_, err = writer.Write(content)
+		require.NoError(t, err)
+		require.NoError(t, writer.Sync())
+		require.NoError(t, writer.Close())
+	}
+
+	write(data)
+
+	h, err := w.Hash(name)
+	require.NoError(t, err)
+	require.Equal(t, sum[:], h)
+
+	// Cached value should be returned until invalidated.
+	h2, err := w.Hash(name)
+	require.NoError(t, err)
+	require.Equal(t, h, h2)
+
+	// Rewrite invalidates cache.
+	newData := []byte("different")
+	write(newData)
+	h3, err := w.Hash(name)
+	require.NoError(t, err)
+	require.NotEqual(t, h, h3)
+	sumNew := sha256.Sum256(newData)
+	require.Equal(t, sumNew[:], h3)
+
+	// Rename preserves cache under new name and clears old name.
+	newName := "renamed.bin"
+	require.NoError(t, w.Rename(name, newName))
+	h4, err := w.Hash(newName)
+	require.NoError(t, err)
+	require.Equal(t, h3, h4)
+	_, err = w.Hash(name)
+	require.Error(t, err)
+
+	// Remove clears cache.
+	require.NoError(t, w.Remove(newName))
+	_, err = w.Hash(newName)
+	require.Error(t, err)
 }
 
 // baseOnlyName extracts the single filename from the underlying map fs.

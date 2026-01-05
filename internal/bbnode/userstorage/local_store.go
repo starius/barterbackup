@@ -288,6 +288,21 @@ func (s *Store) ContentLength() int64 {
 	return s.contentLen
 }
 
+// ContentHash returns the SHA-256 of the current content if the filesystem supports hashing.
+// If no content is present, ErrFileNotFound is returned.
+func (s *Store) ContentHash() ([]byte, error) {
+	if s.contentName == "" {
+		return nil, ErrFileNotFound
+	}
+	type hasher interface {
+		Hash(name string) ([]byte, error)
+	}
+	if h, ok := s.fs.(hasher); ok {
+		return h.Hash(s.contentName)
+	}
+	return nil, errors.New("hash not supported")
+}
+
 // OpenContent returns a fresh reader for the current content file along with its ID.
 func (s *Store) OpenContent() (ReadFile, []byte, error) {
 	if s.contentName == "" {

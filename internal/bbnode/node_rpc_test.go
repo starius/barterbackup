@@ -115,7 +115,7 @@ func TestDownloadHappyPath(t *testing.T) {
 	require.Equal(t, expectedChunk, resp.GetRawBytes().GetValue())
 
 	// Validate the returned digest matches a direct hash of the content blob.
-	sum, err := hashContent(reader)
+	sum, err := node.store.ContentHash()
 	require.NoError(t, err)
 	require.Equal(t, sum, resp.GetSha256())
 }
@@ -137,7 +137,7 @@ func TestDownloadHashStable(t *testing.T) {
 		require.NoError(t, err)
 		defer reader.Close()
 
-		expectedHash, err := hashContent(reader)
+		expectedHash, err := node.store.ContentHash()
 		require.NoError(t, err)
 		require.Equal(t,
 			"92d5fdc825317e3e06e7c5c957689cf189bdb7fd67a9ee483c5bbdc0afc3582b",

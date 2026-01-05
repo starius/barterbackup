@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"sync"
 
 	"github.com/starius/aesctrat"
 	"github.com/starius/barterbackup/internal/bbnode/userstorage"
@@ -31,6 +32,11 @@ type Wrapper struct {
 
 	// ctrKey encrypts file bodies.
 	ctrKey []byte
+
+	// hashes caches plaintext SHA-256 digests keyed by plaintext filename.
+	hashes map[string][]byte
+
+	mu sync.RWMutex
 }
 
 // New constructs a wrapped filesystem with the provided master key.
@@ -60,6 +66,7 @@ func New(fsys userstorage.Filesystem, master []byte) (*Wrapper, error) {
 		nameSeal: nameSeal,
 		nameOpen: nameOpen,
 		ctrKey:   contentKey,
+		hashes:   make(map[string][]byte),
 	}, nil
 }
 
@@ -97,6 +104,9 @@ func (w *Wrapper) OpenWrite(name string) (userstorage.WriteFile, error) {
 	if err != nil {
 		return nil, err
 	}
+	w.mu.Lock()
+	delete(w.hashes, name)
+	w.mu.Unlock()
 
 	xor := aesctrat.NewAesCtr(w.ctrKey).XORKeyStreamAt
 
@@ -116,7 +126,13 @@ func (w *Wrapper) Remove(name string) error {
 		return err
 	}
 
-	return w.under.Remove(encName)
+	if err := w.under.Remove(encName); err != nil {
+		return err
+	}
+	w.mu.Lock()
+	delete(w.hashes, name)
+	w.mu.Unlock()
+	return nil
 }
 
 // List returns decrypted filenames; entries whose name cannot be decrypted are skipped.
@@ -149,7 +165,63 @@ func (w *Wrapper) Rename(oldName, newName string) error {
 		return err
 	}
 
-	return w.under.Rename(encOld, encNew)
+	if err := w.under.Rename(encOld, encNew); err != nil {
+		return err
+	}
+	w.mu.Lock()
+	if sum, ok := w.hashes[oldName]; ok {
+		delete(w.hashes, oldName)
+		w.hashes[newName] = sum
+	}
+	w.mu.Unlock()
+	return nil
+}
+
+// Hash returns the SHA-256 of the plaintext stored at name. The result is
+// cached until the file is modified or removed.
+func (w *Wrapper) Hash(name string) ([]byte, error) {
+	w.mu.RLock()
+	if sum, ok := w.hashes[name]; ok {
+		out := append([]byte(nil), sum...)
+		w.mu.RUnlock()
+		return out, nil
+	}
+	w.mu.RUnlock()
+
+	reader, err := w.OpenRead(name)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+
+	hasher := sha256.New()
+	buf := make([]byte, 32*1024)
+	var off int64
+	for off < reader.Size() {
+		n, err := reader.ReadAt(buf, off)
+		if n > 0 {
+			if _, werr := hasher.Write(buf[:n]); werr != nil {
+				return nil, werr
+			}
+			off += int64(n)
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			return nil, errors.New("fswrap: short read while hashing")
+		}
+	}
+
+	sum := hasher.Sum(nil)
+	w.mu.Lock()
+	w.hashes[name] = append([]byte(nil), sum...)
+	w.mu.Unlock()
+
+	return sum, nil
 }
 
 // reader decrypts file content during reads.
