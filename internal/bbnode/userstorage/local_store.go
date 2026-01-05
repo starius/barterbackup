@@ -86,9 +86,6 @@ type Store struct {
 	// contentRead keeps the current content file open for random access.
 	contentRead ReadFile
 
-	// now returns the current time (overridable for tests).
-	now func() time.Time
-
 	// contentName is the filename of the current content blob.
 	contentName string
 }
@@ -165,7 +162,6 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 		metadataSeal: metadataSeal,
 		metadataOpen: metadataOpen,
 		xor:          xor,
-		now:          time.Now,
 	}
 	if err := store.load(); err != nil {
 		return nil, err
@@ -289,9 +285,8 @@ func (s *Store) CurrentContentID() []byte {
 
 // persist encodes the current state to the backing filesystem.
 func (s *Store) persist() error {
-	now := s.now()
 	uc := usercontent.UserContent{
-		CreatedAt: now,
+		CreatedAt: time.Now(),
 		Files:     s.files,
 	}
 	if len(s.peers) > 0 {

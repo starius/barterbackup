@@ -11,6 +11,7 @@ import (
 	"github.com/starius/barterbackup/internal/keys"
 	"github.com/starius/barterbackup/internal/usercontent"
 	"github.com/stretchr/testify/require"
+	"testing/synctest"
 )
 
 // readAll pulls an entire file into memory for assertions.
@@ -33,37 +34,39 @@ func readAll(t *testing.T, fsys Filesystem, name string) []byte {
 func TestStoreSetGetDelete(t *testing.T) {
 	t.Parallel()
 
-	fsys := NewMapFilesystem()
-	master := keys.DeriveMasterPriv("local-store-master")
+	synctest.Test(t, func(t *testing.T) {
+		fsys := NewMapFilesystem()
+		master := keys.DeriveMasterPriv("local-store-master")
 
-	store, err := NewStore(fsys, master)
-	require.NoError(t, err)
+		store, err := NewStore(fsys, master)
+		require.NoError(t, err)
 
-	require.NoError(t, store.SetFile(t.Context(), "foo.txt", []byte("secret payload")))
+		require.NoError(t, store.SetFile(t.Context(), "foo.txt", []byte("secret payload")))
 
-	data, err := store.GetFile(t.Context(), "foo.txt")
-	require.NoError(t, err)
-	require.Equal(t, []byte("secret payload"), data)
+		data, err := store.GetFile(t.Context(), "foo.txt")
+		require.NoError(t, err)
+		require.Equal(t, []byte("secret payload"), data)
 
-	blob := readAll(t, fsys, firstContentFile(t, fsys))
-	require.NotContains(t, string(blob), "secret payload")
+		blob := readAll(t, fsys, firstContentFile(t, fsys))
+		require.NotContains(t, string(blob), "secret payload")
 
-	reloaded, err := NewStore(fsys, master)
-	require.NoError(t, err)
+		reloaded, err := NewStore(fsys, master)
+		require.NoError(t, err)
 
-	reloadedData, err := reloaded.GetFile(t.Context(), "foo.txt")
-	require.NoError(t, err)
-	require.Equal(t, []byte("secret payload"), reloadedData)
-	require.Equal(t, []string{"foo.txt"}, mustList(t, reloaded))
+		reloadedData, err := reloaded.GetFile(t.Context(), "foo.txt")
+		require.NoError(t, err)
+		require.Equal(t, []byte("secret payload"), reloadedData)
+		require.Equal(t, []string{"foo.txt"}, mustList(t, reloaded))
 
-	require.NoError(t, reloaded.DeleteFile(t.Context(), "foo.txt"))
+		require.NoError(t, reloaded.DeleteFile(t.Context(), "foo.txt"))
 
-	_, err = reloaded.GetFile(t.Context(), "foo.txt")
-	require.ErrorIs(t, err, ErrFileNotFound)
-	require.Empty(t, mustList(t, reloaded))
+		_, err = reloaded.GetFile(t.Context(), "foo.txt")
+		require.ErrorIs(t, err, ErrFileNotFound)
+		require.Empty(t, mustList(t, reloaded))
 
-	blobAfterDelete := readAll(t, fsys, firstContentFile(t, fsys))
-	require.NotContains(t, string(blobAfterDelete), "secret payload")
+		blobAfterDelete := readAll(t, fsys, firstContentFile(t, fsys))
+		require.NotContains(t, string(blobAfterDelete), "secret payload")
+	})
 }
 
 // TestStoreEmptyFilesystemError ensures nil filesystem is rejected.
@@ -87,26 +90,28 @@ func TestShortMasterRejected(t *testing.T) {
 func TestAtomicPersistFailureDoesNotClobberExisting(t *testing.T) {
 	t.Parallel()
 
-	baseFS := NewMapFilesystem()
-	master := keys.DeriveMasterPriv("atomic-master")
+	synctest.Test(t, func(t *testing.T) {
+		baseFS := NewMapFilesystem()
+		master := keys.DeriveMasterPriv("atomic-master")
 
-	store, err := NewStore(baseFS, master)
-	require.NoError(t, err)
-	require.NoError(t, store.SetFile(t.Context(), "foo.txt", []byte("v1")))
+		store, err := NewStore(baseFS, master)
+		require.NoError(t, err)
+		require.NoError(t, store.SetFile(t.Context(), "foo.txt", []byte("v1")))
 
-	failing := &failingFS{delegate: baseFS, failOnce: true}
-	storeFail, err := NewStore(failing, master)
-	require.NoError(t, err)
+		failing := &failingFS{delegate: baseFS, failOnce: true}
+		storeFail, err := NewStore(failing, master)
+		require.NoError(t, err)
 
-	err = storeFail.SetFile(t.Context(), "foo.txt", []byte("v2"))
-	require.Error(t, err, "persist should fail and leave prior content intact")
+		err = storeFail.SetFile(t.Context(), "foo.txt", []byte("v2"))
+		require.Error(t, err, "persist should fail and leave prior content intact")
 
-	reloaded, err := NewStore(baseFS, master)
-	require.NoError(t, err)
+		reloaded, err := NewStore(baseFS, master)
+		require.NoError(t, err)
 
-	data, err := reloaded.GetFile(t.Context(), "foo.txt")
-	require.NoError(t, err)
-	require.Equal(t, []byte("v1"), data)
+		data, err := reloaded.GetFile(t.Context(), "foo.txt")
+		require.NoError(t, err)
+		require.Equal(t, []byte("v1"), data)
+	})
 }
 
 func TestLoadChoosesNewerAndDeletesOlder(t *testing.T) {
@@ -190,25 +195,26 @@ func TestRecoveryInfoSummaries(t *testing.T) {
 func TestFilenameContentIDMismatchFails(t *testing.T) {
 	t.Parallel()
 
-	fsys := NewMapFilesystem()
-	master := keys.DeriveMasterPriv("mismatch")
+	synctest.Test(t, func(t *testing.T) {
+		fsys := NewMapFilesystem()
+		master := keys.DeriveMasterPriv("mismatch")
 
-	store, err := NewStore(fsys, master)
-	require.NoError(t, err)
+		store, err := NewStore(fsys, master)
+		require.NoError(t, err)
 
-	store.now = func() time.Time { return time.Unix(10, 0) }
-	require.NoError(t, store.SetFile(t.Context(), "a.txt", []byte("v1")))
-	firstName := currentContentName(t, fsys)
+		require.NoError(t, store.SetFile(t.Context(), "a.txt", []byte("v1")))
+		firstName := currentContentName(t, fsys)
 
-	_, secondName := writeContentFile(t, fsys, master, time.Unix(20, 0), "a.txt", []byte("v2"))
-	require.NotEqual(t, firstName, secondName)
+		_, secondName := writeContentFile(t, fsys, master, time.Unix(20, 0), "a.txt", []byte("v2"))
+		require.NotEqual(t, firstName, secondName)
 
-	// Corrupt: rename newer content to the old filename, so CID implied by name mismatches body.
-	require.NoError(t, fsys.Remove(firstName))
-	require.NoError(t, fsys.Rename(secondName, firstName))
+		// Corrupt: rename newer content to the old filename, so CID implied by name mismatches body.
+		require.NoError(t, fsys.Remove(firstName))
+		require.NoError(t, fsys.Rename(secondName, firstName))
 
-	_, err = NewStore(fsys, master)
-	require.Error(t, err)
+		_, err = NewStore(fsys, master)
+		require.Error(t, err)
+	})
 }
 
 // mustList wraps ListFiles and fails the test on error.
@@ -308,7 +314,6 @@ func bareStore(t *testing.T, fsys Filesystem, master []byte) *Store {
 		metadataSeal: metadataSeal,
 		metadataOpen: metadataOpen,
 		xor:          xor,
-		now:          time.Now,
 	}
 }
 
