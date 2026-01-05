@@ -1,12 +1,17 @@
 package bbnode
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"errors"
+	"io"
 	"sort"
 
 	"github.com/cretz/bine/torutil"
 	torutiled25519 "github.com/cretz/bine/torutil/ed25519"
 	"github.com/starius/barterbackup/bbrpc"
+	"github.com/starius/barterbackup/internal/bbnode/userstorage"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -82,6 +87,115 @@ func (n *Node) SetContentRevision(_ context.Context, req *bbrpc.SetContentRevisi
 }
 
 // Download is not yet implemented.
-func (n *Node) Download(context.Context, *bbrpc.DownloadRequest) (*bbrpc.DownloadResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "download not implemented")
+func (n *Node) Download(ctx context.Context, req *bbrpc.DownloadRequest) (*bbrpc.DownloadResponse, error) {
+	if ctx.Err() != nil {
+		if st := status.FromContextError(ctx.Err()); st != nil {
+			return nil, st.Err()
+		}
+		return nil, ctx.Err()
+	}
+	if n.store == nil {
+		return nil, status.Error(codes.FailedPrecondition, "node not started")
+	}
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is nil")
+	}
+	if len(req.GetContentId()) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "content id is required")
+	}
+	if req.GetOffset() < 0 {
+		return nil, status.Error(codes.InvalidArgument, "offset must be non-negative")
+	}
+	cid := n.store.CurrentContentID()
+	if len(cid) == 0 || !bytes.Equal(cid, req.GetContentId()) {
+		return nil, status.Error(codes.NotFound, "content not found")
+	}
+
+	reader, _, err := n.store.OpenContent()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "open content: %v", err)
+	}
+	defer reader.Close()
+
+	totalLen := reader.Size()
+	if req.GetOffset() > totalLen {
+		return nil, status.Error(codes.InvalidArgument, "offset beyond end of content")
+	}
+
+	sha, err := hashContent(reader)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "hash content: %v", err)
+	}
+
+	chunk, err := readChunk(reader, req.GetOffset(), 16*1024)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "read content: %v", err)
+	}
+
+	return &bbrpc.DownloadResponse{
+		TotalLength: totalLen,
+		Sha256:      sha,
+		Section: &bbrpc.DownloadResponse_RawBytes{
+			RawBytes: &bbrpc.RawBytes{Value: chunk},
+		},
+	}, nil
+}
+
+// hashContent returns a SHA-256 of the entire content using random-access reads.
+func hashContent(reader userstorage.ReadFile) ([]byte, error) {
+	hasher := sha256.New()
+	buf := make([]byte, 32*1024)
+	var off int64
+	for off < reader.Size() {
+		n, err := reader.ReadAt(buf, off)
+		if n > 0 {
+			if _, werr := hasher.Write(buf[:n]); werr != nil {
+				return nil, werr
+			}
+			off += int64(n)
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			return nil, errors.New("short read while hashing")
+		}
+	}
+	return hasher.Sum(nil), nil
+}
+
+// readChunk reads up to length bytes from offset in the content.
+func readChunk(reader userstorage.ReadFile, offset int64, length int) ([]byte, error) {
+	if length < 0 {
+		return nil, errors.New("length must be non-negative")
+	}
+	if offset < 0 {
+		return nil, errors.New("offset must be non-negative")
+	}
+	if offset >= reader.Size() {
+		return []byte{}, nil
+	}
+	toRead := int64(length)
+	if max := reader.Size() - offset; toRead > max {
+		toRead = max
+	}
+	buf := make([]byte, toRead)
+	var readTotal int64
+	for readTotal < toRead {
+		n, err := reader.ReadAt(buf[readTotal:], offset+readTotal)
+		readTotal += int64(n)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			return nil, errors.New("short read")
+		}
+	}
+	return buf[:readTotal], nil
 }

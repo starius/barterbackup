@@ -288,6 +288,18 @@ func (s *Store) ContentLength() int64 {
 	return s.contentLen
 }
 
+// OpenContent returns a fresh reader for the current content file along with its ID.
+func (s *Store) OpenContent() (ReadFile, []byte, error) {
+	if s.contentName == "" {
+		return nil, nil, ErrFileNotFound
+	}
+	reader, err := s.fs.OpenRead(s.contentName)
+	if err != nil {
+		return nil, nil, err
+	}
+	return reader, append([]byte(nil), s.contentID...), nil
+}
+
 // persist encodes the current state to the backing filesystem.
 func (s *Store) persist() error {
 	uc := usercontent.UserContent{
