@@ -39,10 +39,10 @@ type Node struct {
 	bbrpc.UnimplementedBarterBackupServerServer
 	clirpc.UnimplementedBarterBackupClientServer
 
-	net        Network
-	priv       ed25519.PrivateKey
-	addr       string
-	stop       func() error
+	net  Network
+	priv ed25519.PrivateKey
+	addr string
+	stop func() error
 
 	mu    sync.RWMutex
 	conns map[string]*pooledConn
@@ -52,6 +52,10 @@ type Node struct {
 
 	store *userstorage.Store
 	state nodeState
+
+	peers      map[string]struct{}
+	storageCfg clirpc.StorageConfig
+	knownPubs  map[string]struct{}
 
 	startedAt time.Time
 }
@@ -100,11 +104,13 @@ func New(seed string, netw Network, storageDir string) (*Node, error) {
 	}
 
 	return &Node{
-		net:        netw,
-		priv:       priv,
-		addr:       addr,
-		conns:      make(map[string]*pooledConn),
-		store:      store,
+		net:       netw,
+		priv:      priv,
+		addr:      addr,
+		conns:     make(map[string]*pooledConn),
+		peers:     make(map[string]struct{}),
+		knownPubs: make(map[string]struct{}),
+		store:     store,
 	}, nil
 }
 

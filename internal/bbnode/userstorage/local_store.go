@@ -283,6 +283,11 @@ func (s *Store) CurrentContentID() []byte {
 	return append([]byte(nil), s.contentID...)
 }
 
+// ContentLength returns the byte length of the current persisted content blob.
+func (s *Store) ContentLength() int64 {
+	return s.contentLen
+}
+
 // persist encodes the current state to the backing filesystem.
 func (s *Store) persist() error {
 	uc := usercontent.UserContent{
