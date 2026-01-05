@@ -19,6 +19,8 @@ github.com/jessevdk/go-flags v1.5.0 h1:1jKYvbxEjfUl0fmqTCOfonvskHHXMjBySTLW4y9LF
 github.com/jessevdk/go-flags v1.5.0/go.mod h1:Fw0T6WPc1dYxT4mKEZRfG5kJhaTDP9pj1c2EWnYs/m4=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+github.com/starius/aesctrat v0.0.0-20220326090028-28013a25aede h1:sOuZO3SpghKrOA2UqPICdlu1ujXRA9MCCH4pEzIdI6U=
+github.com/starius/aesctrat v0.0.0-20220326090028-28013a25aede/go.mod h1:cxFy/72sdNOPDEYhI06Sy3jvJ9h+1PuikCfNQElBWK0=
 github.com/starius/flock v0.0.0-20211126131212-41983f66ca4f h1:Du/bz6LDTMS7wtoPqDAVXWcy9kmmlpOaZnGmM6hrtnE=
 github.com/starius/flock v0.0.0-20211126131212-41983f66ca4f/go.mod h1:YJ7suxRrqfzM0tA83a9RCLiM7mpiRDCojpyJsymRgO0=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=

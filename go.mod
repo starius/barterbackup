@@ -19,6 +19,7 @@ require (
 	github.com/ericlagergren/polyval v0.0.0-20220411101811-e25bc10ba391 // indirect
 	github.com/ericlagergren/subtle v0.0.0-20220507045147-890d697da010 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/starius/aesctrat v0.0.0-20220326090028-28013a25aede // indirect
 	golang.org/x/net v0.26.0 // indirect
 	golang.org/x/sys v0.36.0 // indirect
 	golang.org/x/text v0.16.0 // indirect

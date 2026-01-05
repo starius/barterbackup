@@ -3,14 +3,13 @@ package userstorage
 import (
 	"bytes"
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"errors"
 	"io"
 	"io/fs"
 	"sort"
 	"time"
 
+	"github.com/starius/aesctrat"
 	"github.com/starius/barterbackup/internal/keys"
 	"github.com/starius/barterbackup/internal/usercontent"
 	"github.com/starius/barterbackup/storedpb"
@@ -56,8 +55,8 @@ type Store struct {
 	// fs is the backing filesystem implementation.
 	fs Filesystem
 
-	// files holds the plaintext file bodies keyed by name.
-	files map[string][]byte
+	// files holds the file bodies keyed by name.
+	files map[string]usercontent.File
 
 	// contentID is the last persisted content identifier.
 	contentID []byte
@@ -82,6 +81,9 @@ type Store struct {
 
 	// contentLen is the byte length of the stored content blob.
 	contentLen int64
+
+	// contentRead keeps the current content file open for random access.
+	contentRead ReadFile
 }
 
 // NewStore loads persisted state from the provided filesystem.
@@ -112,11 +114,11 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	xor := makeXORKeyStream(newAESBlock(fileKey))
+	xor := makeXORKeyStream(fileKey)
 
 	store := &Store{
 		fs:           fsys,
-		files:        make(map[string][]byte),
+		files:        make(map[string]usercontent.File),
 		contentSeal:  contentSeal,
 		contentOpen:  contentOpen,
 		metadataSeal: metadataSeal,
@@ -139,30 +141,8 @@ func (s *Store) load() error {
 		}
 		return err
 	}
-	defer reader.Close()
-	uc, cid, err := usercontent.ParseContentFile(
-		reader, s.contentOpen, s.metadataOpen, s.xor,
-	)
-	if err != nil {
-		return err
-	}
-	s.contentLen = reader.Size()
 
-	s.files = make(map[string][]byte, len(uc.Files))
-	for name, file := range uc.Files {
-		buf := make([]byte, file.Size)
-		if file.Size > 0 {
-			_, err := file.Body.ReadAt(buf, 0)
-			if err != nil && !errors.Is(err, io.EOF) {
-				return err
-			}
-		}
-		s.files[name] = buf
-	}
-
-	s.contentID = append([]byte(nil), cid...)
-	s.peers = append([]*storedpb.Peer(nil), uc.Peers...)
-	return nil
+	return s.replaceContent(reader)
 }
 
 // setFile stores or updates a plaintext file and re-persists content.
@@ -170,7 +150,11 @@ func (s *Store) setFile(name string, data []byte) error {
 	if name == "" {
 		return errors.New("file name is empty")
 	}
-	s.files[name] = append([]byte(nil), data...)
+	s.files[name] = usercontent.File{
+		Body: bytes.NewReader(data),
+		Size: int64(len(data)),
+	}
+
 	return s.persist()
 }
 
@@ -185,7 +169,22 @@ func (s *Store) getFile(name string) ([]byte, error) {
 	if !ok {
 		return nil, ErrFileNotFound
 	}
-	return append([]byte(nil), data...), nil
+	buf := make([]byte, data.Size)
+	read := int64(0)
+	for read < data.Size {
+		n, err := data.Body.ReadAt(buf[read:], read)
+		read += int64(n)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		if err == io.EOF {
+			break
+		}
+	}
+	if read != data.Size {
+		return nil, errors.New("short read")
+	}
+	return buf, nil
 }
 
 // GetFile retrieves a persisted file by name.
@@ -199,6 +198,7 @@ func (s *Store) deleteFile(name string) error {
 		return ErrFileNotFound
 	}
 	delete(s.files, name)
+
 	return s.persist()
 }
 
@@ -227,7 +227,7 @@ func (s *Store) persist() error {
 	now := time.Now()
 	uc := usercontent.UserContent{
 		CreatedAt: now,
-		Files:     cloneFiles(s.files),
+		Files:     s.files,
 	}
 	if len(s.peers) > 0 {
 		uc.Peers = append([]*storedpb.Peer(nil), s.peers...)
@@ -253,9 +253,20 @@ func (s *Store) persist() error {
 		return err
 	}
 	s.contentLen = cw.n
+	if err := writer.Close(); err != nil {
+		return err
+	}
+
+	reader, err := s.fs.OpenRead(contentFileName)
+	if err != nil {
+		return err
+	}
+	if err := s.replaceContent(reader); err != nil {
+		return err
+	}
 
 	s.contentID = append([]byte(nil), cid...)
-	s.peers = append([]*storedpb.Peer(nil), uc.Peers...)
+
 	return nil
 }
 
@@ -279,59 +290,29 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// cloneFiles converts plaintext data into usercontent.File wrappers.
-func cloneFiles(files map[string][]byte) map[string]usercontent.File {
-	out := make(map[string]usercontent.File, len(files))
-	for name, data := range files {
-		out[name] = usercontent.File{
-			Body: bytes.NewReader(data),
-			Size: int64(len(data)),
-		}
-	}
-	return out
-}
-
-// newAESBlock constructs an AES block or panics on failure.
-func newAESBlock(key []byte) cipher.Block {
-	blk, err := aes.NewCipher(key)
-	if err != nil {
-		panic(err)
-	}
-	return blk
-}
-
 // makeXORKeyStream builds a CTR keystream with random access support.
-func makeXORKeyStream(block cipher.Block) usercontent.XORKeyStreamAt {
-	blockSize := block.BlockSize()
-	return func(dst, src, iv []byte, offset uint64) {
-		if len(dst) != len(src) {
-			panic("usercontent: xor buffer length mismatch")
-		}
-		counter := make([]byte, blockSize)
-		copy(counter, iv)
-		blocksToSkip := offset / uint64(blockSize)
-		addCounter(counter, blocksToSkip)
-		buf := make([]byte, blockSize)
-		written := 0
-		skip := int(offset % uint64(blockSize))
-		for written < len(src) {
-			block.Encrypt(buf, counter)
-			for i := skip; i < blockSize && written < len(src); i++ {
-				dst[written] = src[written] ^ buf[i]
-				written++
-			}
-			skip = 0
-			addCounter(counter, 1)
-		}
-	}
+func makeXORKeyStream(key []byte) usercontent.XORKeyStreamAt {
+	ctr := aesctrat.NewAesCtr(key)
+	return ctr.XORKeyStreamAt
 }
 
-// addCounter increments a big-endian counter buffer by delta.
-func addCounter(counter []byte, delta uint64) {
-	carry := delta
-	for i := len(counter) - 1; i >= 0 && carry > 0; i-- {
-		sum := uint64(counter[i]) + (carry & 0xff)
-		counter[i] = byte(sum)
-		carry = carry>>8 + sum>>8
+// replaceContent swaps in a new content reader and rebuilds in-memory state.
+func (s *Store) replaceContent(reader ReadFile) error {
+	uc, cid, err := usercontent.ParseContentFile(
+		reader, s.contentOpen, s.metadataOpen, s.xor,
+	)
+	if err != nil {
+		_ = reader.Close()
+		return err
 	}
+	if s.contentRead != nil {
+		_ = s.contentRead.Close()
+	}
+	s.contentRead = reader
+	s.contentLen = reader.Size()
+	s.files = uc.Files
+	s.contentID = append([]byte(nil), cid...)
+	s.peers = append([]*storedpb.Peer(nil), uc.Peers...)
+
+	return nil
 }
