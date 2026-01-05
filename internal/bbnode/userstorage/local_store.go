@@ -114,7 +114,7 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	xor := makeXORKeyStream(fileKey)
+	xor := aesctrat.NewAesCtr(fileKey).XORKeyStreamAt
 
 	store := &Store{
 		fs:           fsys,
@@ -145,8 +145,8 @@ func (s *Store) load() error {
 	return s.replaceContent(reader)
 }
 
-// setFile stores or updates a plaintext file and re-persists content.
-func (s *Store) setFile(name string, data []byte) error {
+// SetFile persists or updates a file.
+func (s *Store) SetFile(_ context.Context, name string, data []byte) error {
 	if name == "" {
 		return errors.New("file name is empty")
 	}
@@ -154,17 +154,11 @@ func (s *Store) setFile(name string, data []byte) error {
 		Body: bytes.NewReader(data),
 		Size: int64(len(data)),
 	}
-
 	return s.persist()
 }
 
-// SetFile persists or updates a file.
-func (s *Store) SetFile(_ context.Context, name string, data []byte) error {
-	return s.setFile(name, data)
-}
-
-// getFile returns a copy of the stored file by name.
-func (s *Store) getFile(name string) ([]byte, error) {
+// GetFile retrieves a persisted file by name.
+func (s *Store) GetFile(_ context.Context, name string) ([]byte, error) {
 	data, ok := s.files[name]
 	if !ok {
 		return nil, ErrFileNotFound
@@ -187,39 +181,24 @@ func (s *Store) getFile(name string) ([]byte, error) {
 	return buf, nil
 }
 
-// GetFile retrieves a persisted file by name.
-func (s *Store) GetFile(_ context.Context, name string) ([]byte, error) {
-	return s.getFile(name)
-}
-
-// deleteFile removes a file and re-persists content.
-func (s *Store) deleteFile(name string) error {
+// DeleteFile removes a file from persistent state.
+func (s *Store) DeleteFile(_ context.Context, name string) error {
 	if _, ok := s.files[name]; !ok {
 		return ErrFileNotFound
 	}
 	delete(s.files, name)
-
 	return s.persist()
 }
 
-// DeleteFile removes a file from persistent state.
-func (s *Store) DeleteFile(_ context.Context, name string) error {
-	return s.deleteFile(name)
-}
-
-// listFiles returns sorted file names.
-func (s *Store) listFiles() []string {
+// ListFiles returns the sorted list of file names.
+func (s *Store) ListFiles(_ context.Context) ([]string, error) {
 	names := make([]string, 0, len(s.files))
 	for name := range s.files {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return names
-}
 
-// ListFiles returns the sorted list of file names.
-func (s *Store) ListFiles(_ context.Context) ([]string, error) {
-	return s.listFiles(), nil
+	return names, nil
 }
 
 // persist encodes the current state to the backing filesystem.
@@ -284,16 +263,11 @@ type countingWriter struct {
 	n int64
 }
 
+// Write proxies to the underlying writer and accumulates the byte count.
 func (cw *countingWriter) Write(p []byte) (int, error) {
 	n, err := cw.w.Write(p)
 	cw.n += int64(n)
 	return n, err
-}
-
-// makeXORKeyStream builds a CTR keystream with random access support.
-func makeXORKeyStream(key []byte) usercontent.XORKeyStreamAt {
-	ctr := aesctrat.NewAesCtr(key)
-	return ctr.XORKeyStreamAt
 }
 
 // replaceContent swaps in a new content reader and rebuilds in-memory state.

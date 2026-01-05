@@ -1,6 +1,7 @@
 package userstorage
 
 import (
+	"context"
 	"io"
 	"testing"
 
@@ -34,9 +35,9 @@ func TestStoreSetGetDelete(t *testing.T) {
 	store, err := NewStore(fsys, master)
 	require.NoError(t, err)
 
-	require.NoError(t, store.setFile("foo.txt", []byte("secret payload")))
+	require.NoError(t, store.SetFile(context.Background(), "foo.txt", []byte("secret payload")))
 
-	data, err := store.getFile("foo.txt")
+	data, err := store.GetFile(t.Context(), "foo.txt")
 	require.NoError(t, err)
 	require.Equal(t, []byte("secret payload"), data)
 
@@ -46,16 +47,16 @@ func TestStoreSetGetDelete(t *testing.T) {
 	reloaded, err := NewStore(fsys, master)
 	require.NoError(t, err)
 
-	reloadedData, err := reloaded.getFile("foo.txt")
+	reloadedData, err := reloaded.GetFile(t.Context(), "foo.txt")
 	require.NoError(t, err)
 	require.Equal(t, []byte("secret payload"), reloadedData)
-	require.Equal(t, []string{"foo.txt"}, reloaded.listFiles())
+	require.Equal(t, []string{"foo.txt"}, mustList(t, reloaded))
 
-	require.NoError(t, reloaded.deleteFile("foo.txt"))
+	require.NoError(t, reloaded.DeleteFile(t.Context(), "foo.txt"))
 
-	_, err = reloaded.getFile("foo.txt")
+	_, err = reloaded.GetFile(t.Context(), "foo.txt")
 	require.ErrorIs(t, err, ErrFileNotFound)
-	require.Empty(t, reloaded.listFiles())
+	require.Empty(t, mustList(t, reloaded))
 
 	blobAfterDelete := readAll(t, fsys, contentFileName)
 	require.NotContains(t, string(blobAfterDelete), "secret payload")
@@ -76,4 +77,12 @@ func TestShortMasterRejected(t *testing.T) {
 	fsys := NewMapFilesystem()
 	_, err := NewStore(fsys, []byte("short"))
 	require.Error(t, err)
+}
+
+// mustList wraps ListFiles and fails the test on error.
+func mustList(t *testing.T, store *Store) []string {
+	t.Helper()
+	names, err := store.ListFiles(t.Context())
+	require.NoError(t, err)
+	return names
 }
