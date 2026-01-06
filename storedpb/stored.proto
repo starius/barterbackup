@@ -47,6 +47,9 @@ message Peer {
 
     // score_measured_at is a Unix timestamp (seconds) when score was measured.
     int64 score_measured_at = 3;
+
+    // content_id is the latest content identifier we know for this peer.
+    bytes content_id = 4;
 }
 
 // Metadata is short data that is stored together with the main content on
@@ -57,5 +60,12 @@ message Metadata {
     repeated FileHeader files = 1;
 
     // peers is the list of known peers with some information about them.
+    // Notes on updates:
+    // - Peer updates (content_id, scores) are persisted immediately in
+    //   local storage; this file acts as the durable DB for the daemon.
+    // - Uploads of the whole local content blob are delayed to avoid an
+    //   infinite upload loop when every peer update would change metadata
+    //   and trigger another upload. Local file changes still trigger
+    //   uploads promptly.
     repeated Peer peers = 2;
 }

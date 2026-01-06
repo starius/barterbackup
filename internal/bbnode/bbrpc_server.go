@@ -61,8 +61,8 @@ func (n *Node) PeerExchange(_ context.Context, req *bbrpc.PeerExchangeRequest) (
 	return &bbrpc.PeerExchangeResponse{Peers: peers}, nil
 }
 
-// GetContentRevision reports our current content info; requester fields are empty for now.
-func (n *Node) GetContentRevision(_ context.Context, _ *bbrpc.GetContentRevisionRequest) (*bbrpc.GetContentRevisionResponse, error) {
+// GetContentRevision reports our current content info; requester fields are populated when caller is authenticated.
+func (n *Node) GetContentRevision(ctx context.Context, _ *bbrpc.GetContentRevisionRequest) (*bbrpc.GetContentRevisionResponse, error) {
 	if n.store == nil {
 		return nil, status.Error(codes.FailedPrecondition, "node not started")
 	}
@@ -74,14 +74,60 @@ func (n *Node) GetContentRevision(_ context.Context, _ *bbrpc.GetContentRevision
 			ContentLength: n.store.ContentLength(),
 		}
 	}
+	if pub, err := ClientPubKeyFromContext(ctx); err == nil {
+		n.mu.RLock()
+		if info, ok := n.requester[string(pub)]; ok {
+			rc := *info
+			resp.RequesterContent = &rc
+		}
+		n.mu.RUnlock()
+	}
 	return resp, nil
 }
 
-// SetContentRevision currently accepts the request and returns success without persistence.
-func (n *Node) SetContentRevision(_ context.Context, req *bbrpc.SetContentRevisionRequest) (*bbrpc.SetContentRevisionResponse, error) {
+// SetContentRevision records the caller's requested content to store if it fits policy.
+func (n *Node) SetContentRevision(ctx context.Context, req *bbrpc.SetContentRevisionRequest) (*bbrpc.SetContentRevisionResponse, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is nil")
 	}
+	info := req.GetRequesterContent()
+	if info != nil {
+		if info.GetContentLength() <= 0 {
+			return nil, status.Error(codes.InvalidArgument, "content length must be positive")
+		}
+		const maxContent = 4 * 1024 * 1024
+		if info.GetContentLength() > maxContent {
+			return nil, status.Errorf(codes.InvalidArgument, "content too large: %d > %d", info.GetContentLength(), maxContent)
+		}
+		if len(info.GetContentId()) == 0 {
+			return nil, status.Error(codes.InvalidArgument, "content id required")
+		}
+	}
+
+	pub, err := ClientPubKeyFromContext(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Unauthenticated, "client certificate required")
+	}
+
+	n.mu.Lock()
+	if info == nil {
+		delete(n.requester, string(pub))
+	} else {
+		cp := *info
+		n.requester[string(pub)] = &cp
+	}
+	n.mu.Unlock()
+
+	if info != nil {
+		if err := n.store.SetPeerContentID(pub, info.GetContentId()); err != nil {
+			return nil, status.Errorf(codes.Internal, "persist peer: %v", err)
+		}
+	} else {
+		if err := n.store.RemovePeerContent(pub); err != nil {
+			return nil, status.Errorf(codes.Internal, "remove peer: %v", err)
+		}
+	}
+
 	return &bbrpc.SetContentRevisionResponse{}, nil
 }
 

@@ -167,8 +167,10 @@ type Peer struct {
 	ScoreSeconds int64 `protobuf:"varint,2,opt,name=score_seconds,json=scoreSeconds,proto3" json:"score_seconds,omitempty"`
 	// score_measured_at is a Unix timestamp (seconds) when score was measured.
 	ScoreMeasuredAt int64 `protobuf:"varint,3,opt,name=score_measured_at,json=scoreMeasuredAt,proto3" json:"score_measured_at,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// content_id is the latest content identifier we know for this peer.
+	ContentId     []byte `protobuf:"bytes,4,opt,name=content_id,json=contentId,proto3" json:"content_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Peer) Reset() {
@@ -222,6 +224,13 @@ func (x *Peer) GetScoreMeasuredAt() int64 {
 	return 0
 }
 
+func (x *Peer) GetContentId() []byte {
+	if x != nil {
+		return x.ContentId
+	}
+	return nil
+}
+
 // Metadata is short data that is stored together with the main content on
 // other peers and survives a node reset.
 type Metadata struct {
@@ -230,6 +239,13 @@ type Metadata struct {
 	// after the metadata.
 	Files []*FileHeader `protobuf:"bytes,1,rep,name=files,proto3" json:"files,omitempty"`
 	// peers is the list of known peers with some information about them.
+	// Notes on updates:
+	//   - Peer updates (content_id, scores) are persisted immediately in
+	//     local storage; this file acts as the durable DB for the daemon.
+	//   - Uploads of the whole local content blob are delayed to avoid an
+	//     infinite upload loop when every peer update would change metadata
+	//     and trigger another upload. Local file changes still trigger
+	//     uploads promptly.
 	Peers         []*Peer `protobuf:"bytes,2,rep,name=peers,proto3" json:"peers,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -295,11 +311,13 @@ const file_storedpb_stored_proto_rawDesc = "" +
 	"\vfile_length\x18\x02 \x01(\x03R\n" +
 	"fileLength\x12\x1f\n" +
 	"\vfile_sha256\x18\x03 \x01(\fR\n" +
-	"fileSha256\"z\n" +
+	"fileSha256\"\x99\x01\n" +
 	"\x04Peer\x12!\n" +
 	"\fonion_pubkey\x18\x01 \x01(\fR\vonionPubkey\x12#\n" +
 	"\rscore_seconds\x18\x02 \x01(\x03R\fscoreSeconds\x12*\n" +
-	"\x11score_measured_at\x18\x03 \x01(\x03R\x0fscoreMeasuredAt\"\\\n" +
+	"\x11score_measured_at\x18\x03 \x01(\x03R\x0fscoreMeasuredAt\x12\x1d\n" +
+	"\n" +
+	"content_id\x18\x04 \x01(\fR\tcontentId\"\\\n" +
 	"\bMetadata\x12*\n" +
 	"\x05files\x18\x01 \x03(\v2\x14.storedpb.FileHeaderR\x05files\x12$\n" +
 	"\x05peers\x18\x02 \x03(\v2\x0e.storedpb.PeerR\x05peersB*Z(github.com/starius/barterbackup/storedpbb\x06proto3"

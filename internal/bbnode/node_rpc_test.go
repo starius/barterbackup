@@ -2,6 +2,9 @@ package bbnode
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"testing"
 	"time"
@@ -11,6 +14,8 @@ import (
 	"github.com/starius/barterbackup/internal/netmock"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"testing/synctest"
 )
@@ -175,6 +180,80 @@ func TestDownloadBadContentID(t *testing.T) {
 	require.Equal(t, codes.NotFound, st.Code())
 }
 
+// TestSetContentRevisionValidation enforces size and argument checks.
+func TestSetContentRevisionValidation(t *testing.T) {
+	t.Parallel()
+
+	node := startTestNode(t)
+	t.Cleanup(func() { _ = node.Stop() })
+
+	ctx := peerCtx(t)
+
+	// Too large.
+	_, err := node.SetContentRevision(ctx, &bbrpc.SetContentRevisionRequest{
+		RequesterContent: &bbrpc.ContentInfo{
+			ContentId:     []byte("id"),
+			ContentLength: 5 * 1024 * 1024,
+		},
+	})
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	require.Equal(t, codes.InvalidArgument, st.Code())
+
+	// Missing ID when length set.
+	_, err = node.SetContentRevision(ctx, &bbrpc.SetContentRevisionRequest{
+		RequesterContent: &bbrpc.ContentInfo{
+			ContentLength: 1,
+		},
+	})
+	st, ok = status.FromError(err)
+	require.True(t, ok)
+	require.Equal(t, codes.InvalidArgument, st.Code())
+
+	// Non-positive length.
+	_, err = node.SetContentRevision(ctx, &bbrpc.SetContentRevisionRequest{
+		RequesterContent: &bbrpc.ContentInfo{
+			ContentId:     []byte("id"),
+			ContentLength: 0,
+		},
+	})
+	st, ok = status.FromError(err)
+	require.True(t, ok)
+	require.Equal(t, codes.InvalidArgument, st.Code())
+}
+
+// TestSetContentRevisionPersistsRequester ensures requester content is reflected in GetContentRevision.
+func TestSetContentRevisionPersistsRequester(t *testing.T) {
+	t.Parallel()
+
+	node := startTestNode(t)
+	t.Cleanup(func() { _ = node.Stop() })
+
+	ctx := peerCtx(t)
+
+	info := &bbrpc.ContentInfo{
+		ContentId:     []byte("peer"),
+		ContentLength: 123,
+	}
+	_, err := node.SetContentRevision(ctx, &bbrpc.SetContentRevisionRequest{
+		RequesterContent: info,
+	})
+	require.NoError(t, err)
+
+	resp, err := node.GetContentRevision(ctx, &bbrpc.GetContentRevisionRequest{})
+	require.NoError(t, err)
+	require.NotNil(t, resp.GetRequesterContent())
+	require.Equal(t, info.GetContentId(), resp.GetRequesterContent().GetContentId())
+	require.Equal(t, info.GetContentLength(), resp.GetRequesterContent().GetContentLength())
+
+	// Clearing removes it.
+	_, err = node.SetContentRevision(ctx, &bbrpc.SetContentRevisionRequest{})
+	require.NoError(t, err)
+	resp, err = node.GetContentRevision(ctx, &bbrpc.GetContentRevisionRequest{})
+	require.NoError(t, err)
+	require.Nil(t, resp.GetRequesterContent())
+}
+
 // TestDownloadOffsetValidation checks offset bounds.
 func TestDownloadOffsetValidation(t *testing.T) {
 	t.Parallel()
@@ -217,4 +296,23 @@ func startTestNode(t *testing.T) *Node {
 	require.NoError(t, err)
 	require.NoError(t, node.Start(t.Context()))
 	return node
+}
+
+// peerCtx builds a context containing a fake TLS peer certificate with an ed25519 public key.
+func peerCtx(t *testing.T) context.Context {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	cert := &x509.Certificate{
+		PublicKey: pub,
+	}
+	ti := credentials.TLSInfo{
+		State: tls.ConnectionState{
+			PeerCertificates: []*x509.Certificate{cert},
+		},
+	}
+	ctx := peer.NewContext(context.Background(), &peer.Peer{AuthInfo: ti})
+	_, err = ClientPubKeyFromContext(ctx)
+	require.NoError(t, err)
+	return ctx
 }

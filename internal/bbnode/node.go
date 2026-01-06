@@ -56,6 +56,7 @@ type Node struct {
 	peers      map[string]struct{}
 	storageCfg clirpc.StorageConfig
 	knownPubs  map[string]struct{}
+	requester  map[string]*bbrpc.ContentInfo
 
 	startedAt time.Time
 }
@@ -103,15 +104,26 @@ func New(seed string, netw Network, storageDir string) (*Node, error) {
 		return nil, err
 	}
 
-	return &Node{
+	n := &Node{
 		net:       netw,
 		priv:      priv,
 		addr:      addr,
 		conns:     make(map[string]*pooledConn),
 		peers:     make(map[string]struct{}),
 		knownPubs: make(map[string]struct{}),
+		requester: make(map[string]*bbrpc.ContentInfo),
 		store:     store,
-	}, nil
+	}
+	for _, p := range store.Peers() {
+		if len(p.GetOnionPubkey()) == 0 || len(p.GetContentId()) == 0 {
+			continue
+		}
+		n.requester[string(p.GetOnionPubkey())] = &bbrpc.ContentInfo{
+			ContentId: append([]byte(nil), p.GetContentId()...),
+		}
+	}
+
+	return n, nil
 }
 
 // Start registers the node on the network and starts serving bbrpc.

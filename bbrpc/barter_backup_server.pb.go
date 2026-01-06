@@ -406,6 +406,11 @@ type SetContentRevisionRequest struct {
 	// requester_content is the description of the requester's content which
 	// the requester wants the responder to download and store. Can be empty
 	// if the requester wants to delete their content.
+	// Behavior:
+	//   - If requester_content is provided, both content_id and content_length
+	//     must be set and content_length must be positive.
+	//   - If requester_content is omitted (not set), the responder clears any
+	//     previously recorded requester content.
 	RequesterContent *ContentInfo `protobuf:"bytes,1,opt,name=requester_content,json=requesterContent,proto3" json:"requester_content,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache

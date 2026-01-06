@@ -303,6 +303,64 @@ func (s *Store) ContentHash() ([]byte, error) {
 	return nil, errors.New("hash not supported")
 }
 
+// SetPeerContentID updates or adds a peer entry and persists metadata.
+func (s *Store) SetPeerContentID(pub, cid []byte) error {
+	if len(pub) == 0 {
+		return errors.New("peer pubkey is empty")
+	}
+	if len(cid) == 0 {
+		return errors.New("peer content id is empty")
+	}
+	found := false
+	for _, p := range s.peers {
+		if bytes.Equal(p.GetOnionPubkey(), pub) {
+			p.ContentId = append([]byte(nil), cid...)
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.peers = append(s.peers, &storedpb.Peer{
+			OnionPubkey: append([]byte(nil), pub...),
+			ContentId:   append([]byte(nil), cid...),
+		})
+	}
+	return s.persist()
+}
+
+// RemovePeerContent deletes a peer entry if present and persists metadata.
+func (s *Store) RemovePeerContent(pub []byte) error {
+	if len(pub) == 0 {
+		return errors.New("peer pubkey is empty")
+	}
+	out := s.peers[:0]
+	removed := false
+	for _, p := range s.peers {
+		if bytes.Equal(p.GetOnionPubkey(), pub) {
+			removed = true
+			continue
+		}
+		out = append(out, p)
+	}
+	if !removed {
+		return nil
+	}
+	s.peers = out
+	return s.persist()
+}
+
+// Peers returns a copy of persisted peers.
+func (s *Store) Peers() []*storedpb.Peer {
+	out := make([]*storedpb.Peer, 0, len(s.peers))
+	for _, p := range s.peers {
+		cp := *p
+		cp.ContentId = append([]byte(nil), p.GetContentId()...)
+		cp.OnionPubkey = append([]byte(nil), p.GetOnionPubkey()...)
+		out = append(out, &cp)
+	}
+	return out
+}
+
 // OpenContent returns a fresh reader for the current content file along with its ID.
 func (s *Store) OpenContent() (ReadFile, []byte, error) {
 	if s.contentName == "" {

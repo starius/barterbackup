@@ -83,6 +83,11 @@ message SetContentRevisionRequest {
     // requester_content is the description of the requester's content which
     // the requester wants the responder to download and store. Can be empty
     // if the requester wants to delete their content.
+    // Behavior:
+    // - If requester_content is provided, both content_id and content_length
+    //   must be set and content_length must be positive.
+    // - If requester_content is omitted (not set), the responder clears any
+    //   previously recorded requester content.
     ContentInfo requester_content = 1;
 }
 
