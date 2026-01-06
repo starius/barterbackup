@@ -69,6 +69,29 @@ func TestStoreSetGetDelete(t *testing.T) {
 	})
 }
 
+// TestForeignContentIgnored ensures undecipherable content files are skipped, not treated as errors.
+func TestForeignContentIgnored(t *testing.T) {
+	t.Parallel()
+
+	fsys := NewMapFilesystem()
+	// Write a foreign content file with a name that cannot be parsed as our content ID.
+	w, err := fsys.OpenWrite("foreign")
+	require.NoError(t, err)
+	_, err = w.Write([]byte("data"))
+	require.NoError(t, err)
+	require.NoError(t, w.Sync())
+	require.NoError(t, w.Close())
+
+	master := keys.DeriveMasterPriv("foreign-ignore")
+	store, err := NewStore(fsys, master)
+	require.NoError(t, err)
+	require.Empty(t, store.CurrentContentID())
+
+	// Subsequent writes should work.
+	require.NoError(t, store.SetFile(t.Context(), "a.txt", []byte("payload")))
+	require.NotEmpty(t, store.CurrentContentID())
+}
+
 // TestStoreEmptyFilesystemError ensures nil filesystem is rejected.
 func TestStoreEmptyFilesystemError(t *testing.T) {
 	t.Parallel()

@@ -606,6 +606,11 @@ func (s *Store) scanContentFiles() ([]contentCandidate, []contentCandidate, erro
 		if name == peersMetadataName {
 			continue
 		}
+
+		// Skip files whose names are not decryptable as our content IDs (likely peers' blobs).
+		if _, err := usercontent.ParseContentID([]byte(name), s.contentOpen); err != nil {
+			continue
+		}
 		reader, err := s.fs.OpenRead(name)
 		if err != nil {
 			continue
