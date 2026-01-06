@@ -1,8 +1,10 @@
 package bbnode
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -57,6 +59,7 @@ type Node struct {
 	storageCfg clirpc.StorageConfig
 	knownPubs  map[string]struct{}
 	requester  map[string]*bbrpc.ContentInfo
+	downloads  map[string]context.CancelFunc
 
 	startedAt time.Time
 }
@@ -112,6 +115,7 @@ func New(seed string, netw Network, storageDir string) (*Node, error) {
 		peers:     make(map[string]struct{}),
 		knownPubs: make(map[string]struct{}),
 		requester: make(map[string]*bbrpc.ContentInfo),
+		downloads: make(map[string]context.CancelFunc),
 		store:     store,
 	}
 	for _, p := range store.Peers() {
@@ -167,6 +171,18 @@ func (n *Node) Start(ctx context.Context) error {
 	// Start background eviction of idle connections.
 	n.startEvictor()
 
+	valid := make(map[string]struct{})
+	if cid := n.store.CurrentContentID(); len(cid) > 0 {
+		valid[string(cid)] = struct{}{}
+	}
+	for pubKey, info := range n.requester {
+		if len(info.GetContentId()) > 0 {
+			valid[string(info.GetContentId())] = struct{}{}
+			n.schedulePeerDownload([]byte(pubKey), info.GetContentId())
+		}
+	}
+	_ = n.store.CleanupForeign(valid)
+
 	return nil
 }
 
@@ -180,6 +196,12 @@ func (n *Node) Stop() error {
 		return nil
 	}
 	n.stopEvictor()
+	n.mu.Lock()
+	for _, cancel := range n.downloads {
+		cancel()
+	}
+	n.downloads = make(map[string]context.CancelFunc)
+	n.mu.Unlock()
 	err := n.stop()
 	n.stop = nil
 
@@ -355,4 +377,141 @@ func (n *Node) evictIdle(idle time.Duration) {
 		}
 	}
 	n.mu.Unlock()
+}
+
+func (n *Node) schedulePeerDownload(pub, cid []byte) {
+	if len(cid) == 0 {
+		return
+	}
+	n.mu.Lock()
+	if cancel := n.downloads[string(pub)]; cancel != nil {
+		cancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	n.downloads[string(pub)] = cancel
+	n.mu.Unlock()
+
+	go n.downloadPeerContent(ctx, pub, cid)
+}
+
+func (n *Node) cancelDownload(pub []byte) {
+	n.mu.Lock()
+	if cancel := n.downloads[string(pub)]; cancel != nil {
+		cancel()
+		delete(n.downloads, string(pub))
+	}
+	n.mu.Unlock()
+}
+
+func (n *Node) downloadPeerContent(ctx context.Context, pub, cid []byte) {
+	addr := torutil.OnionServiceIDFromV3PublicKey(torutiled25519.PublicKey(pub)) + ".onion"
+
+	prev := []byte{}
+	n.mu.RLock()
+	if info, ok := n.requester[string(pub)]; ok {
+		prev = append([]byte(nil), info.GetContentId()...)
+	}
+	n.mu.RUnlock()
+
+	if n.store.ContentExists(cid) {
+		n.cancelDownload(pub)
+		return
+	}
+
+	client, conn, err := n.dialPeer(ctx, addr)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	var prevReader userstorage.ReadFile
+	if len(prev) > 0 && n.store.ContentExists(prev) {
+		prevReader, _ = n.store.OpenContentByID(prev)
+	}
+	defer func() {
+		if prevReader != nil {
+			_ = prevReader.Close()
+		}
+	}()
+
+	hasher := sha256.New()
+	writeErr := n.store.WriteContentBlob(cid, func(w userstorage.WriteFile) error {
+		offset := int64(0)
+		var total int64 = -1
+		var expectedSha []byte
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			req := &bbrpc.DownloadRequest{
+				ContentId: cid,
+				Offset:    offset,
+			}
+			if len(prev) > 0 {
+				req.ReferenceContentId = prev
+			}
+			resp, err := client.Download(ctx, req)
+			if err != nil {
+				return err
+			}
+			if total == -1 {
+				total = resp.GetTotalLength()
+				expectedSha = resp.GetSha256()
+			}
+			switch sec := resp.Section.(type) {
+			case *bbrpc.DownloadResponse_RawBytes:
+				data := sec.RawBytes.GetValue()
+				if len(data) == 0 {
+					return errors.New("empty raw bytes")
+				}
+				if _, err := hasher.Write(data); err != nil {
+					return err
+				}
+				if _, err := w.Write(data); err != nil {
+					return err
+				}
+				offset += int64(len(data))
+			case *bbrpc.DownloadResponse_Reference:
+				if prevReader == nil {
+					return errors.New("reference provided without prev content")
+				}
+				ref := sec.Reference
+				data, err := readChunk(prevReader, ref.GetOffsetInReference(), int(ref.GetLength()))
+				if err != nil {
+					return err
+				}
+				if _, err := hasher.Write(data); err != nil {
+					return err
+				}
+				if _, err := w.Write(data); err != nil {
+					return err
+				}
+				offset += int64(len(data))
+			default:
+				return errors.New("unknown download section")
+			}
+
+			if offset >= total {
+				break
+			}
+		}
+		if len(expectedSha) > 0 && !bytes.Equal(hasher.Sum(nil), expectedSha) {
+			return errors.New("peer content hash mismatch")
+		}
+		return nil
+	})
+
+	if writeErr != nil {
+		n.store.RemoveContentByID(cid)
+		n.cancelDownload(pub)
+		return
+	}
+
+	// Cleanup previous content if different.
+	if len(prev) > 0 && !bytes.Equal(prev, cid) {
+		_ = n.store.RemoveContentByID(prev)
+	}
+	n.cancelDownload(pub)
 }

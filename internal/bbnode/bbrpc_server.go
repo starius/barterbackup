@@ -122,10 +122,12 @@ func (n *Node) SetContentRevision(ctx context.Context, req *bbrpc.SetContentRevi
 		if err := n.store.SetPeerContentID(pub, info.GetContentId()); err != nil {
 			return nil, status.Errorf(codes.Internal, "persist peer: %v", err)
 		}
+		n.schedulePeerDownload(pub, info.GetContentId())
 	} else {
 		if err := n.store.RemovePeerContent(pub); err != nil {
 			return nil, status.Errorf(codes.Internal, "remove peer: %v", err)
 		}
+		n.cancelDownload(pub)
 	}
 
 	return &bbrpc.SetContentRevisionResponse{}, nil

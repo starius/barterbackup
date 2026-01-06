@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -572,6 +573,91 @@ func contentFileNameFor(cid []byte) string {
 	// Filenames are the raw content ID bytes so our content is indistinguishable
 	// from peers' files once the filesystem wrapper encrypts names.
 	return string(cid)
+}
+
+// ContentExists reports whether a file named by the content ID exists.
+func (s *Store) ContentExists(cid []byte) bool {
+	reader, err := s.fs.OpenRead(contentFileNameFor(cid))
+	if err != nil {
+		return false
+	}
+	_ = reader.Close()
+	return true
+}
+
+// OpenContentByID opens any content blob by ID without parsing.
+func (s *Store) OpenContentByID(cid []byte) (ReadFile, error) {
+	return s.fs.OpenRead(contentFileNameFor(cid))
+}
+
+// WriteContentBlob streams bytes into a temporary file then renames it to the cid filename.
+func (s *Store) WriteContentBlob(cid []byte, writeFn func(w WriteFile) error) error {
+	if len(cid) == 0 {
+		return errors.New("cid is empty")
+	}
+	tmpName := "tmp-peer-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	w, err := s.fs.OpenWrite(tmpName)
+	if err != nil {
+		return err
+	}
+	written := false
+	defer func() {
+		if !written {
+			_ = s.fs.Remove(tmpName)
+		}
+	}()
+
+	if err := writeFn(w); err != nil {
+		_ = w.Close()
+		return err
+	}
+	if err := w.Sync(); err != nil {
+		_ = w.Close()
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	written = true
+
+	newName := contentFileNameFor(cid)
+	if err := s.fs.Rename(tmpName, newName); err != nil {
+		return err
+	}
+	return nil
+}
+
+// RemoveContentByID removes a content file if present.
+func (s *Store) RemoveContentByID(cid []byte) error {
+	return s.fs.Remove(contentFileNameFor(cid))
+}
+
+// CleanupForeign removes any files that are neither our own current content nor in valid map.
+// valid keys are raw content ID strings.
+func (s *Store) CleanupForeign(valid map[string]struct{}) error {
+	names, err := s.fs.List()
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		if name == peersMetadataName {
+			continue
+		}
+		if name == s.contentName {
+			continue
+		}
+		if _, ok := valid[name]; ok {
+			continue
+		}
+		// Skip names that parse as our own content; they are handled elsewhere.
+		if _, err := usercontent.ParseContentID([]byte(name), s.contentOpen); err == nil {
+			continue
+		}
+		if err := s.fs.Remove(name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func chooseLatest(a, b contentCandidate) contentCandidate {
