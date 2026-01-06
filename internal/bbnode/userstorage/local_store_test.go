@@ -217,6 +217,52 @@ func TestFilenameContentIDMismatchFails(t *testing.T) {
 	})
 }
 
+// TestPeerMetadataSidecar ensures peer metadata is persisted without rewriting content.
+func TestPeerMetadataSidecar(t *testing.T) {
+	t.Parallel()
+
+	fsys := NewMapFilesystem()
+	master := keys.DeriveMasterPriv("peer-meta")
+
+	store, err := NewStore(fsys, master)
+	require.NoError(t, err)
+
+	require.NoError(t, store.SetFile(t.Context(), "a.txt", []byte("data")))
+	initialCID := store.CurrentContentID()
+
+	peerPub := []byte("peer-pub")
+	peerCID := []byte("peer-cid")
+	require.NoError(t, store.SetPeerContentID(peerPub, peerCID))
+
+	// Content should remain unchanged.
+	require.Equal(t, initialCID, store.CurrentContentID())
+
+	// Metadata sidecar should exist.
+	names, err := fsys.List()
+	require.NoError(t, err)
+	foundMeta := false
+	for _, n := range names {
+		if n == peersMetadataName {
+			foundMeta = true
+		}
+	}
+	require.True(t, foundMeta, "metadata sidecar not found")
+
+	reloaded, err := NewStore(fsys, master)
+	require.NoError(t, err)
+	peers := reloaded.Peers()
+	require.Len(t, peers, 1)
+	require.Equal(t, peerPub, peers[0].GetOnionPubkey())
+	require.Equal(t, peerCID, peers[0].GetContentId())
+
+	// Removal updates metadata without touching content.
+	require.NoError(t, reloaded.RemovePeerContent(peerPub))
+	require.Equal(t, initialCID, reloaded.CurrentContentID())
+	reloadedAgain, err := NewStore(fsys, master)
+	require.NoError(t, err)
+	require.Empty(t, reloadedAgain.Peers())
+}
+
 // mustList wraps ListFiles and fails the test on error.
 func mustList(t *testing.T, store *Store) []string {
 	t.Helper()

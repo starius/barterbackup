@@ -14,6 +14,7 @@ import (
 	"github.com/starius/barterbackup/internal/keys"
 	"github.com/starius/barterbackup/internal/usercontent"
 	"github.com/starius/barterbackup/storedpb"
+	"google.golang.org/protobuf/proto"
 )
 
 // Filesystem abstracts persistent storage operations for user data using streams.
@@ -166,6 +167,9 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 	if err := store.load(); err != nil {
 		return nil, err
 	}
+	if err := store.loadPeersMetadata(); err != nil {
+		return nil, err
+	}
 
 	return store, nil
 }
@@ -288,6 +292,8 @@ func (s *Store) ContentLength() int64 {
 	return s.contentLen
 }
 
+const peersMetadataName = "metadata"
+
 // ContentHash returns the SHA-256 of the current content if the filesystem supports hashing.
 // If no content is present, ErrFileNotFound is returned.
 func (s *Store) ContentHash() ([]byte, error) {
@@ -301,6 +307,73 @@ func (s *Store) ContentHash() ([]byte, error) {
 		return h.Hash(s.contentName)
 	}
 	return nil, errors.New("hash not supported")
+}
+
+func (s *Store) persistPeersMetadata() error {
+	peersCopy := make([]*storedpb.Peer, 0, len(s.peers))
+	for _, p := range s.peers {
+		cp := *p
+		cp.OnionPubkey = append([]byte(nil), p.GetOnionPubkey()...)
+		cp.ContentId = append([]byte(nil), p.GetContentId()...)
+		peersCopy = append(peersCopy, &cp)
+	}
+	meta := &storedpb.Metadata{
+		Files: nil,
+		Peers: peersCopy,
+	}
+	data, err := proto.Marshal(meta)
+	if err != nil {
+		return err
+	}
+
+	w, err := s.fs.OpenWrite(peersMetadataName)
+	if err != nil {
+		return err
+	}
+	success := false
+	defer func() {
+		if !success {
+			_ = s.fs.Remove(peersMetadataName)
+		}
+	}()
+
+	if _, err := w.Write(data); err != nil {
+		_ = w.Close()
+		return err
+	}
+	if err := w.Sync(); err != nil {
+		_ = w.Close()
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	success = true
+	return nil
+}
+
+func (s *Store) loadPeersMetadata() error {
+	reader, err := s.fs.OpenRead(peersMetadataName)
+	if err != nil {
+		return nil
+	}
+	defer reader.Close()
+
+	buf := make([]byte, reader.Size())
+	n, err := reader.ReadAt(buf, 0)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if int64(n) != reader.Size() {
+		return errors.New("short read peers metadata")
+	}
+
+	var meta storedpb.Metadata
+	if err := proto.Unmarshal(buf, &meta); err != nil {
+		return err
+	}
+	s.peers = meta.GetPeers()
+	return nil
 }
 
 // SetPeerContentID updates or adds a peer entry and persists metadata.
@@ -325,7 +398,7 @@ func (s *Store) SetPeerContentID(pub, cid []byte) error {
 			ContentId:   append([]byte(nil), cid...),
 		})
 	}
-	return s.persist()
+	return s.persistPeersMetadata()
 }
 
 // RemovePeerContent deletes a peer entry if present and persists metadata.
@@ -346,7 +419,7 @@ func (s *Store) RemovePeerContent(pub []byte) error {
 		return nil
 	}
 	s.peers = out
-	return s.persist()
+	return s.persistPeersMetadata()
 }
 
 // Peers returns a copy of persisted peers.
@@ -530,6 +603,9 @@ func (s *Store) scanContentFiles() ([]contentCandidate, []contentCandidate, erro
 	valid := make([]contentCandidate, 0)
 	invalid := make([]contentCandidate, 0)
 	for _, name := range names {
+		if name == peersMetadataName {
+			continue
+		}
 		reader, err := s.fs.OpenRead(name)
 		if err != nil {
 			continue
