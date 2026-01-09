@@ -45,11 +45,17 @@ func (m *stateTestFS) OpenRead(name string) (userstorage.ReadFile, error) {
 	return &mockReadFile{ReaderAt: r, size: int64(len(data))}, nil
 }
 
-func (m *stateTestFS) OpenWrite(name string) (userstorage.WriteFile, error) {
+func (m *stateTestFS) OpenWrite() (userstorage.WriteFile, error) {
 	var buf bytes.Buffer
-	return &mockWriteFile{buf: &buf, commit: func() {
-		m.MapFS[name] = &fstest.MapFile{Data: append([]byte(nil), buf.Bytes()...), Mode: 0o600}
-	}}, nil
+	return &mockWriteFile{
+		buf: &buf,
+		commit: func(name string) {
+			if name == "" {
+				return
+			}
+			m.MapFS[name] = &fstest.MapFile{Data: append([]byte(nil), buf.Bytes()...), Mode: 0o600}
+		},
+	}, nil
 }
 
 func (m *stateTestFS) Remove(name string) error {
@@ -63,16 +69,6 @@ func (m *stateTestFS) List() ([]string, error) {
 		names = append(names, n)
 	}
 	return names, nil
-}
-
-func (m *stateTestFS) Rename(oldName, newName string) error {
-	f, ok := m.MapFS[oldName]
-	if !ok {
-		return fs.ErrNotExist
-	}
-	m.MapFS[newName] = f
-	delete(m.MapFS, oldName)
-	return nil
 }
 
 type mockReadFile struct {
@@ -91,25 +87,26 @@ func (m *mockReadFile) Close() error {
 type mockWriteFile struct {
 	buf    *bytes.Buffer
 	closed bool
-	commit func()
+	commit func(name string)
 }
 
 func (m *mockWriteFile) Write(p []byte) (int, error) {
 	return m.buf.Write(p)
 }
 
-func (m *mockWriteFile) Sync() error {
-	return nil
-}
-
-func (m *mockWriteFile) Close() error {
+func (m *mockWriteFile) Finalize(name string) error {
 	if m.closed {
 		return nil
 	}
 	m.closed = true
 	if m.commit != nil {
-		m.commit()
+		m.commit(name)
 	}
+	return nil
+}
+
+func (m *mockWriteFile) Abort() error {
+	m.closed = true
 	return nil
 }
 

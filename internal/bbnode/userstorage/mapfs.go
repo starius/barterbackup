@@ -2,6 +2,7 @@ package userstorage
 
 import (
 	"bytes"
+	"errors"
 	"io/fs"
 	"sync"
 )
@@ -31,25 +32,11 @@ func (m *MapFilesystem) OpenRead(name string) (ReadFile, error) {
 }
 
 // OpenWrite opens a file for buffered writes.
-func (m *MapFilesystem) OpenWrite(name string) (WriteFile, error) {
+func (m *MapFilesystem) OpenWrite() (WriteFile, error) {
 	return &mapWriteHandle{
 		mu:    &m.mu,
-		name:  name,
 		files: m.files,
 	}, nil
-}
-
-// Rename swaps an existing entry to a new name.
-func (m *MapFilesystem) Rename(oldName, newName string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	data, ok := m.files[oldName]
-	if !ok {
-		return fs.ErrNotExist
-	}
-	m.files[newName] = append([]byte(nil), data...)
-	delete(m.files, oldName)
-	return nil
 }
 
 // Remove deletes a named file.
@@ -97,7 +84,6 @@ func (h *mapReadHandle) Close() error {
 
 type mapWriteHandle struct {
 	mu     *sync.RWMutex
-	name   string
 	files  map[string][]byte
 	buf    bytes.Buffer
 	closed bool
@@ -109,25 +95,22 @@ func (h *mapWriteHandle) Write(p []byte) (int, error) {
 	return h.buf.Write(p)
 }
 
-// Sync commits the buffered data to the map.
-func (h *mapWriteHandle) Sync() error {
+// Finalize publishes or discards the buffered data.
+func (h *mapWriteHandle) Finalize(name string) error {
 	if h.closed {
-		return nil
+		return errors.New("mapfs: finalize after close")
+	}
+	if name == "" {
+		return errors.New("mapfs: empty name")
 	}
 	h.mu.Lock()
-	h.files[h.name] = append([]byte(nil), h.buf.Bytes()...)
-	h.mu.Unlock()
+	defer h.mu.Unlock()
+	h.files[name] = append([]byte(nil), h.buf.Bytes()...)
+	h.closed = true
 	return nil
 }
 
-// Close finalizes the write and saves the buffer.
-func (h *mapWriteHandle) Close() error {
-	if h.closed {
-		return nil
-	}
+func (h *mapWriteHandle) Abort() error {
 	h.closed = true
-	h.mu.Lock()
-	h.files[h.name] = append([]byte(nil), h.buf.Bytes()...)
-	h.mu.Unlock()
 	return nil
 }

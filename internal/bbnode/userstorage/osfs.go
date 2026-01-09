@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // OSFilesystem implements Filesystem using an on-disk directory.
@@ -49,14 +50,14 @@ func (fsys *OSFilesystem) OpenRead(name string) (ReadFile, error) {
 	}, nil
 }
 
-// OpenWrite truncates or creates a file for streaming writes.
-func (fsys *OSFilesystem) OpenWrite(name string) (WriteFile, error) {
-	path := filepath.Join(fsys.root, name)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o600)
+// OpenWrite truncates or creates a file for streaming writes. The file is not
+// visible under the final name until Finalize is called.
+func (fsys *OSFilesystem) OpenWrite() (WriteFile, error) {
+	f, err := os.CreateTemp(fsys.root, ".tmp-*")
 	if err != nil {
 		return nil, err
 	}
-	return &osWriteHandle{File: f}, nil
+	return &osWriteHandle{File: f, root: fsys.root}, nil
 }
 
 // Remove deletes a named file.
@@ -73,16 +74,12 @@ func (fsys *OSFilesystem) List() ([]string, error) {
 	}
 	names := make([]string, 0, len(entries))
 	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".tmp-") {
+			continue
+		}
 		names = append(names, e.Name())
 	}
 	return names, nil
-}
-
-// Rename atomically renames a file within the root.
-func (fsys *OSFilesystem) Rename(oldName, newName string) error {
-	oldPath := filepath.Join(fsys.root, oldName)
-	newPath := filepath.Join(fsys.root, newName)
-	return os.Rename(oldPath, newPath)
 }
 
 // osReadHandle implements ReadFile on top of an *os.File.
@@ -99,9 +96,46 @@ func (h *osReadHandle) Size() int64 {
 // osWriteHandle implements WriteFile on top of an *os.File.
 type osWriteHandle struct {
 	*os.File
+	root      string
+	finalName string
+	closed    bool
 }
 
-// Sync flushes the file contents to stable storage.
-func (h *osWriteHandle) Sync() error {
-	return h.File.Sync()
+// Finalize flushes data, makes it read-only, and renames into place. Empty name discards.
+func (h *osWriteHandle) Finalize(name string) error {
+	if h.closed {
+		return errors.New("osfs: finalize after close")
+	}
+	if name == "" {
+		_ = os.Remove(h.Name())
+		_ = h.Close()
+		h.closed = true
+		return errors.New("osfs: empty final name")
+	}
+	h.finalName = name
+	if err := h.Sync(); err != nil {
+		_ = h.Close()
+		_ = os.Remove(h.Name())
+		return err
+	}
+	if err := h.Close(); err != nil {
+		_ = os.Remove(h.Name())
+		return err
+	}
+	h.closed = true
+	finalPath := filepath.Join(h.root, h.finalName)
+	if err := os.Rename(h.Name(), finalPath); err != nil {
+		_ = os.Remove(h.Name())
+		return err
+	}
+	if err := os.Chmod(finalPath, 0o400); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Abort discards the temp file.
+func (h *osWriteHandle) Abort() error {
+	_ = h.Close()
+	return os.Remove(h.Name())
 }

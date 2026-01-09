@@ -20,12 +20,11 @@ func TestWrapperRoundTrip(t *testing.T) {
 	name := "secret.txt"
 	plain := []byte("hello world")
 
-	writer, err := w.OpenWrite(name)
+	writer, err := w.OpenWrite()
 	require.NoError(t, err)
 	_, err = writer.Write(plain)
 	require.NoError(t, err)
-	require.NoError(t, writer.Sync())
-	require.NoError(t, writer.Close())
+	require.NoError(t, writer.Finalize(name))
 
 	names, err := base.List()
 	require.NoError(t, err)
@@ -51,9 +50,9 @@ func TestWrapperSkipsUndecodableName(t *testing.T) {
 	require.NoError(t, err)
 
 	// Inject an undecodable filename.
-	wr, err := base.OpenWrite("%%%")
+	wr, err := base.OpenWrite()
 	require.NoError(t, err)
-	require.NoError(t, wr.Close())
+	require.NoError(t, wr.Finalize("%%%"))
 
 	names, err := w.List()
 	require.NoError(t, err)
@@ -71,12 +70,11 @@ func TestWrapperContentCorruption(t *testing.T) {
 	name := "file.bin"
 	data := []byte("AAAAAA")
 
-	writer, err := w.OpenWrite(name)
+	writer, err := w.OpenWrite()
 	require.NoError(t, err)
 	_, err = writer.Write(data)
 	require.NoError(t, err)
-	require.NoError(t, writer.Sync())
-	require.NoError(t, writer.Close())
+	require.NoError(t, writer.Finalize(name))
 
 	// Tamper ciphertext: flip a byte in the underlying file.
 	rawName := baseOnlyName(t, base)
@@ -87,12 +85,11 @@ func TestWrapperContentCorruption(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, r.Close())
 	raw[0] ^= 0xff
-	wr, err := base.OpenWrite(rawName)
+	wr, err := base.OpenWrite()
 	require.NoError(t, err)
 	_, err = wr.Write(raw)
 	require.NoError(t, err)
-	require.NoError(t, wr.Sync())
-	require.NoError(t, wr.Close())
+	require.NoError(t, wr.Finalize(rawName))
 
 	reader, err := w.OpenRead(name)
 	require.NoError(t, err)
@@ -103,7 +100,7 @@ func TestWrapperContentCorruption(t *testing.T) {
 	require.NotEqual(t, data, buf, "corruption should alter plaintext")
 }
 
-// TestWrapperHashCachesAndInvalidates ensures hashes are cached and invalidated on write/remove/rename.
+// TestWrapperHashCachesAndInvalidates ensures hashes are cached and invalidated on write/remove.
 func TestWrapperHashCachesAndInvalidates(t *testing.T) {
 	t.Parallel()
 
@@ -116,12 +113,11 @@ func TestWrapperHashCachesAndInvalidates(t *testing.T) {
 	sum := sha256.Sum256(data)
 
 	write := func(content []byte) {
-		writer, err := w.OpenWrite(name)
+		writer, err := w.OpenWrite()
 		require.NoError(t, err)
 		_, err = writer.Write(content)
 		require.NoError(t, err)
-		require.NoError(t, writer.Sync())
-		require.NoError(t, writer.Close())
+		require.NoError(t, writer.Finalize(name))
 	}
 
 	write(data)
@@ -144,18 +140,9 @@ func TestWrapperHashCachesAndInvalidates(t *testing.T) {
 	sumNew := sha256.Sum256(newData)
 	require.Equal(t, sumNew[:], h3)
 
-	// Rename preserves cache under new name and clears old name.
-	newName := "renamed.bin"
-	require.NoError(t, w.Rename(name, newName))
-	h4, err := w.Hash(newName)
-	require.NoError(t, err)
-	require.Equal(t, h3, h4)
-	_, err = w.Hash(name)
-	require.Error(t, err)
-
 	// Remove clears cache.
-	require.NoError(t, w.Remove(newName))
-	_, err = w.Hash(newName)
+	require.NoError(t, w.Remove(name))
+	_, err = w.Hash(name)
 	require.Error(t, err)
 }
 

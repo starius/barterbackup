@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,10 +20,9 @@ import (
 // Filesystem abstracts persistent storage operations for user data using streams.
 type Filesystem interface {
 	OpenRead(name string) (ReadFile, error)
-	OpenWrite(name string) (WriteFile, error)
+	OpenWrite() (WriteFile, error)
 	Remove(name string) error
 	List() ([]string, error)
-	Rename(oldName, newName string) error
 }
 
 // ReadFile provides random access to a persisted object.
@@ -37,8 +35,10 @@ type ReadFile interface {
 // WriteFile allows streaming writes with explicit fsync.
 type WriteFile interface {
 	io.Writer
-	Sync() error
-	Close() error
+	// Finalize makes the written file visible under the provided name supplied.
+	Finalize(name string) error
+	// Abort discards any written data and removes the temp file.
+	Abort() error
 }
 
 // ErrFileNotFound signals missing files in storage.
@@ -327,26 +327,22 @@ func (s *Store) persistPeersMetadata() error {
 		return err
 	}
 
-	w, err := s.fs.OpenWrite(peersMetadataName)
+	w, err := s.fs.OpenWrite()
 	if err != nil {
 		return err
 	}
 	success := false
 	defer func() {
 		if !success {
-			_ = s.fs.Remove(peersMetadataName)
+			_ = w.Abort()
 		}
 	}()
 
 	if _, err := w.Write(data); err != nil {
-		_ = w.Close()
+		_ = w.Abort()
 		return err
 	}
-	if err := w.Sync(); err != nil {
-		_ = w.Close()
-		return err
-	}
-	if err := w.Close(); err != nil {
+	if err := w.Finalize(peersMetadataName); err != nil {
 		return err
 	}
 	success = true
@@ -457,49 +453,39 @@ func (s *Store) persist() error {
 		uc.Peers = append([]*storedpb.Peer(nil), s.peers...)
 	}
 
-	tmpName := "tmp"
-	writer, err := s.fs.OpenWrite(tmpName)
-	if err != nil {
-		return err
-	}
-	closed := false
-	success := false
-	defer func() {
-		if !closed {
-			_ = writer.Close()
-		}
-		if !success {
-			_ = s.fs.Remove(tmpName)
-		}
-	}()
-
-	cw := &countingWriter{w: writer}
+	// First pass: compute CID and length without touching disk.
+	cw := &countingWriter{w: io.Discard}
 	cid, err := usercontent.WriteContentFile(
 		cw, uc, s.contentSeal, s.metadataSeal, s.xor,
 	)
 	if err != nil {
-		if cerr := writer.Close(); cerr != nil {
-			return fmt.Errorf("write failed: %v (close error: %w)", err, cerr)
-		}
-		return err
-	}
-
-	if err := writer.Sync(); err != nil {
-		if cerr := writer.Close(); cerr != nil {
-			return fmt.Errorf("sync failed: %v (close error: %w)", err, cerr)
-		}
 		return err
 	}
 	s.contentLen = cw.n
-	if err := writer.Close(); err != nil {
-		return err
-	}
-	closed = true
 
 	newName := contentFileNameFor(cid)
-	if err := s.fs.Rename(tmpName, newName); err != nil {
+	writer, err := s.fs.OpenWrite()
+	if err != nil {
 		return err
 	}
+	success := false
+	defer func() {
+		if !success {
+			_ = writer.Abort()
+		}
+	}()
+
+	cw = &countingWriter{w: writer}
+	if _, err := usercontent.WriteContentFile(
+		cw, uc, s.contentSeal, s.metadataSeal, s.xor,
+	); err != nil {
+		_ = writer.Abort()
+		return err
+	}
+	if err := writer.Finalize(newName); err != nil {
+		return err
+	}
+	success = true
 
 	reader, err := s.fs.OpenRead(newName)
 	if err != nil {
@@ -515,7 +501,6 @@ func (s *Store) persist() error {
 		}
 	}
 	s.contentName = newName
-	success = true
 
 	return nil
 }
@@ -595,35 +580,27 @@ func (s *Store) WriteContentBlob(cid []byte, writeFn func(w WriteFile) error) er
 	if len(cid) == 0 {
 		return errors.New("cid is empty")
 	}
-	tmpName := "tmp-peer-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-	w, err := s.fs.OpenWrite(tmpName)
+	name := contentFileNameFor(cid)
+	w, err := s.fs.OpenWrite()
 	if err != nil {
 		return err
 	}
-	written := false
+	finalized := false
 	defer func() {
-		if !written {
-			_ = s.fs.Remove(tmpName)
+		if !finalized {
+			_ = w.Abort()
 		}
 	}()
 
 	if err := writeFn(w); err != nil {
-		_ = w.Close()
+		_ = w.Abort()
 		return err
 	}
-	if err := w.Sync(); err != nil {
-		_ = w.Close()
-		return err
-	}
-	if err := w.Close(); err != nil {
-		return err
-	}
-	written = true
 
-	newName := contentFileNameFor(cid)
-	if err := s.fs.Rename(tmpName, newName); err != nil {
+	if err := w.Finalize(name); err != nil {
 		return err
 	}
+	finalized = true
 	return nil
 }
 

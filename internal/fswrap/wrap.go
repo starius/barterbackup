@@ -2,10 +2,13 @@ package fswrap
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
+	"io/fs"
 	"sync"
+	"time"
 
 	"github.com/starius/aesctrat"
 	"github.com/starius/barterbackup/internal/bbnode/userstorage"
@@ -35,6 +38,9 @@ type Wrapper struct {
 
 	// hashes caches plaintext SHA-256 digests keyed by plaintext filename.
 	hashes map[string][]byte
+
+	// lastTS tracks the last timestamp used for deriving per-file IVs.
+	lastTS uint64
 
 	mu sync.RWMutex
 }
@@ -70,9 +76,10 @@ func New(fsys userstorage.Filesystem, master []byte) (*Wrapper, error) {
 	}, nil
 }
 
-// OpenRead decrypts the filename and returns a reader that decrypts contents on the fly.
+// OpenRead locates the newest encrypted file for the plaintext name and returns
+// a reader that decrypts contents on the fly.
 func (w *Wrapper) OpenRead(name string) (userstorage.ReadFile, error) {
-	encName, err := w.encryptName(name)
+	encName, ts, err := w.lookupEncryptedName(name)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +91,7 @@ func (w *Wrapper) OpenRead(name string) (userstorage.ReadFile, error) {
 
 	xor := aesctrat.NewAesCtr(w.ctrKey).XORKeyStreamAt
 
-	iv, err := deriveIV([]byte(name))
+	iv, err := deriveIV(w.ctrKey, ts)
 	if err != nil {
 		_ = r.Close()
 		return nil, err
@@ -93,35 +100,39 @@ func (w *Wrapper) OpenRead(name string) (userstorage.ReadFile, error) {
 	return &reader{under: r, xor: xor, iv: iv}, nil
 }
 
-// OpenWrite encrypts the filename and returns a writer that encrypts contents.
-func (w *Wrapper) OpenWrite(name string) (userstorage.WriteFile, error) {
-	encName, err := w.encryptName(name)
-	if err != nil {
-		return nil, err
-	}
-
-	wr, err := w.under.OpenWrite(encName)
-	if err != nil {
-		return nil, err
-	}
+// OpenWrite returns a writer that encrypts content and defers visibility until Finalize.
+func (w *Wrapper) OpenWrite() (userstorage.WriteFile, error) {
+	ts := uint64(time.Now().Unix())
 	w.mu.Lock()
-	delete(w.hashes, name)
+	if ts <= w.lastTS {
+		ts = w.lastTS + 1
+	}
+	w.lastTS = ts
 	w.mu.Unlock()
 
-	xor := aesctrat.NewAesCtr(w.ctrKey).XORKeyStreamAt
-
-	iv, err := deriveIV([]byte(name))
+	wr, err := w.under.OpenWrite()
 	if err != nil {
-		_ = wr.Close()
 		return nil, err
 	}
 
-	return &writer{under: wr, xor: xor, iv: iv}, nil
+	xor := aesctrat.NewAesCtr(w.ctrKey).XORKeyStreamAt
+	iv, err := deriveIV(w.ctrKey, ts)
+	if err != nil {
+		return nil, err
+	}
+
+	return &writer{
+		under:  wr,
+		xor:    xor,
+		iv:     iv,
+		ts:     ts,
+		parent: w,
+	}, nil
 }
 
-// Remove deletes the encrypted filename.
+// Remove deletes the encrypted filename associated with the plaintext name.
 func (w *Wrapper) Remove(name string) error {
-	encName, err := w.encryptName(name)
+	encName, _, err := w.lookupEncryptedName(name)
 	if err != nil {
 		return err
 	}
@@ -143,38 +154,47 @@ func (w *Wrapper) List() ([]string, error) {
 	}
 
 	out := make([]string, 0, len(names))
+	seen := make(map[string]struct{})
 	for _, enc := range names {
-		plain, err := w.decryptName(enc)
+		plain, _, err := w.decryptName(enc)
 		if err != nil {
 			continue
 		}
+		if _, ok := seen[plain]; ok {
+			continue
+		}
+		seen[plain] = struct{}{}
 		out = append(out, plain)
 	}
 
 	return out, nil
 }
 
-// Rename renames encrypted filenames.
-func (w *Wrapper) Rename(oldName, newName string) error {
-	encOld, err := w.encryptName(oldName)
+func (w *Wrapper) lookupEncryptedName(name string) (string, uint64, error) {
+	names, err := w.under.List()
 	if err != nil {
-		return err
+		return "", 0, err
 	}
-	encNew, err := w.encryptName(newName)
-	if err != nil {
-		return err
+	var (
+		bestName string
+		bestTS   uint64
+		found    bool
+	)
+	for _, enc := range names {
+		plain, ts, err := w.decryptName(enc)
+		if err != nil || plain != name {
+			continue
+		}
+		if !found || ts > bestTS {
+			found = true
+			bestTS = ts
+			bestName = enc
+		}
 	}
-
-	if err := w.under.Rename(encOld, encNew); err != nil {
-		return err
+	if !found {
+		return "", 0, fs.ErrNotExist
 	}
-	w.mu.Lock()
-	if sum, ok := w.hashes[oldName]; ok {
-		delete(w.hashes, oldName)
-		w.hashes[newName] = sum
-	}
-	w.mu.Unlock()
-	return nil
+	return bestName, bestTS, nil
 }
 
 // Hash returns the SHA-256 of the plaintext stored at name. The result is
@@ -257,6 +277,8 @@ type writer struct {
 	xor    func(dst, src, iv []byte, offset uint64)
 	iv     []byte
 	offset uint64
+	parent *Wrapper
+	ts     uint64
 }
 
 // Write encrypts p and forwards to the underlying writer.
@@ -264,52 +286,93 @@ func (w *writer) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-
 	buf := make([]byte, len(p))
 	copy(buf, p)
 	w.xor(buf, buf, w.iv, w.offset)
 	n, err := w.under.Write(buf)
 	w.offset += uint64(n)
-
 	return n, err
 }
 
-func (w *writer) Sync() error {
-	return w.under.Sync()
+// Finalize closes and publishes the encrypted file.
+func (w *writer) Finalize(name string) error {
+	if name == "" {
+		_ = w.under.Abort()
+		return errors.New("fswrap: empty name")
+	}
+	encName, err := w.parent.encryptName(w.ts, name)
+	if err != nil {
+		_ = w.under.Abort()
+		return err
+	}
+
+	prevName, _, lookupErr := w.parent.lookupEncryptedName(name)
+
+	if err := w.under.Finalize(encName); err != nil {
+		return err
+	}
+
+	w.parent.mu.Lock()
+	delete(w.parent.hashes, name)
+	w.parent.mu.Unlock()
+
+	if lookupErr == nil && prevName != encName {
+		if err := w.parent.under.Remove(prevName); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
-// Close closes the underlying writer.
-func (w *writer) Close() error {
-	return w.under.Close()
+func (w *writer) Abort() error {
+	return w.under.Abort()
 }
 
-// encryptName seals a plaintext filename deterministically.
-func (w *Wrapper) encryptName(name string) (string, error) {
-	ct, err := w.nameSeal([]byte(name), []byte(nameNonceString))
+// encryptName seals a plaintext filename alongside its timestamp deterministically.
+func (w *Wrapper) encryptName(ts uint64, name string) (string, error) {
+	var tsBuf [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(tsBuf[:], ts)
+	plain := make([]byte, n+len(name))
+	copy(plain, tsBuf[:n])
+	copy(plain[n:], name)
+
+	ct, err := w.nameSeal(plain, []byte(nameNonceString))
 	if err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(ct), nil
 }
 
-// decryptName opens a wrapped filename into plaintext.
-func (w *Wrapper) decryptName(enc string) (string, error) {
+// decryptName opens a wrapped filename into plaintext and timestamp.
+func (w *Wrapper) decryptName(enc string) (string, uint64, error) {
 	data, err := hex.DecodeString(enc)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 
 	pt, err := w.nameOpen(data, []byte(nameNonceString))
 	if err != nil {
-		return "", err
+		return "", 0, err
+	}
+	ts, n := binary.Uvarint(pt)
+	if n <= 0 {
+		return "", 0, errors.New("fswrap: invalid timestamp prefix")
 	}
 
-	return string(pt), nil
+	return string(pt[n:]), ts, nil
 }
 
-// deriveIV deterministically derives a CTR IV from the filename.
-func deriveIV(name []byte) ([]byte, error) {
-	deriver := hkdf.New(sha256.New, name, nil, []byte("fswrap/iv"))
+// deriveIV deterministically derives a CTR IV from the per-file timestamp.
+func deriveIV(key []byte, ts uint64) ([]byte, error) {
+	var tsBuf [binary.MaxVarintLen64]byte
+	n := binary.PutUvarint(tsBuf[:], ts)
+
+	info := make([]byte, 0, len("fswrap/iv")+n)
+	info = append(info, []byte("fswrap/iv")...)
+	info = append(info, tsBuf[:n]...)
+
+	deriver := hkdf.New(sha256.New, key, nil, info)
 	iv := make([]byte, aesctrat.BlockSize)
 	if _, err := io.ReadFull(deriver, iv); err != nil {
 		return nil, err

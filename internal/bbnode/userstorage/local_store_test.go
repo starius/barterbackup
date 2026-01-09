@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -75,12 +76,11 @@ func TestForeignContentIgnored(t *testing.T) {
 
 	fsys := NewMapFilesystem()
 	// Write a foreign content file with a name that cannot be parsed as our content ID.
-	w, err := fsys.OpenWrite("foreign")
+	w, err := fsys.OpenWrite()
 	require.NoError(t, err)
 	_, err = w.Write([]byte("data"))
 	require.NoError(t, err)
-	require.NoError(t, w.Sync())
-	require.NoError(t, w.Close())
+	require.NoError(t, w.Finalize("foreign"))
 
 	master := keys.DeriveMasterPriv("foreign-ignore")
 	store, err := NewStore(fsys, master)
@@ -232,8 +232,20 @@ func TestFilenameContentIDMismatchFails(t *testing.T) {
 		require.NotEqual(t, firstName, secondName)
 
 		// Corrupt: rename newer content to the old filename, so CID implied by name mismatches body.
+		// Copy newer content body into the old filename to mismatch CID/body.
+		reader, err := fsys.OpenRead(secondName)
+		require.NoError(t, err)
+		data := make([]byte, reader.Size())
+		_, err = reader.ReadAt(data, 0)
+		require.NoError(t, err)
+		require.NoError(t, reader.Close())
+
 		require.NoError(t, fsys.Remove(firstName))
-		require.NoError(t, fsys.Rename(secondName, firstName))
+		w, err := fsys.OpenWrite()
+		require.NoError(t, err)
+		_, err = w.Write(data)
+		require.NoError(t, err)
+		require.NoError(t, w.Finalize(firstName))
 
 		_, err = NewStore(fsys, master)
 		require.Error(t, err)
@@ -286,6 +298,34 @@ func TestPeerMetadataSidecar(t *testing.T) {
 	require.Empty(t, reloadedAgain.Peers())
 }
 
+// TestPersistPeersMetadataAbort ensures temp files are discarded on write/finalize failure.
+func TestPersistPeersMetadataAbort(t *testing.T) {
+	t.Parallel()
+
+	for name, cfg := range map[string]struct {
+		failWrite    bool
+		failFinalize bool
+	}{
+		"write-fails":    {failWrite: true},
+		"finalize-fails": {failFinalize: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs := newAbortFS(cfg.failWrite, cfg.failFinalize)
+			master := keys.DeriveMasterPriv("abort-meta")
+			store, err := NewStore(fs, master)
+			require.NoError(t, err)
+
+			err = store.SetPeerContentID([]byte("peer"), []byte("cid"))
+			require.Error(t, err)
+			require.True(t, fs.aborted.Load(), "abort must be called")
+
+			names, err := fs.List()
+			require.NoError(t, err)
+			require.Empty(t, names, "no files should remain after abort")
+		})
+	}
+}
+
 // mustList wraps ListFiles and fails the test on error.
 func mustList(t *testing.T, store *Store) []string {
 	t.Helper()
@@ -325,12 +365,11 @@ func writeContentFile(t *testing.T, fsys Filesystem, master []byte, createdAt ti
 	require.NoError(t, err)
 
 	finalName := contentFileNameFor(cid)
-	w, err := fsys.OpenWrite(finalName)
+	w, err := fsys.OpenWrite()
 	require.NoError(t, err)
 	_, err = w.Write(buf.Bytes())
 	require.NoError(t, err)
-	require.NoError(t, w.Sync())
-	require.NoError(t, w.Close())
+	require.NoError(t, w.Finalize(finalName))
 
 	return cid, finalName
 }
@@ -351,12 +390,11 @@ func truncateLastByte(t *testing.T, fsys Filesystem, name string) {
 	require.Greater(t, len(data), 0)
 
 	require.NoError(t, fsys.Remove(name))
-	w, err := fsys.OpenWrite(name)
+	w, err := fsys.OpenWrite()
 	require.NoError(t, err)
 	_, err = w.Write(data[:len(data)-1])
 	require.NoError(t, err)
-	require.NoError(t, w.Sync())
-	require.NoError(t, w.Close())
+	require.NoError(t, w.Finalize(name))
 }
 
 // bareStore constructs a Store with provided primitives for testing.
@@ -410,14 +448,81 @@ type failingFS struct {
 	failOnce bool
 }
 
+type abortFS struct {
+	base         *MapFilesystem
+	aborted      atomic.Bool
+	failWrite    bool
+	failFinalize bool
+}
+
+func newAbortFS(failWrite, failFinalize bool) *abortFS {
+	return &abortFS{
+		base:         NewMapFilesystem(),
+		failWrite:    failWrite,
+		failFinalize: failFinalize,
+	}
+}
+
+func (a *abortFS) OpenRead(name string) (ReadFile, error) {
+	return a.base.OpenRead(name)
+}
+
+func (a *abortFS) OpenWrite() (WriteFile, error) {
+	return &abortWrite{
+		parent:       a,
+		failWrite:    a.failWrite,
+		failFinalize: a.failFinalize,
+	}, nil
+}
+
+func (a *abortFS) Remove(name string) error {
+	return a.base.Remove(name)
+}
+
+func (a *abortFS) List() ([]string, error) {
+	return a.base.List()
+}
+
+type abortWrite struct {
+	parent       *abortFS
+	buf          bytes.Buffer
+	failWrite    bool
+	failFinalize bool
+}
+
+func (w *abortWrite) Write(p []byte) (int, error) {
+	if w.failWrite {
+		return 0, errors.New("forced write error")
+	}
+	return w.buf.Write(p)
+}
+
+func (w *abortWrite) Finalize(name string) error {
+	if w.failFinalize {
+		return errors.New("forced finalize error")
+	}
+	if name == "" {
+		return nil
+	}
+	w.parent.base.mu.Lock()
+	w.parent.base.files[name] = append([]byte(nil), w.buf.Bytes()...)
+	w.parent.base.mu.Unlock()
+	return nil
+}
+
+func (w *abortWrite) Abort() error {
+	w.parent.aborted.Store(true)
+	return nil
+}
+
 // OpenRead delegates to the underlying filesystem.
 func (f *failingFS) OpenRead(name string) (ReadFile, error) {
 	return f.delegate.OpenRead(name)
 }
 
 // OpenWrite wraps the writer to inject a single failure.
-func (f *failingFS) OpenWrite(name string) (WriteFile, error) {
-	w, err := f.delegate.OpenWrite(name)
+func (f *failingFS) OpenWrite() (WriteFile, error) {
+	w, err := f.delegate.OpenWrite()
 	if err != nil {
 		return nil, err
 	}
@@ -425,11 +530,6 @@ func (f *failingFS) OpenWrite(name string) (WriteFile, error) {
 		w:       w,
 		trigger: &f.failOnce,
 	}, nil
-}
-
-// Rename delegates to the underlying filesystem.
-func (f *failingFS) Rename(oldName, newName string) error {
-	return f.delegate.Rename(oldName, newName)
 }
 
 // List delegates to the underlying filesystem.
@@ -457,12 +557,11 @@ func (fw *failingWrite) Write(p []byte) (int, error) {
 	return fw.w.Write(p)
 }
 
-// Sync forwards to the underlying writer.
-func (fw *failingWrite) Sync() error {
-	return fw.w.Sync()
+// Finalize forwards to the underlying writer.
+func (fw *failingWrite) Finalize(name string) error {
+	return fw.w.Finalize(name)
 }
 
-// Close forwards to the underlying writer.
-func (fw *failingWrite) Close() error {
-	return fw.w.Close()
+func (fw *failingWrite) Abort() error {
+	return fw.w.Abort()
 }
