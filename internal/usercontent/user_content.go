@@ -21,6 +21,14 @@ import (
 const (
 	headerMagic    = "UCNT"
 	currentVersion = 1
+
+	// contentSizeAlignment pads the encoded content file so its total size is a
+	// multiple of this alignment to reduce information leaked by ciphertext
+	// length.
+	contentSizeAlignment = 32 * 1024
+
+	// paddingPseudoName seeds padding IV derivation when no files exist.
+	paddingPseudoName = "__padding__"
 )
 
 var (
@@ -170,6 +178,39 @@ func WriteContentFile(w io.Writer, uc UserContent,
 		}
 	}
 
+	// Pad the ciphertext so the total size reveals less about plaintext size.
+	// Padding is encrypted as a continuation of the final file's keystream; if
+	// there are no files, use a dedicated padding IV derived from the revision.
+	var padIV []byte
+	var padOffset uint64
+	if len(descriptors) > 0 {
+		last := descriptors[len(descriptors)-1]
+		var err error
+		padIV, err = deriveFileIV(ivKey, last.name)
+		if err != nil {
+			return nil, err
+		}
+		padOffset = uint64(last.file.Size)
+	} else {
+		var err error
+		padIV, err = deriveFileIV(ivKey, paddingPseudoName)
+		if err != nil {
+			return nil, err
+		}
+		padOffset = 0
+	}
+
+	currentSize := int64(len(headerMagic) + 1 + len(contentID) + len(metaCipher))
+	for _, desc := range descriptors {
+		currentSize += desc.file.Size
+	}
+	padLen := paddingNeeded(currentSize)
+	if padLen > 0 {
+		if err := writePadding(w, xor, padIV, padOffset, padLen); err != nil {
+			return nil, err
+		}
+	}
+
 	return contentID, nil
 }
 
@@ -268,6 +309,21 @@ func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc,
 		}
 		result.Files[name] = f
 		offset += size
+	}
+
+	// Skip trailing padding if present; padding ensures total size is aligned.
+	if sized, ok := r.(interface{ Size() int64 }); ok {
+		totalSize := sized.Size()
+		if totalSize < offset {
+			return result, nil, errInvalidContent
+		}
+		padding := totalSize - offset
+		if totalSize%contentSizeAlignment != 0 {
+			return result, nil, errInvalidContent
+		}
+		if padding < 0 {
+			return result, nil, errInvalidContent
+		}
 	}
 
 	return result, cid, nil
@@ -498,5 +554,47 @@ func verifyFileHash(expected []byte, file File) error {
 	if !bytes.Equal(sum, expected) {
 		return errInvalidContent
 	}
+	return nil
+}
+
+// paddingNeeded returns the number of bytes required to align the size to the
+// contentSizeAlignment boundary.
+func paddingNeeded(size int64) int64 {
+	rem := size % contentSizeAlignment
+	if rem == 0 {
+		return 0
+	}
+	return contentSizeAlignment - rem
+}
+
+// writePadding emits encrypted zero bytes using the provided IV and offset so
+// ciphertext size reaches the alignment boundary.
+func writePadding(w io.Writer, xor XORKeyStreamAt, iv []byte, offset uint64,
+	length int64) error {
+
+	if length == 0 {
+		return nil
+	}
+	buf := make([]byte, 32*1024)
+	var written int64
+	for written < length {
+		chunk := buf
+		if remaining := length - written; remaining < int64(len(chunk)) {
+			chunk = chunk[:remaining]
+		}
+		for i := range chunk {
+			chunk[i] = 0
+		}
+		xor(chunk, chunk, iv, offset+uint64(written))
+		n, err := w.Write(chunk)
+		written += int64(n)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errors.New("usercontent: short write during padding")
+		}
+	}
+
 	return nil
 }

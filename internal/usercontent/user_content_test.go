@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ericlagergren/siv"
 	"github.com/stretchr/testify/require"
 )
 
@@ -129,4 +130,91 @@ func TestFileTamperDetected(t *testing.T) {
 		bytes.NewReader(raw), contentOpen, metadataOpen, xor,
 	)
 	require.ErrorIs(t, err, errInvalidContent)
+}
+
+type sizedReader struct {
+	*bytes.Reader
+}
+
+func (sr *sizedReader) Size() int64 {
+	return int64(sr.Len())
+}
+
+// TestPaddingAlignsAndDecrypts verifies total size alignment and zero padding.
+func TestPaddingAlignsAndDecrypts(t *testing.T) {
+	contentSeal, contentOpen := makeContentIDAEAD(t)
+	metadataSeal, metadataOpen := makeContentIDAEAD(t)
+	xor := makeTestXOR(t)
+
+	payload := []byte("short")
+	uc := UserContent{
+		CreatedAt: time.Unix(30, 0),
+		Files: map[string]File{
+			"pad": {
+				Body: bytes.NewReader(payload),
+				Size: int64(len(payload)),
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	cid, err := WriteContentFile(&buf, uc, contentSeal, metadataSeal, xor)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), int64(len(buf.Bytes()))%contentSizeAlignment)
+
+	reader := &sizedReader{Reader: bytes.NewReader(buf.Bytes())}
+	parsed, parsedCID, err := ParseContentFile(
+		reader, contentOpen, metadataOpen, xor,
+	)
+	require.NoError(t, err)
+	require.Equal(t, cid, parsedCID)
+	require.Len(t, parsed.Files, 1)
+
+	revision, err := ParseContentID(cid, contentOpen)
+	require.NoError(t, err)
+	metaLen := int(revision.GetMetadataAeadLength())
+	headerLen := len(headerMagic) + 1
+	cidLen := len(cid)
+	raw := buf.Bytes()
+	metaCipher := raw[headerLen+cidLen : headerLen+cidLen+metaLen]
+	metadataTag := metaCipher[len(metaCipher)-siv.TagSize:]
+	ivKey, err := revisionIVKey(revision, metadataTag)
+	require.NoError(t, err)
+
+	iv, err := deriveFileIV(ivKey, "pad")
+	require.NoError(t, err)
+
+	padLen := int64(len(raw)) - int64(headerLen+cidLen+metaLen+len(payload))
+	require.Greater(t, padLen, int64(0))
+	padStart := len(raw) - int(padLen)
+	padded := append([]byte(nil), raw[padStart:]...)
+
+	// Decrypt padding as continuation of the only file.
+	xor(padded, padded, iv, uint64(len(payload)))
+	require.Equal(t, make([]byte, len(padded)), padded)
+}
+
+// TestPaddingWorksWithoutFiles ensures alignment and parsing with empty content.
+func TestPaddingWorksWithoutFiles(t *testing.T) {
+	contentSeal, contentOpen := makeContentIDAEAD(t)
+	metadataSeal, metadataOpen := makeContentIDAEAD(t)
+	xor := makeTestXOR(t)
+
+	uc := UserContent{
+		CreatedAt: time.Unix(40, 0),
+		Files:     map[string]File{},
+	}
+
+	var buf bytes.Buffer
+	cid, err := WriteContentFile(&buf, uc, contentSeal, metadataSeal, xor)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), int64(len(buf.Bytes()))%contentSizeAlignment)
+
+	reader := &sizedReader{Reader: bytes.NewReader(buf.Bytes())}
+	parsed, parsedCID, err := ParseContentFile(
+		reader, contentOpen, metadataOpen, xor,
+	)
+	require.NoError(t, err)
+	require.Equal(t, cid, parsedCID)
+	require.Empty(t, parsed.Files)
 }
