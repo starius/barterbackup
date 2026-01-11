@@ -1,6 +1,7 @@
 package bbnode
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
@@ -11,7 +12,10 @@ import (
 
 	"github.com/starius/barterbackup/bbrpc"
 	"github.com/starius/barterbackup/clirpc"
+	"github.com/starius/barterbackup/internal/bbnode/userstorage"
+	"github.com/starius/barterbackup/internal/keys"
 	"github.com/starius/barterbackup/internal/netmock"
+	"github.com/starius/barterbackup/internal/usercontent"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -180,6 +184,48 @@ func TestDownloadBadContentID(t *testing.T) {
 	require.Equal(t, codes.NotFound, st.Code())
 }
 
+// TestDownloadPeerIsolation ensures downloads cannot fetch other peers' content
+// and errors match missing content.
+func TestDownloadPeerIsolation(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		node := startTestNode(t)
+		t.Cleanup(func() { _ = node.Stop() })
+
+		_, err := node.SetFile(t.Context(), &clirpc.SetFileRequest{
+			File: &clirpc.File{Name: "own", Data: []byte("ours")},
+		})
+		require.NoError(t, err)
+
+		foreignCID, foreignBody := makeContentBlob(
+			t, []byte("foreign"), []byte("data"),
+		)
+		err = node.store.WriteContentBlob(
+			foreignCID, func(w userstorage.WriteFile) error {
+				_, werr := w.Write(foreignBody)
+				return werr
+			},
+		)
+		require.NoError(t, err)
+
+		_, err = node.Download(context.Background(), &bbrpc.DownloadRequest{
+			ContentId: []byte("does-not-exist"),
+		})
+		missingStatus, ok := status.FromError(err)
+		require.True(t, ok)
+		require.Equal(t, codes.NotFound, missingStatus.Code())
+
+		_, err = node.Download(context.Background(), &bbrpc.DownloadRequest{
+			ContentId: foreignCID,
+		})
+		foreignStatus, ok := status.FromError(err)
+		require.True(t, ok)
+		require.Equal(t, missingStatus.Code(), foreignStatus.Code())
+		require.Equal(t, missingStatus.Message(), foreignStatus.Message())
+	})
+}
+
 // TestSetContentRevisionValidation enforces size and argument checks.
 func TestSetContentRevisionValidation(t *testing.T) {
 	t.Parallel()
@@ -296,6 +342,41 @@ func startTestNode(t *testing.T) *Node {
 	require.NoError(t, err)
 	require.NoError(t, node.Start(t.Context()))
 	return node
+}
+
+// makeContentBlob builds a content file and returns its CID and encoded bytes
+// for testing foreign content handling.
+func makeContentBlob(t *testing.T, name, data []byte) ([]byte, []byte) {
+	t.Helper()
+	master := keys.DeriveMasterPriv("test-seed")
+	contentKey, err := keys.DeriveKey(master, "usercontent/content-id", 32)
+	require.NoError(t, err)
+	metaKey, err := keys.DeriveKey(master, "usercontent/metadata", 32)
+	require.NoError(t, err)
+	fileKey, err := keys.DeriveKey(master, "usercontent/files", 32)
+	require.NoError(t, err)
+
+	contentSeal, _, err := usercontent.NewAEAD(contentKey)
+	require.NoError(t, err)
+	metadataSeal, _, err := usercontent.NewAEAD(metaKey)
+	require.NoError(t, err)
+	xor, err := usercontent.NewAesCTR(fileKey)
+	require.NoError(t, err)
+
+	uc := usercontent.UserContent{
+		CreatedAt: time.Unix(50, 0),
+		Files: map[string]usercontent.File{
+			string(name): {
+				Body: bytes.NewReader(data),
+				Size: int64(len(data)),
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	cid, err := usercontent.WriteContentFile(&buf, uc, contentSeal, metadataSeal, xor)
+	require.NoError(t, err)
+	return cid, buf.Bytes()
 }
 
 // peerCtx builds a context containing a fake TLS peer certificate with an ed25519 public key.

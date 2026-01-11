@@ -153,12 +153,38 @@ func (n *Node) Download(ctx context.Context, req *bbrpc.DownloadRequest) (*bbrpc
 	if req.GetOffset() < 0 {
 		return nil, status.Error(codes.InvalidArgument, "offset must be non-negative")
 	}
+
 	cid := n.store.CurrentContentID()
-	if len(cid) == 0 || !bytes.Equal(cid, req.GetContentId()) {
+	allowed := bytes.Equal(cid, req.GetContentId())
+	if !allowed {
+		pub, err := ClientPubKeyFromContext(ctx)
+		if err != nil {
+			return nil, status.Error(codes.NotFound, "content not found")
+		}
+		n.mu.RLock()
+		info := n.requester[string(pub)]
+		n.mu.RUnlock()
+		if info == nil || !bytes.Equal(info.GetContentId(), req.GetContentId()) {
+			return nil, status.Error(codes.NotFound, "content not found")
+		}
+		allowed = true
+	}
+
+	if !allowed {
 		return nil, status.Error(codes.NotFound, "content not found")
 	}
 
-	reader, _, err := n.store.OpenContent()
+	if !n.store.ContentExists(req.GetContentId()) {
+		return nil, status.Error(codes.NotFound, "content not found")
+	}
+
+	var reader userstorage.ReadFile
+	var err error
+	if allowed && bytes.Equal(cid, req.GetContentId()) {
+		reader, _, err = n.store.OpenContent()
+	} else {
+		reader, err = n.store.OpenContentByID(req.GetContentId())
+	}
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "open content: %v", err)
 	}
@@ -169,7 +195,7 @@ func (n *Node) Download(ctx context.Context, req *bbrpc.DownloadRequest) (*bbrpc
 		return nil, status.Error(codes.InvalidArgument, "offset beyond end of content")
 	}
 
-	sha, err := n.store.ContentHash()
+	sha, err := n.store.ContentHashByID(req.GetContentId())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "hash content: %v", err)
 	}

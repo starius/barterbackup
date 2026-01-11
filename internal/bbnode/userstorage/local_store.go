@@ -325,6 +325,26 @@ func (s *Store) ContentHash() ([]byte, error) {
 	return nil, errors.New("hash not supported")
 }
 
+// ContentHashByID returns the SHA-256 for the specified content ID if present.
+func (s *Store) ContentHashByID(cid []byte) ([]byte, error) {
+	name := contentFileNameFor(cid)
+	type hasher interface {
+		Hash(name string) ([]byte, error)
+	}
+	h, ok := s.fs.(hasher)
+	if !ok {
+		return nil, errors.New("hash not supported")
+	}
+	sum, err := h.Hash(name)
+	if err != nil {
+		if errors.Is(err, ErrFileNotFound) {
+			return nil, ErrFileNotFound
+		}
+		return nil, err
+	}
+	return sum, nil
+}
+
 func (s *Store) persistPeersMetadata() error {
 	peersCopy := make([]*storedpb.Peer, 0, len(s.peers))
 	for _, p := range s.peers {
