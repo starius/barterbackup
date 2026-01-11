@@ -3,6 +3,7 @@ package usercontent
 import (
 	"bytes"
 	"crypto/aes"
+	"crypto/cipher"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -42,6 +43,34 @@ var (
 // XORKeyStreamAt applies a key stream to src and writes the result into dst.
 // The IV identifies the stream and offset allows random access.
 type XORKeyStreamAt func(dst, src, iv []byte, offset uint64)
+
+// NewAesCTR constructs a standard-library AES-CTR keystream that supports random
+// access via offsets.
+func NewAesCTR(key []byte) (XORKeyStreamAt, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	return func(dst, src, iv []byte, offset uint64) {
+		if len(iv) != block.BlockSize() {
+			panic("usercontent: invalid iv length for CTR")
+		}
+		if len(dst) < len(src) {
+			panic("usercontent: dst shorter than src")
+		}
+		counterIV := make([]byte, len(iv))
+		copy(counterIV, iv)
+		addUint(counterIV, offset/uint64(block.BlockSize()))
+		stream := cipher.NewCTR(block, counterIV)
+		skip := int(offset % uint64(block.BlockSize()))
+		if skip > 0 {
+			drop := make([]byte, skip)
+			stream.XORKeyStream(drop, drop)
+		}
+		stream.XORKeyStream(dst[:len(src)], src)
+	}, nil
+}
 
 // File represents a single file participating in user content.
 type File struct {
@@ -124,6 +153,9 @@ func WriteContentFile(w io.Writer, uc UserContent,
 	if err != nil {
 		return nil, err
 	}
+	if len(descriptors) == 0 {
+		return nil, errors.New("usercontent: at least one file is required")
+	}
 
 	ad, err := revisionMetadataAD(revision)
 	if err != nil {
@@ -168,47 +200,24 @@ func WriteContentFile(w io.Writer, uc UserContent,
 		return nil, err
 	}
 
+	// Encrypt concatenated plaintext of all files plus padding with a single CTR stream.
+	streamIV := ivKey
+	var readers []io.Reader
+	var totalFiles int64
 	for _, desc := range descriptors {
-		fileIV, err := deriveFileIV(ivKey, desc.name)
-		if err != nil {
-			return nil, err
-		}
-		if err := writeEncryptedFile(w, desc, xor, fileIV); err != nil {
-			return nil, err
-		}
+		readers = append(readers, io.NewSectionReader(desc.file.Body, 0, desc.file.Size))
+		totalFiles += desc.file.Size
 	}
 
-	// Pad the ciphertext so the total size reveals less about plaintext size.
-	// Padding is encrypted as a continuation of the final file's keystream; if
-	// there are no files, use a dedicated padding IV derived from the revision.
-	var padIV []byte
-	var padOffset uint64
-	if len(descriptors) > 0 {
-		last := descriptors[len(descriptors)-1]
-		var err error
-		padIV, err = deriveFileIV(ivKey, last.name)
-		if err != nil {
-			return nil, err
-		}
-		padOffset = uint64(last.file.Size)
-	} else {
-		var err error
-		padIV, err = deriveFileIV(ivKey, paddingPseudoName)
-		if err != nil {
-			return nil, err
-		}
-		padOffset = 0
-	}
-
-	currentSize := int64(len(headerMagic) + 1 + len(contentID) + len(metaCipher))
-	for _, desc := range descriptors {
-		currentSize += desc.file.Size
-	}
+	currentSize := int64(len(headerMagic)+1+len(contentID)+len(metaCipher)) + totalFiles
 	padLen := paddingNeeded(currentSize)
 	if padLen > 0 {
-		if err := writePadding(w, xor, padIV, padOffset, padLen); err != nil {
-			return nil, err
-		}
+		readers = append(readers, bytes.NewReader(make([]byte, padLen)))
+	}
+
+	plain := io.MultiReader(readers...)
+	if err := encryptAndWrite(w, plain, xor, streamIV, 0); err != nil {
+		return nil, err
 	}
 
 	return contentID, nil
@@ -271,13 +280,6 @@ func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc,
 		return result, nil, err
 	}
 
-	// Recover file IV material only after authenticating the metadata.
-	metadataTag := metaBuf[len(metaBuf)-siv.TagSize:]
-	ivKey, err := revisionIVKey(revision, metadataTag)
-	if err != nil {
-		return result, nil, err
-	}
-
 	result.CreatedAt = time.Unix(revision.GetCreatedAt(), revision.GetCreatedAtNs())
 	result.Peers = metadata.GetPeers()
 	result.Files = make(map[string]File, len(metadata.GetFiles()))
@@ -287,17 +289,24 @@ func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc,
 	for _, fh := range metadata.GetFiles() {
 		fileHeaders[fh.GetName()] = fh
 	}
+	// Recover stream IV after authenticating the metadata.
+	metadataTag := metaBuf[len(metaBuf)-siv.TagSize:]
+	streamIV, err := revisionIVKey(revision, metadataTag)
+	if err != nil {
+		return result, nil, err
+	}
+
+	dataOffset := offset
+	streamOffset := uint64(0)
+	var totalFiles int64
 	for _, name := range names {
 		header, ok := fileHeaders[name]
 		if !ok {
 			return result, nil, errInvalidContent
 		}
 		size := header.GetFileLength()
-		fileIV, err := deriveFileIV(ivKey, name)
-		if err != nil {
-			return result, nil, err
-		}
-		file, err := newCipherFile(r, xor, fileIV, offset, size)
+		totalFiles += size
+		file, err := newDecryptedFile(r, xor, streamIV, dataOffset, size, streamOffset)
 		if err != nil {
 			return result, nil, err
 		}
@@ -308,20 +317,21 @@ func ParseContentFile(r io.ReaderAt, contentOpen, metadataOpen OpenFunc,
 			return result, nil, err
 		}
 		result.Files[name] = f
-		offset += size
+		dataOffset += size
+		streamOffset += uint64(size)
 	}
 
-	// Skip trailing padding if present; padding ensures total size is aligned.
+	// Validate padding length and overall alignment if size information is available.
 	if sized, ok := r.(interface{ Size() int64 }); ok {
 		totalSize := sized.Size()
-		if totalSize < offset {
-			return result, nil, errInvalidContent
-		}
-		padding := totalSize - offset
 		if totalSize%contentSizeAlignment != 0 {
 			return result, nil, errInvalidContent
 		}
-		if padding < 0 {
+		dataSize := totalSize - offset
+		if dataSize < totalFiles {
+			return result, nil, errInvalidContent
+		}
+		if dataSize-totalFiles < 0 {
 			return result, nil, errInvalidContent
 		}
 	}
@@ -426,102 +436,6 @@ func revisionMetadataAD(revision *storedpb.ContentRevision) ([]byte, error) {
 	return ad, nil
 }
 
-// deriveFileIV produces a per-file IV from the base IV key and filename.
-func deriveFileIV(ivKey []byte, name string) ([]byte, error) {
-	if len(ivKey) == 0 {
-		return nil, errors.New("usercontent: missing iv key")
-	}
-	deriver := hkdf.New(
-		sha256.New, ivKey, nil, []byte("usercontent/file-iv/"+name),
-	)
-	iv := make([]byte, aes.BlockSize)
-	if _, err := io.ReadFull(deriver, iv); err != nil {
-		return nil, err
-	}
-	return iv, nil
-}
-
-// writeEncryptedFile streams a file through the XOR keystream and writes the ciphertext.
-func writeEncryptedFile(w io.Writer, desc fileDescriptor,
-	xor XORKeyStreamAt, iv []byte) error {
-
-	reader := io.NewSectionReader(desc.file.Body, 0, desc.file.Size)
-	buf := make([]byte, 32*1024)
-	offset := uint64(0)
-	for {
-		n, err := reader.Read(buf)
-		if n > 0 {
-			chunk := buf[:n]
-			xor(chunk, chunk, iv, offset)
-			if _, werr := w.Write(chunk); werr != nil {
-				return werr
-			}
-			offset += uint64(n)
-		}
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// cipherFile wraps an encrypted section and applies the XOR keystream on reads.
-type cipherFile struct {
-	src    io.ReaderAt
-	xor    XORKeyStreamAt
-	iv     []byte
-	offset int64
-	length int64
-	size   int64
-}
-
-// newCipherFile constructs a reader that decrypts on the fly using XOR.
-func newCipherFile(src io.ReaderAt, xor XORKeyStreamAt, iv []byte,
-	offset, size int64) (*cipherFile, error) {
-
-	if offset < 0 || size < 0 {
-		return nil, errors.New("usercontent: invalid file lengths")
-	}
-
-	return &cipherFile{
-		src:    src,
-		xor:    xor,
-		iv:     iv,
-		offset: offset,
-		size:   size,
-	}, nil
-}
-
-// ReadAt reads from the encrypted file, applying the keystream for the given offset.
-func (cf *cipherFile) ReadAt(p []byte, off int64) (int, error) {
-	if off < 0 {
-		return 0, errors.New("usercontent: negative offset")
-	}
-	if off >= cf.size {
-		return 0, io.EOF
-	}
-
-	if int64(len(p)) > cf.size-off {
-		p = p[:cf.size-off]
-	}
-
-	n, err := cf.src.ReadAt(p, cf.offset+off)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return 0, err
-	}
-
-	cf.xor(p[:n], p[:n], cf.iv, uint64(off))
-	if int64(n)+off >= cf.size || n < len(p) {
-		return n, io.EOF
-	}
-
-	return n, nil
-}
-
 // readUint32 reads a uint32 in big-endian order from the reader at offset.
 func readUint32(r io.ReaderAt, offset int64, out *uint32) error {
 	buf := make([]byte, 4)
@@ -555,6 +469,101 @@ func verifyFileHash(expected []byte, file File) error {
 		return errInvalidContent
 	}
 	return nil
+}
+
+// encryptAndWrite streams plaintext through the XOR keystream and writes ciphertext.
+func encryptAndWrite(w io.Writer, r io.Reader, xor XORKeyStreamAt, iv []byte, offset uint64) error {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			xor(chunk, chunk, iv, offset)
+			written, werr := w.Write(chunk)
+			if werr != nil {
+				return werr
+			}
+			if written != n {
+				return errors.New("usercontent: short write")
+			}
+			offset += uint64(n)
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errors.New("usercontent: zero-length read without EOF")
+		}
+	}
+}
+
+// decryptedReader exposes plaintext via ReaderAt by decrypting slices from the shared ciphertext.
+type decryptedReader struct {
+	src          io.ReaderAt
+	xor          XORKeyStreamAt
+	iv           []byte
+	start        int64
+	size         int64
+	streamOffset uint64
+}
+
+// newDecryptedFile builds a ReaderAt limited to [start, start+size) of the decrypted stream.
+func newDecryptedFile(src io.ReaderAt, xor XORKeyStreamAt, iv []byte, start, size int64, streamOffset uint64) (*decryptedReader, error) {
+	if start < 0 || size < 0 {
+		return nil, errors.New("usercontent: invalid file lengths")
+	}
+	return &decryptedReader{
+		src:          src,
+		xor:          xor,
+		iv:           append([]byte(nil), iv...),
+		start:        start,
+		size:         size,
+		streamOffset: streamOffset,
+	}, nil
+}
+
+// ReadAt reads plaintext at the requested offset within the file window.
+func (dr *decryptedReader) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, errors.New("usercontent: negative offset")
+	}
+	if off >= dr.size {
+		return 0, io.EOF
+	}
+
+	if int64(len(p)) > dr.size-off {
+		p = p[:dr.size-off]
+	}
+
+	buf := make([]byte, len(p))
+	n, err := dr.src.ReadAt(buf, dr.start+off)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return 0, err
+	}
+	if int64(n)+off > dr.size {
+		n = int(dr.size - off)
+		err = io.EOF
+	}
+
+	dr.xor(buf[:n], buf[:n], dr.iv, dr.streamOffset+uint64(off))
+	copy(p[:n], buf[:n])
+
+	if int64(n)+off >= dr.size {
+		return n, io.EOF
+	}
+	return n, err
+}
+
+// addUint increments the IV counter by n in big-endian order.
+func addUint(iv []byte, n uint64) {
+	for i := len(iv) - 1; i >= 0 && n > 0; i-- {
+		sum := uint64(iv[i]) + (n & 0xff)
+		iv[i] = byte(sum)
+		n = (n >> 8) + (sum >> 8)
+	}
 }
 
 // paddingNeeded returns the number of bytes required to align the size to the

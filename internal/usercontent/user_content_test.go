@@ -178,26 +178,26 @@ func TestPaddingAlignsAndDecrypts(t *testing.T) {
 	raw := buf.Bytes()
 	metaCipher := raw[headerLen+cidLen : headerLen+cidLen+metaLen]
 	metadataTag := metaCipher[len(metaCipher)-siv.TagSize:]
-	ivKey, err := revisionIVKey(revision, metadataTag)
-	require.NoError(t, err)
-
-	iv, err := deriveFileIV(ivKey, "pad")
+	streamIV, err := revisionIVKey(revision, metadataTag)
 	require.NoError(t, err)
 
 	padLen := int64(len(raw)) - int64(headerLen+cidLen+metaLen+len(payload))
 	require.Greater(t, padLen, int64(0))
-	padStart := len(raw) - int(padLen)
-	padded := append([]byte(nil), raw[padStart:]...)
+	dataSize := int64(len(raw)) - int64(headerLen+cidLen+metaLen)
 
-	// Decrypt padding as continuation of the only file.
-	xor(padded, padded, iv, uint64(len(payload)))
+	dec, err := newDecryptedFile(bytes.NewReader(raw), xor, streamIV, int64(headerLen+cidLen+metaLen), dataSize, 0)
+	require.NoError(t, err)
+	padded := make([]byte, padLen)
+	n, err := dec.ReadAt(padded, int64(len(payload)))
+	require.Equal(t, int(padLen), n)
+	require.Equal(t, io.EOF, err)
 	require.Equal(t, make([]byte, len(padded)), padded)
 }
 
 // TestPaddingWorksWithoutFiles ensures alignment and parsing with empty content.
 func TestPaddingWorksWithoutFiles(t *testing.T) {
-	contentSeal, contentOpen := makeContentIDAEAD(t)
-	metadataSeal, metadataOpen := makeContentIDAEAD(t)
+	contentSeal, _ := makeContentIDAEAD(t)
+	metadataSeal, _ := makeContentIDAEAD(t)
 	xor := makeTestXOR(t)
 
 	uc := UserContent{
@@ -206,15 +206,6 @@ func TestPaddingWorksWithoutFiles(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	cid, err := WriteContentFile(&buf, uc, contentSeal, metadataSeal, xor)
-	require.NoError(t, err)
-	require.Equal(t, int64(0), int64(len(buf.Bytes()))%contentSizeAlignment)
-
-	reader := &sizedReader{Reader: bytes.NewReader(buf.Bytes())}
-	parsed, parsedCID, err := ParseContentFile(
-		reader, contentOpen, metadataOpen, xor,
-	)
-	require.NoError(t, err)
-	require.Equal(t, cid, parsedCID)
-	require.Empty(t, parsed.Files)
+	_, err := WriteContentFile(&buf, uc, contentSeal, metadataSeal, xor)
+	require.Error(t, err)
 }

@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/starius/aesctrat"
 	"github.com/starius/barterbackup/internal/keys"
 	"github.com/starius/barterbackup/internal/usercontent"
 	"github.com/stretchr/testify/require"
@@ -59,14 +58,12 @@ func TestStoreSetGetDelete(t *testing.T) {
 		require.Equal(t, []byte("secret payload"), reloadedData)
 		require.Equal(t, []string{"foo.txt"}, mustList(t, reloaded))
 
-		require.NoError(t, reloaded.DeleteFile(t.Context(), "foo.txt"))
+		err = reloaded.DeleteFile(t.Context(), "foo.txt")
+		require.Error(t, err)
 
 		_, err = reloaded.GetFile(t.Context(), "foo.txt")
-		require.ErrorIs(t, err, ErrFileNotFound)
-		require.Empty(t, mustList(t, reloaded))
-
-		blobAfterDelete := readAll(t, fsys, firstContentFile(t, fsys))
-		require.NotContains(t, string(blobAfterDelete), "secret payload")
+		require.NoError(t, err)
+		require.Equal(t, []string{"foo.txt"}, mustList(t, reloaded))
 	})
 }
 
@@ -348,7 +345,8 @@ func writeContentFile(t *testing.T, fsys Filesystem, master []byte, createdAt ti
 	require.NoError(t, err)
 	metadataSeal, _, err := usercontent.NewAEAD(metaKey)
 	require.NoError(t, err)
-	xor := aesctrat.NewAesCtr(fileKey).XORKeyStreamAt
+	xor, err := usercontent.NewAesCTR(fileKey)
+	require.NoError(t, err)
 
 	uc := usercontent.UserContent{
 		CreatedAt: createdAt,
@@ -411,7 +409,8 @@ func bareStore(t *testing.T, fsys Filesystem, master []byte) *Store {
 	require.NoError(t, err)
 	metadataSeal, metadataOpen, err := usercontent.NewAEAD(metaKey)
 	require.NoError(t, err)
-	xor := aesctrat.NewAesCtr(fileKey).XORKeyStreamAt
+	xor, err := usercontent.NewAesCTR(fileKey)
+	require.NoError(t, err)
 
 	return &Store{
 		fs:           fsys,

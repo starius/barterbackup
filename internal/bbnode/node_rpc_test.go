@@ -145,7 +145,7 @@ func TestDownloadHashStable(t *testing.T) {
 		expectedHash, err := node.store.ContentHash()
 		require.NoError(t, err)
 		require.Equal(t,
-			"c2c4509bb83cdb677aecc99bc30dd571ee8775595521aeb0d3fd8c745f8c4575",
+			"e99a6476f8a7830471d466177c56c6fa13a9cf983722da9a4c689106715e4b74",
 			hex.EncodeToString(expectedHash))
 
 		first, err := node.Download(t.Context(), &bbrpc.DownloadRequest{

@@ -117,25 +117,7 @@ func makeContentIDAEAD(t *testing.T) (SealFunc, OpenFunc) {
 
 // makeTestXOR builds a CTR-based XOR keystream with manual offset skipping.
 func makeTestXOR(t *testing.T) XORKeyStreamAt {
-	block := makeCipherBlock(t)
-	return func(dst, src, iv []byte, offset uint64) {
-		if len(dst) != len(src) {
-			panic("xor: len mismatch")
-		}
-		stream := cipher.NewCTR(block, iv)
-		if offset > 0 {
-			const chunkSize = 32 * 1024
-			buf := make([]byte, chunkSize)
-			remaining := offset
-			for remaining > 0 {
-				n := chunkSize
-				if remaining < uint64(n) {
-					n = int(remaining)
-				}
-				stream.XORKeyStream(buf[:n], buf[:n])
-				remaining -= uint64(n)
-			}
-		}
-		stream.XORKeyStream(dst, src)
-	}
+	xor, err := NewAesCTR(randomKey(t))
+	require.NoError(t, err)
+	return xor
 }

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/starius/aesctrat"
 	"github.com/starius/barterbackup/internal/keys"
 	"github.com/starius/barterbackup/internal/usercontent"
 	"github.com/starius/barterbackup/storedpb"
@@ -146,6 +145,10 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	xor, err := usercontent.NewAesCTR(fileKey)
+	if err != nil {
+		return nil, err
+	}
 	contentSeal, contentOpen, err := usercontent.NewAEAD(contentKey)
 	if err != nil {
 		return nil, err
@@ -154,7 +157,6 @@ func NewStore(fsys Filesystem, master []byte) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	xor := aesctrat.NewAesCtr(fileKey).XORKeyStreamAt
 
 	store := &Store{
 		fs:           fsys,
@@ -228,12 +230,16 @@ func (s *Store) SetFile(_ context.Context, name string, data []byte) error {
 	if name == "" {
 		return errors.New("file name is empty")
 	}
-	s.files[name] = usercontent.File{
+	files := make(map[string]usercontent.File, len(s.files)+1)
+	for k, v := range s.files {
+		files[k] = v
+	}
+	files[name] = usercontent.File{
 		Body: bytes.NewReader(data),
 		Size: int64(len(data)),
 	}
 
-	return s.persist()
+	return s.persistFiles(files)
 }
 
 // GetFile retrieves a persisted file by name.
@@ -267,9 +273,18 @@ func (s *Store) DeleteFile(_ context.Context, name string) error {
 	if _, ok := s.files[name]; !ok {
 		return ErrFileNotFound
 	}
-	delete(s.files, name)
+	if len(s.files) == 1 {
+		return errors.New("cannot delete the last remaining file")
+	}
+	files := make(map[string]usercontent.File, len(s.files)-1)
+	for k, v := range s.files {
+		if k == name {
+			continue
+		}
+		files[k] = v
+	}
 
-	return s.persist()
+	return s.persistFiles(files)
 }
 
 // ListFiles returns the sorted list of file names.
@@ -444,10 +459,13 @@ func (s *Store) OpenContent() (ReadFile, []byte, error) {
 }
 
 // persist encodes the current state to the backing filesystem.
-func (s *Store) persist() error {
+func (s *Store) persistFiles(files map[string]usercontent.File) error {
+	if len(files) == 0 {
+		return errors.New("usercontent: at least one file is required")
+	}
 	uc := usercontent.UserContent{
 		CreatedAt: time.Now(),
-		Files:     s.files,
+		Files:     files,
 	}
 	if len(s.peers) > 0 {
 		uc.Peers = append([]*storedpb.Peer(nil), s.peers...)
@@ -501,6 +519,7 @@ func (s *Store) persist() error {
 		}
 	}
 	s.contentName = newName
+	s.files = files
 
 	return nil
 }
