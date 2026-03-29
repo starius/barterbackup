@@ -377,6 +377,11 @@ impl Store {
         self.fs.read(&content_file_name(content_id))
     }
 
+    /// Report whether a content blob exists for the supplied content id.
+    pub fn has_content_blob(&self, content_id: &[u8]) -> bool {
+        self.read_blob_by_id(content_id).is_ok()
+    }
+
     /// Atomically write an arbitrary content blob under its content id.
     pub fn write_content_blob(&self, content_id: &[u8], blob: &[u8]) -> Result<(), StorageError> {
         self.fs.write_atomic(&content_file_name(content_id), blob)

@@ -5,6 +5,7 @@ members = [
     "crates/clock",
     "crates/content",
     "crates/storage",
+    "crates/transport",
     "crates/node",
     "crates/clitls",
     "crates/netmock",

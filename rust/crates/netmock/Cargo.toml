@@ -16,3 +16,5 @@ ed25519-dalek = "1"
 futures-util = "0.3"
 tokio-rustls = "0.26"
 tokio-stream = { version = "0.1", features = ["net"] }
+transport = { path = "../transport" }
+async-trait = "0.1"

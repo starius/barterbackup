@@ -1,0 +1,15 @@
+[package]
+name = "transport"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "transport"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+ed25519-dalek = "1"
+protos = { path = "../protos" }
+tonic = { version = "0.14.2", features = ["transport"] }

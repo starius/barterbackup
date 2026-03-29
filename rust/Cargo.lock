@@ -2498,6 +2498,7 @@ name = "netmock"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clitls",
  "ed25519-dalek 1.0.1",
  "futures-util",
@@ -2505,6 +2506,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-stream",
  "tonic",
+ "transport",
 ]
 
 [[package]]
@@ -2540,6 +2542,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+ "transport",
 ]
 
 [[package]]
@@ -5699,6 +5702,17 @@ checksum = "04659ddb06c87d233c566112c1c9c5b9e98256d9af50ec3bc9c8327f873a7568"
 dependencies = [
  "quote",
  "syn 2.0.106",
+]
+
+[[package]]
+name = "transport"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "ed25519-dalek 1.0.1",
+ "protos",
+ "tonic",
 ]
 
 [[package]]

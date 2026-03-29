@@ -6,15 +6,18 @@
 //! depending on Tor.
 
 use anyhow::Result;
+use async_trait::async_trait;
 use ed25519_dalek::SecretKey;
 use futures_util::StreamExt;
+use std::collections::BTreeMap;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::server::TlsStream;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Channel;
+use transport::{PeerClient, PeerConnector};
 
 /// MockPeerListener is a localhost TCP listener wrapped in peer TLS.
 pub struct MockPeerListener {
@@ -75,4 +78,45 @@ pub async fn connect_peer_channel(
 ) -> Result<Channel> {
     let client_tls = clitls::build_peer_client_tls(expected_server_onion, client_priv)?;
     clitls::connect_channel(endpoint, client_tls).await
+}
+
+/// MockPeerConnector resolves onion hostnames to localhost mock endpoints.
+#[derive(Debug, Default)]
+pub struct MockPeerConnector {
+    endpoints: RwLock<BTreeMap<String, String>>,
+}
+
+impl MockPeerConnector {
+    /// Create an empty mock peer connector.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a peer onion hostname with its mock `https://` endpoint.
+    pub fn register_peer(&self, peer_onion: &str, endpoint: &str) {
+        self.endpoints
+            .write()
+            .unwrap()
+            .insert(peer_onion.to_string(), endpoint.to_string());
+    }
+}
+
+#[async_trait]
+impl PeerConnector for MockPeerConnector {
+    async fn connect(
+        &self,
+        peer_onion: &str,
+        client_private_key: &SecretKey,
+    ) -> Result<PeerClient> {
+        let endpoint = self
+            .endpoints
+            .read()
+            .unwrap()
+            .get(peer_onion)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown peer onion: {peer_onion}"))?;
+        let channel = connect_peer_channel(&endpoint, peer_onion, client_private_key).await?;
+
+        Ok(PeerClient::new(channel))
+    }
 }

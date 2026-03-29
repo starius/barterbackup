@@ -15,6 +15,17 @@ use std::time::Instant;
 use storage::{Filesystem, StorageError, Store};
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tonic::{Code, Response, Status};
+use transport::PeerConnector;
+
+const MAX_PEER_CONTENT_BYTES: i64 = 4 * 1024 * 1024;
+
+/// PeerIdentity describes the authenticated peer that issued a request.
+struct PeerIdentity {
+    /// public_key is the Ed25519 key presented in the peer certificate.
+    public_key: ed25519_dalek::PublicKey,
+    /// onion_address is the Tor v3 hostname derived from `public_key`.
+    onion_address: String,
+}
 
 /// Node represents a single BarterBackup instance.
 pub struct Node {
@@ -30,6 +41,8 @@ pub struct Node {
     known_peers: Mutex<BTreeSet<String>>,
     /// storage_config is the current local storage policy snapshot.
     storage_config: Mutex<clirpc::StorageConfig>,
+    /// peer_connector dials other nodes when peer sync is enabled.
+    peer_connector: Mutex<Option<Arc<dyn PeerConnector>>>,
 }
 
 impl Node {
@@ -75,6 +88,7 @@ impl Node {
             store,
             known_peers: Mutex::new(BTreeSet::new()),
             storage_config: Mutex::new(clirpc::StorageConfig::default()),
+            peer_connector: Mutex::new(None),
         })
     }
 
@@ -110,8 +124,16 @@ impl Node {
         })
     }
 
-    /// Derive a peer onion hostname from the TLS client certificate on a request.
-    fn peer_onion_from_request<T>(&self, request: &tonic::Request<T>) -> Result<String, Status> {
+    /// Install the outbound peer connector used for peer synchronization.
+    pub fn set_peer_connector(&self, peer_connector: Arc<dyn PeerConnector>) {
+        *self.peer_connector.lock().unwrap() = Some(peer_connector);
+    }
+
+    /// Extract the authenticated peer identity from the request TLS state.
+    fn peer_identity_from_request<T>(
+        &self,
+        request: &tonic::Request<T>,
+    ) -> Result<PeerIdentity, Status> {
         let tls_info = request
             .extensions()
             .get::<TlsConnectInfo<TcpConnectInfo>>()
@@ -125,7 +147,123 @@ impl Node {
         let public_key = clitls::public_key_from_certificate_der(end_entity.as_ref())
             .map_err(|_| Status::unauthenticated("client certificate required"))?;
 
-        Ok(keys::onion_hostname_from_public_key(&public_key))
+        Ok(PeerIdentity {
+            onion_address: keys::onion_hostname_from_public_key(&public_key),
+            public_key,
+        })
+    }
+
+    /// Build a responder-side view of the caller's stored content, if any.
+    fn requester_content(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+    ) -> Result<Option<bbrpc::ContentInfo>, Status> {
+        self.with_store(|store| {
+            let peer = store
+                .peers()
+                .into_iter()
+                .find(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes());
+            let Some(peer) = peer else {
+                return Ok(None);
+            };
+            if peer.content_id.is_empty() {
+                return Ok(None);
+            }
+
+            match store.read_blob_by_id(&peer.content_id) {
+                Ok(blob) => Ok(Some(bbrpc::ContentInfo {
+                    content_id: peer.content_id,
+                    content_length: i64::try_from(blob.len()).unwrap_or(i64::MAX),
+                })),
+                Err(StorageError::FileNotFound) => Ok(None),
+                Err(error) => Err(error),
+            }
+        })
+    }
+
+    /// Connect to another peer using the configured outbound transport.
+    async fn connect_peer_client(&self, peer_onion: &str) -> Result<transport::PeerClient, Status> {
+        let connector = self
+            .peer_connector
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| Status::failed_precondition("peer connector is not configured"))?;
+        connector
+            .connect(peer_onion, &self.ed25519_keypair.secret)
+            .await
+            .map_err(|error| Status::unavailable(format!("connect peer: {error}")))
+    }
+
+    /// Download an encrypted blob from a peer and verify the advertised hash.
+    async fn download_peer_blob(
+        &self,
+        peer_onion: &str,
+        content_id: &[u8],
+    ) -> Result<Vec<u8>, Status> {
+        let mut client = self.connect_peer_client(peer_onion).await?;
+        let response = client
+            .download(bbrpc::DownloadRequest {
+                content_id: content_id.to_vec(),
+                offset: 0,
+                reference_content_id: Vec::new(),
+            })
+            .await
+            .map_err(|error| Status::unavailable(format!("download peer content: {error}")))?
+            .into_inner();
+        if response.total_length < 0 {
+            return Err(Status::internal("peer returned a negative content length"));
+        }
+
+        // The current protocol implementation serves whole blobs as raw bytes.
+        let raw_bytes = match response.section {
+            Some(bbrpc::download_response::Section::RawBytes(raw_bytes)) => raw_bytes.value,
+            Some(bbrpc::download_response::Section::Reference(_)) => {
+                return Err(Status::unimplemented(
+                    "reference sections are not supported yet",
+                ));
+            }
+            None => return Err(Status::internal("peer returned no content section")),
+        };
+        if i64::try_from(raw_bytes.len()).unwrap_or(i64::MAX) != response.total_length {
+            return Err(Status::internal("peer returned a short content blob"));
+        }
+
+        let actual_hash = Sha256::digest(&raw_bytes);
+        if actual_hash.as_slice() != response.sha256.as_slice() {
+            return Err(Status::data_loss("peer content hash mismatch"));
+        }
+
+        Ok(raw_bytes)
+    }
+
+    /// Remove an unreferenced foreign blob once no peer metadata points to it.
+    fn remove_unused_foreign_blob(&self, content_id: &[u8]) -> Result<(), Status> {
+        self.with_store(|store| {
+            if store
+                .current_content_id()
+                .is_some_and(|current| current == content_id)
+            {
+                return Ok(());
+            }
+            if store
+                .peers()
+                .iter()
+                .any(|peer| peer.content_id.as_slice() == content_id)
+            {
+                return Ok(());
+            }
+
+            match store.remove_content_blob(content_id) {
+                Ok(()) | Err(StorageError::FileNotFound) => Ok(()),
+                Err(error) => Err(error),
+            }
+        })
+    }
+
+    /// Report whether a peer-visible content id is already stored locally.
+    fn has_content_blob(&self, content_id: &[u8]) -> Result<bool, Status> {
+        self.with_store(|store| Ok(store.has_content_blob(content_id)))
     }
 }
 
@@ -375,9 +513,9 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         &self,
         request: tonic::Request<bbrpc::HealthCheckRequest>,
     ) -> Result<tonic::Response<bbrpc::HealthCheckResponse>, tonic::Status> {
-        let client_onion = self.node.peer_onion_from_request(&request)?;
+        let peer_identity = self.node.peer_identity_from_request(&request)?;
         Ok(Response::new(bbrpc::HealthCheckResponse {
-            client_onion,
+            client_onion: peer_identity.onion_address,
             server_onion: self.node.address().to_string(),
         }))
     }
@@ -404,10 +542,17 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
 
     async fn get_content_revision(
         &self,
-        _request: tonic::Request<bbrpc::GetContentRevisionRequest>,
+        request: tonic::Request<bbrpc::GetContentRevisionRequest>,
     ) -> Result<tonic::Response<bbrpc::GetContentRevisionResponse>, tonic::Status> {
+        let requester_content = self
+            .node
+            .peer_identity_from_request(&request)
+            .ok()
+            .map(|peer_identity| self.node.requester_content(&peer_identity.public_key))
+            .transpose()?
+            .flatten();
         Ok(Response::new(bbrpc::GetContentRevisionResponse {
-            requester_content: None,
+            requester_content,
             requester_remaining_seconds: 0,
             responder_content: self.node.responder_content()?,
         }))
@@ -415,17 +560,71 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
 
     async fn set_content_revision(
         &self,
-        _request: tonic::Request<bbrpc::SetContentRevisionRequest>,
+        request: tonic::Request<bbrpc::SetContentRevisionRequest>,
     ) -> Result<tonic::Response<bbrpc::SetContentRevisionResponse>, tonic::Status> {
-        Err(Status::unimplemented(
-            "SetContentRevision still needs peer identity plumbing",
-        ))
+        let peer_identity = self.node.peer_identity_from_request(&request)?;
+        let requester_content = request.into_inner().requester_content;
+        if let Some(content_info) = requester_content.as_ref() {
+            if content_info.content_length <= 0 {
+                return Err(Status::invalid_argument("content length must be positive"));
+            }
+            if content_info.content_length > MAX_PEER_CONTENT_BYTES {
+                return Err(Status::invalid_argument("content is too large"));
+            }
+            if content_info.content_id.is_empty() {
+                return Err(Status::invalid_argument("content id is required"));
+            }
+        }
+
+        let previous_content_id = self.node.with_store(|store| {
+            Ok(store
+                .peers()
+                .into_iter()
+                .find(|peer| peer.onion_pubkey.as_slice() == peer_identity.public_key.as_bytes())
+                .map(|peer| peer.content_id)
+                .filter(|content_id| !content_id.is_empty()))
+        })?;
+
+        match requester_content {
+            Some(content_info) => {
+                if !self.node.has_content_blob(&content_info.content_id)? {
+                    let blob = self
+                        .node
+                        .download_peer_blob(&peer_identity.onion_address, &content_info.content_id)
+                        .await?;
+                    self.node.with_store(|store| {
+                        store.write_content_blob(&content_info.content_id, &blob)
+                    })?;
+                }
+                self.node.with_store(|store| {
+                    store.set_peer_content_id(
+                        peer_identity.public_key.as_bytes(),
+                        &content_info.content_id,
+                    )
+                })?;
+                if let Some(previous_content_id) = previous_content_id {
+                    if previous_content_id != content_info.content_id {
+                        self.node.remove_unused_foreign_blob(&previous_content_id)?;
+                    }
+                }
+            }
+            None => {
+                self.node
+                    .with_store(|store| store.remove_peer(peer_identity.public_key.as_bytes()))?;
+                if let Some(previous_content_id) = previous_content_id {
+                    self.node.remove_unused_foreign_blob(&previous_content_id)?;
+                }
+            }
+        }
+
+        Ok(Response::new(bbrpc::SetContentRevisionResponse {}))
     }
 
     async fn download(
         &self,
         request: tonic::Request<bbrpc::DownloadRequest>,
     ) -> Result<tonic::Response<bbrpc::DownloadResponse>, tonic::Status> {
+        let peer_identity = self.node.peer_identity_from_request(&request).ok();
         let request = request.into_inner();
         if request.content_id.is_empty() {
             return Err(Status::invalid_argument("content_id is required"));
@@ -434,12 +633,29 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
             return Err(Status::invalid_argument("offset must be non-negative"));
         }
 
+        let offset = usize::try_from(request.offset)
+            .map_err(|_| Status::invalid_argument("offset is too large"))?;
+        let current_content_id = self.node.with_store(|store| {
+            Ok(store
+                .current_content_id()
+                .map(|content_id| content_id.to_vec()))
+        })?;
+        let allowed = current_content_id
+            .as_ref()
+            .is_some_and(|content_id| content_id.as_slice() == request.content_id.as_slice())
+            || peer_identity
+                .as_ref()
+                .map(|peer_identity| self.node.requester_content(&peer_identity.public_key))
+                .transpose()?
+                .flatten()
+                .is_some_and(|content_info| content_info.content_id == request.content_id);
+        if !allowed {
+            return Err(Status::not_found("content not found"));
+        }
+
         let blob = self
             .node
             .with_store(|store| store.read_blob_by_id(&request.content_id))?;
-        let total_length = i64::try_from(blob.len()).unwrap_or(i64::MAX);
-        let offset = usize::try_from(request.offset)
-            .map_err(|_| Status::invalid_argument("offset is too large"))?;
         if offset > blob.len() {
             return Err(Status::out_of_range("offset is past the end of the blob"));
         }
@@ -449,7 +665,7 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
             value: blob[offset..].to_vec(),
         };
         Ok(Response::new(bbrpc::DownloadResponse {
-            total_length,
+            total_length: i64::try_from(blob.len()).unwrap_or(i64::MAX),
             sha256,
             section: Some(bbrpc::download_response::Section::RawBytes(raw_bytes)),
         }))
@@ -478,8 +694,10 @@ mod tests {
     use protos::clirpc::barter_backup_client_server::{
         BarterBackupClient, BarterBackupClientServer,
     };
+    use std::sync::Arc;
     use std::time::Duration;
     use tonic::transport::Endpoint;
+    use transport::PeerConnector;
 
     /// Spawn an h2c local CLI server for integration-style node tests.
     async fn spawn_cli_server(
@@ -518,6 +736,28 @@ mod tests {
         let handle = tokio::spawn(router.serve_with_incoming(listener.into_incoming()));
 
         Ok((endpoint, handle))
+    }
+
+    /// Spawn a p2p server and register its endpoint in the shared mock connector.
+    async fn spawn_registered_p2p_server(
+        node: Arc<Node>,
+        connector: &netmock::MockPeerConnector,
+    ) -> anyhow::Result<tokio::task::JoinHandle<Result<(), tonic::transport::Error>>> {
+        let (endpoint, handle) = spawn_p2p_server(node.clone()).await?;
+        connector.register_peer(node.address(), &endpoint);
+        Ok(handle)
+    }
+
+    /// Connect a peer client to a mock p2p server.
+    async fn connect_p2p_client(
+        client_node: Arc<Node>,
+        server_node: Arc<Node>,
+        connector: &netmock::MockPeerConnector,
+    ) -> anyhow::Result<BarterBackupServerClient<tonic::transport::Channel>> {
+        let client_secret = &client_node.ed25519_keypair().secret;
+        connector
+            .connect(server_node.address(), client_secret)
+            .await
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -641,6 +881,7 @@ mod tests {
         let server_node = Arc::new(Node::with_local_storage("password", server_filesystem)?);
         let client_node = Arc::new(Node::new("client-password")?);
         let cli = CliService::new(server_node.clone());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
 
         cli.set_file(tonic::Request::new(clirpc::SetFileRequest {
             file: Some(clirpc::File {
@@ -650,11 +891,10 @@ mod tests {
         }))
         .await?;
 
-        let (endpoint, server) = spawn_p2p_server(server_node.clone()).await?;
-        let client_secret = &client_node.ed25519_keypair().secret;
-        let channel =
-            netmock::connect_peer_channel(&endpoint, server_node.address(), client_secret).await?;
-        let mut p2p = BarterBackupServerClient::new(channel);
+        let server = spawn_registered_p2p_server(server_node.clone(), connector.as_ref()).await?;
+        let mut p2p =
+            connect_p2p_client(client_node.clone(), server_node.clone(), connector.as_ref())
+                .await?;
 
         let revision = p2p
             .get_content_revision(tonic::Request::new(bbrpc::GetContentRevisionRequest {}))
@@ -684,6 +924,121 @@ mod tests {
         }
 
         server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_content_revision_downloads_and_tracks_peer_blob() -> anyhow::Result<()> {
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage("requester", requester_filesystem)?);
+        let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let responder_node = Arc::new(Node::with_local_storage("responder", responder_filesystem)?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        responder_node.set_peer_connector(connector.clone());
+
+        let requester_cli = CliService::new(requester_node.clone());
+        requester_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let requester_server =
+            spawn_registered_p2p_server(requester_node.clone(), connector.as_ref()).await?;
+        let responder_server =
+            spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
+        let mut requester_to_responder = connect_p2p_client(
+            requester_node.clone(),
+            responder_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
+
+        let requester_content = requester_node.responder_content()?.unwrap();
+        requester_to_responder
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                requester_content: Some(requester_content.clone()),
+            })
+            .await?;
+
+        let revision = requester_to_responder
+            .get_content_revision(bbrpc::GetContentRevisionRequest {})
+            .await?
+            .into_inner();
+        assert_eq!(revision.requester_content, Some(requester_content.clone()));
+
+        let requester_blob = requester_node.with_store(|store| store.current_blob())?;
+        let mirrored_blob = responder_node
+            .with_store(|store| store.read_blob_by_id(&requester_content.content_id))?;
+        assert_eq!(mirrored_blob, requester_blob);
+
+        requester_server.abort();
+        responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn download_hides_other_peers_content() -> anyhow::Result<()> {
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage("requester", requester_filesystem)?);
+        let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let responder_node = Arc::new(Node::with_local_storage("responder", responder_filesystem)?);
+        let other_node = Arc::new(Node::new("other")?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        responder_node.set_peer_connector(connector.clone());
+        other_node.set_peer_connector(connector.clone());
+
+        let requester_cli = CliService::new(requester_node.clone());
+        requester_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let requester_server =
+            spawn_registered_p2p_server(requester_node.clone(), connector.as_ref()).await?;
+        let responder_server =
+            spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
+        let mut requester_to_responder = connect_p2p_client(
+            requester_node.clone(),
+            responder_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
+        let mut other_to_responder = connect_p2p_client(
+            other_node.clone(),
+            responder_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
+
+        let requester_content = requester_node.responder_content()?.unwrap();
+        requester_to_responder
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                requester_content: Some(requester_content.clone()),
+            })
+            .await?;
+
+        let error = other_to_responder
+            .download(bbrpc::DownloadRequest {
+                content_id: requester_content.content_id.clone(),
+                offset: 0,
+                reference_content_id: Vec::new(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::NotFound);
+
+        requester_server.abort();
+        responder_server.abort();
         Ok(())
     }
 }
