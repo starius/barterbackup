@@ -80,17 +80,90 @@ impl StartedTask {
     }
 }
 
+/// MaintenanceMode selects how the daemon schedules maintenance passes.
+#[derive(Clone)]
+enum MaintenanceMode {
+    /// Interval uses a real-time periodic timer.
+    Interval,
+    /// Manual waits for explicit test ticks while still honoring wakeups.
+    Manual(Arc<Notify>),
+}
+
 /// MaintenanceConfig configures the daemon's periodic background maintenance.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct MaintenanceConfig {
     /// interval is the delay between maintenance passes.
     interval: Duration,
+    /// mode selects the scheduling strategy used by the loop.
+    mode: MaintenanceMode,
+}
+
+impl MaintenanceConfig {
+    /// Create a real-time maintenance configuration.
+    fn with_interval(interval: Duration) -> Self {
+        Self {
+            interval,
+            mode: MaintenanceMode::Interval,
+        }
+    }
+
+    /// Create a manual maintenance configuration for deterministic tests.
+    fn manual(tick: Arc<Notify>) -> Self {
+        Self {
+            interval: Duration::from_secs(60),
+            mode: MaintenanceMode::Manual(tick),
+        }
+    }
 }
 
 impl Default for MaintenanceConfig {
     fn default() -> Self {
-        Self {
-            interval: Duration::from_secs(60),
+        Self::with_interval(Duration::from_secs(60))
+    }
+}
+
+/// MaintenanceSchedule owns the live wait state for one maintenance loop.
+enum MaintenanceSchedule {
+    /// Interval waits on a real tokio timer.
+    Interval(tokio::time::Interval),
+    /// Manual waits on an explicit trigger notification.
+    Manual(Arc<Notify>),
+}
+
+impl MaintenanceSchedule {
+    /// Build one schedule from a maintenance configuration.
+    fn new(config: &MaintenanceConfig) -> Self {
+        match &config.mode {
+            MaintenanceMode::Interval => {
+                let mut interval = tokio::time::interval(config.interval);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                Self::Interval(interval)
+            }
+            MaintenanceMode::Manual(tick) => Self::Manual(tick.clone()),
+        }
+    }
+
+    /// Wait until the next maintenance pass should run or shutdown starts.
+    async fn wait_for_next(
+        &mut self,
+        maintenance_wakeup: &Notify,
+        shutdown: &CancellationToken,
+    ) -> bool {
+        match self {
+            Self::Interval(interval) => {
+                tokio::select! {
+                    _ = shutdown.cancelled() => false,
+                    _ = interval.tick() => true,
+                    _ = maintenance_wakeup.notified() => true,
+                }
+            }
+            Self::Manual(tick) => {
+                tokio::select! {
+                    _ = shutdown.cancelled() => false,
+                    _ = tick.notified() => true,
+                    _ = maintenance_wakeup.notified() => true,
+                }
+            }
         }
     }
 }
@@ -732,16 +805,16 @@ async fn run_maintenance_loop(
     shutdown: CancellationToken,
     maintenance_config: MaintenanceConfig,
 ) -> Result<()> {
-    // Use one timer for both recovery and contract maintenance for now. The
-    // loop also wakes immediately after local mutations via `maintenance_wakeup`.
-    let mut interval = tokio::time::interval(maintenance_config.interval);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Use one schedule for both recovery and contract maintenance for now.
+    // The loop also wakes immediately after local mutations.
+    let mut schedule = MaintenanceSchedule::new(&maintenance_config);
 
     loop {
-        tokio::select! {
-            _ = shutdown.cancelled() => break,
-            _ = interval.tick() => {}
-            _ = maintenance_wakeup.notified() => {}
+        if !schedule
+            .wait_for_next(maintenance_wakeup.as_ref(), &shutdown)
+            .await
+        {
+            break;
         }
 
         run_maintenance_pass(node.as_ref()).await;
@@ -910,10 +983,14 @@ mod tests {
         DaemonService::with_maintenance_config(
             temp_dir.path().to_path_buf(),
             Arc::new(NoopPeerRuntimeFactory),
-            MaintenanceConfig {
-                interval: Duration::from_secs(60),
-            },
+            MaintenanceConfig::with_interval(Duration::from_secs(60)),
         )
+    }
+
+    /// Build a manual maintenance config and its explicit trigger notify.
+    fn manual_maintenance() -> (MaintenanceConfig, Arc<Notify>) {
+        let tick = Arc::new(Notify::new());
+        (MaintenanceConfig::manual(tick.clone()), tick)
     }
 
     /// MockPeerRuntimeFactory starts peer servers over the TLS-backed mock
@@ -994,6 +1071,11 @@ mod tests {
             fs::remove_file(entry.path())?;
         }
         Ok(())
+    }
+
+    /// Return the mirrored content id currently tracked for `peer_onion`.
+    fn mirrored_peer_content_id(node: &Node, peer_onion: &str) -> Result<Option<Vec<u8>>> {
+        Ok(node.mirrored_peer_content_id(peer_onion)?)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1150,9 +1232,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn background_maintenance_syncs_peer_content() -> Result<()> {
         let connector = Arc::new(netmock::MockPeerConnector::new());
-        let maintenance_config = MaintenanceConfig {
-            interval: Duration::from_millis(50),
-        };
+        let maintenance_config = MaintenanceConfig::with_interval(Duration::from_millis(50));
         let local_dir = TempDir::new()?;
         let remote_dir = TempDir::new()?;
         let local_service = DaemonService::with_maintenance_config(
@@ -1227,9 +1307,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn restarted_daemon_recovers_from_persisted_peers() -> Result<()> {
         let connector = Arc::new(netmock::MockPeerConnector::new());
-        let maintenance_config = MaintenanceConfig {
-            interval: Duration::from_millis(50),
-        };
+        let maintenance_config = MaintenanceConfig::with_interval(Duration::from_millis(50));
         let owner_dir = TempDir::new()?;
         let peer_dir = TempDir::new()?;
         let owner_service = DaemonService::with_maintenance_config(
@@ -1342,9 +1420,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn background_maintenance_increases_peer_score() -> Result<()> {
         let connector = Arc::new(netmock::MockPeerConnector::new());
-        let maintenance_config = MaintenanceConfig {
-            interval: Duration::from_millis(200),
-        };
+        let maintenance_config = MaintenanceConfig::with_interval(Duration::from_millis(200));
         let local_dir = TempDir::new()?;
         let remote_dir = TempDir::new()?;
         let local_service = DaemonService::with_maintenance_config(
@@ -1412,6 +1488,134 @@ mod tests {
 
         local_service.shutdown().await?;
         remote_service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn manual_maintenance_tick_refreshes_restarted_peer() -> Result<()> {
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        let (local_maintenance, local_tick) = manual_maintenance();
+        let (remote_maintenance, _remote_tick) = manual_maintenance();
+        let (restarted_remote_maintenance, _restarted_remote_tick) = manual_maintenance();
+        let local_dir = TempDir::new()?;
+        let remote_dir = TempDir::new()?;
+        let local_service = DaemonService::with_maintenance_config(
+            local_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            local_maintenance,
+        );
+        let remote_service = DaemonService::with_maintenance_config(
+            remote_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            remote_maintenance,
+        );
+
+        local_service
+            .unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: "local-manual".to_string(),
+            }))
+            .await?;
+        remote_service
+            .unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: "remote-manual".to_string(),
+            }))
+            .await?;
+
+        // Seed the remote peer with one revision and connect it locally.
+        remote_service
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: b"peer-v1".to_vec(),
+                }),
+            }))
+            .await?;
+        let remote_onion = unlocked_node(&remote_service).await.address().to_string();
+        let remote_v1 = unlocked_node(&remote_service)
+            .await
+            .current_content_info()?
+            .unwrap()
+            .content_id;
+        local_service
+            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: remote_onion.clone(),
+                }),
+            }))
+            .await?;
+
+        // One explicit tick mirrors the remote revision into the local store.
+        local_tick.notify_one();
+        wait_for_async(Duration::from_secs(2), || {
+            let local_service = &local_service;
+            let remote_onion = remote_onion.clone();
+            let remote_v1 = remote_v1.clone();
+            async move {
+                let mirrored = mirrored_peer_content_id(
+                    unlocked_node(local_service).await.as_ref(),
+                    &remote_onion,
+                )?;
+                Ok(mirrored == Some(remote_v1.clone()))
+            }
+        })
+        .await?;
+
+        remote_service.shutdown().await?;
+
+        let restarted_remote = DaemonService::with_maintenance_config(
+            remote_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            restarted_remote_maintenance,
+        );
+        restarted_remote
+            .unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: "remote-manual".to_string(),
+            }))
+            .await?;
+
+        // Change the remote content after restart. The local mirror should stay
+        // stale until the explicit maintenance tick fires.
+        restarted_remote
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: b"peer-v2".to_vec(),
+                }),
+            }))
+            .await?;
+        let remote_v2 = unlocked_node(&restarted_remote)
+            .await
+            .current_content_info()?
+            .unwrap()
+            .content_id;
+        assert_eq!(
+            mirrored_peer_content_id(unlocked_node(&local_service).await.as_ref(), &remote_onion)?,
+            Some(remote_v1.clone())
+        );
+
+        local_tick.notify_one();
+        wait_for_async(Duration::from_secs(2), || {
+            let local_service = &local_service;
+            let remote_onion = remote_onion.clone();
+            let remote_v2 = remote_v2.clone();
+            async move {
+                let mirrored = mirrored_peer_content_id(
+                    unlocked_node(local_service).await.as_ref(),
+                    &remote_onion,
+                )?;
+                Ok(mirrored == Some(remote_v2.clone()))
+            }
+        })
+        .await?;
+
+        restarted_remote.shutdown().await?;
+        local_service.shutdown().await?;
         Ok(())
     }
 }

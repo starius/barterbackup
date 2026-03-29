@@ -185,6 +185,26 @@ impl Node {
         self.known_peers.lock().unwrap().iter().cloned().collect()
     }
 
+    /// Return the current local content info, if one exists.
+    pub fn current_content_info(&self) -> Result<Option<bbrpc::ContentInfo>, Status> {
+        self.responder_content()
+    }
+
+    /// Return the mirrored content id currently tracked for one peer.
+    pub fn mirrored_peer_content_id(&self, peer_onion: &str) -> Result<Option<Vec<u8>>, Status> {
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
+            .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+
+        self.with_store(|store| {
+            Ok(store
+                .peers()
+                .into_iter()
+                .find(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes())
+                .map(|peer| peer.content_id)
+                .filter(|content_id| !content_id.is_empty()))
+        })
+    }
+
     /// Extract the authenticated peer identity from the request TLS state.
     fn peer_identity_from_request<T>(
         &self,
