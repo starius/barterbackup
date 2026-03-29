@@ -8,9 +8,7 @@ use futures_util::StreamExt;
 use node::{CliService, Node, P2pService};
 use protos::bbrpc::barter_backup_server_server::BarterBackupServerServer;
 use protos::clirpc;
-use protos::clirpc::barter_backup_client_server::{
-    BarterBackupClient, BarterBackupClientServer,
-};
+use protos::clirpc::barter_backup_client_server::{BarterBackupClient, BarterBackupClientServer};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -196,11 +194,7 @@ struct DaemonRpcService {
 impl DaemonService {
     /// Create a daemon service rooted at `data_dir`.
     pub fn new(data_dir: PathBuf, peer_runtime_factory: Arc<dyn PeerRuntimeFactory>) -> Self {
-        Self::with_maintenance_config(
-            data_dir,
-            peer_runtime_factory,
-            MaintenanceConfig::default(),
-        )
+        Self::with_maintenance_config(data_dir, peer_runtime_factory, MaintenanceConfig::default())
     }
 
     /// Create a daemon service with an explicit maintenance configuration.
@@ -251,7 +245,9 @@ impl DaemonService {
                     .with_context(|| format!("write {}", fingerprint_path.display()))?;
                 Ok(true)
             }
-            Err(error) => Err(error).with_context(|| format!("read {}", fingerprint_path.display())),
+            Err(error) => {
+                Err(error).with_context(|| format!("read {}", fingerprint_path.display()))
+            }
         }
     }
 
@@ -284,8 +280,13 @@ impl DaemonService {
         let maintenance_wakeup = self.maintenance_wakeup.clone();
         let maintenance_config = self.maintenance_config.clone();
         let task = tokio::spawn(async move {
-            run_maintenance_loop(node, maintenance_wakeup, shutdown_signal, maintenance_config)
-                .await
+            run_maintenance_loop(
+                node,
+                maintenance_wakeup,
+                shutdown_signal,
+                maintenance_config,
+            )
+            .await
         });
 
         StartedTask::new(shutdown, task)
@@ -653,15 +654,11 @@ impl Drop for DirLock {
     }
 }
 
-/// Prepare the local CLI key directory, lock, and server TLS configuration.
-fn prepare_local_cli_tls(data_dir: &Path) -> Result<(DirLock, LocalCliTls)> {
+/// Prepare the local CLI key directory and server TLS configuration.
+fn prepare_local_cli_tls(data_dir: &Path) -> Result<LocalCliTls> {
     let cli_keys_dir = data_dir.join("cli-keys");
     fs::create_dir_all(&cli_keys_dir)
         .with_context(|| format!("create {}", cli_keys_dir.display()))?;
-
-    // Keep the lock file open for the whole daemon lifetime so only one daemon
-    // process can own the local CLI auth material.
-    let lock = DirLock::acquire(&cli_keys_dir.join(".lock"))?;
 
     // Clean any stale key material from a previous unclean shutdown before we
     // publish fresh local CLI credentials.
@@ -681,18 +678,15 @@ fn prepare_local_cli_tls(data_dir: &Path) -> Result<(DirLock, LocalCliTls)> {
     let server_tls = build_server_tls(&client_public_key, &server_private_key)?;
 
     info!(key_dir = %cli_keys_dir.display(), "prepared local CLI TLS material");
-    Ok((
-        lock,
-        LocalCliTls {
-            key_dir: cli_keys_dir,
-            server_tls,
-        },
-    ))
+    Ok(LocalCliTls {
+        key_dir: cli_keys_dir,
+        server_tls,
+    })
 }
 
 /// Remove the ephemeral local CLI key directory after shutdown.
 fn cleanup_local_cli_tls(key_dir: &Path) -> Result<()> {
-    for file_name in ["server.pub", "client.key", ".lock"] {
+    for file_name in ["server.pub", "client.key"] {
         let file_path = key_dir.join(file_name);
         if let Err(error) = fs::remove_file(&file_path) {
             if error.kind() != std::io::ErrorKind::NotFound {
@@ -760,8 +754,9 @@ async fn run_maintenance_loop(
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
-        let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler");
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             _ = terminate.recv() => {}
@@ -781,8 +776,12 @@ pub async fn run(config: Config) -> Result<()> {
     let data_dir = config.resolved_data_dir()?;
     fs::create_dir_all(&data_dir).with_context(|| format!("create {}", data_dir.display()))?;
 
+    // Hold an exclusive lock on the whole data directory so two daemon
+    // processes can never mutate the same state tree concurrently.
+    let lock = DirLock::acquire(&data_dir.join(".lock"))?;
+
     // Prepare local CLI auth material before we accept any local connections.
-    let (lock, local_cli_tls) = prepare_local_cli_tls(&data_dir)?;
+    let local_cli_tls = prepare_local_cli_tls(&data_dir)?;
     let service = Arc::new(DaemonService::new(
         data_dir.clone(),
         Arc::new(TorPeerRuntimeFactory::new(data_dir.join("tor"))),
@@ -948,6 +947,18 @@ mod tests {
 
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dir_lock_blocks_second_owner() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let first = DirLock::acquire(&temp_dir.path().join(".lock"))?;
+
+        assert!(DirLock::acquire(&temp_dir.path().join(".lock")).is_err());
+
+        drop(first);
+        assert!(DirLock::acquire(&temp_dir.path().join(".lock")).is_ok());
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]
