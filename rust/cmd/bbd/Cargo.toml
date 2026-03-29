@@ -26,5 +26,6 @@ keys = { path = "../../crates/keys" }
 nettor = { path = "../../crates/nettor" }
 
 [dev-dependencies]
+bbcli = { path = "../bbcli" }
 netmock = { path = "../../crates/netmock" }
 tempfile = "3"

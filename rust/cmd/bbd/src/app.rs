@@ -771,8 +771,15 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
-/// Run the daemon until the local server exits or a shutdown signal arrives.
-pub async fn run(config: Config) -> Result<()> {
+/// Run the daemon until the local server exits or `shutdown_signal` resolves.
+async fn run_with_peer_runtime_until<F>(
+    config: Config,
+    peer_runtime_factory: Arc<dyn PeerRuntimeFactory>,
+    shutdown_signal: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = ()> + Send,
+{
     let data_dir = config.resolved_data_dir()?;
     fs::create_dir_all(&data_dir).with_context(|| format!("create {}", data_dir.display()))?;
 
@@ -782,10 +789,7 @@ pub async fn run(config: Config) -> Result<()> {
 
     // Prepare local CLI auth material before we accept any local connections.
     let local_cli_tls = prepare_local_cli_tls(&data_dir)?;
-    let service = Arc::new(DaemonService::new(
-        data_dir.clone(),
-        Arc::new(TorPeerRuntimeFactory::new(data_dir.join("tor"))),
-    ));
+    let service = Arc::new(DaemonService::new(data_dir.clone(), peer_runtime_factory));
     let listener = tokio::net::TcpListener::bind(&config.cli_addr).await?;
     let local_addr = listener.local_addr()?;
     let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(local_cli_tls.server_tls));
@@ -815,7 +819,7 @@ pub async fn run(config: Config) -> Result<()> {
     });
 
     let shutdown = CancellationToken::new();
-    let shutdown_signal = shutdown.clone();
+    let server_shutdown = shutdown.clone();
     let rpc_service = service.clone();
     let mut server_task = tokio::spawn(async move {
         tonic::transport::Server::builder()
@@ -823,7 +827,7 @@ pub async fn run(config: Config) -> Result<()> {
                 daemon: rpc_service,
             }))
             .serve_with_incoming_shutdown(incoming, async move {
-                shutdown_signal.cancelled().await;
+                server_shutdown.cancelled().await;
             })
             .await
             .map_err(anyhow::Error::from)
@@ -834,7 +838,7 @@ pub async fn run(config: Config) -> Result<()> {
             Ok(result) => result,
             Err(error) => Err(anyhow!(error)),
         },
-        _ = wait_for_shutdown_signal() => {
+        _ = shutdown_signal => {
             info!("shutdown signal received");
             shutdown.cancel();
             match server_task.await {
@@ -855,9 +859,32 @@ pub async fn run(config: Config) -> Result<()> {
     Ok(())
 }
 
+/// Run the daemon until the local server exits or `shutdown_signal` resolves.
+async fn run_until<F>(config: Config, shutdown_signal: F) -> Result<()>
+where
+    F: std::future::Future<Output = ()> + Send,
+{
+    let data_dir = config.resolved_data_dir()?;
+    run_with_peer_runtime_until(
+        config,
+        Arc::new(TorPeerRuntimeFactory::new(data_dir.join("tor"))),
+        shutdown_signal,
+    )
+    .await
+}
+
+/// Run the daemon until the local server exits or a shutdown signal arrives.
+pub async fn run(config: Config) -> Result<()> {
+    run_until(config, wait_for_shutdown_signal()).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bbcli::{
+        connect_client_with_keys_dir, get_file_with_client, list_files_with_client,
+        set_file_with_client, unlock_with_keys_dir,
+    };
     use tempfile::TempDir;
 
     /// NoopPeerRuntimeFactory lets daemon tests exercise unlock flow without
@@ -949,6 +976,14 @@ mod tests {
         }
     }
 
+    /// Reserve a loopback port and return its address string for the daemon.
+    fn reserve_loopback_addr() -> Result<String> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        drop(listener);
+        Ok(address.to_string())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn dir_lock_blocks_second_owner() -> Result<()> {
         let temp_dir = TempDir::new()?;
@@ -958,6 +993,55 @@ mod tests {
 
         drop(first);
         assert!(DirLock::acquire(&temp_dir.path().join(".lock")).is_ok());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn daemon_and_bbcli_round_trip_over_local_mtls() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let cli_addr = reserve_loopback_addr()?;
+        let daemon_addr = format!("https://{cli_addr}");
+        let shutdown = CancellationToken::new();
+        let shutdown_signal = shutdown.clone();
+        let config = Config {
+            cli_addr,
+            data_dir: Some(temp_dir.path().to_path_buf()),
+        };
+        let daemon_task = tokio::spawn(async move {
+            run_with_peer_runtime_until(config, Arc::new(NoopPeerRuntimeFactory), async move {
+                shutdown_signal.cancelled().await;
+            })
+            .await
+        });
+        let keys_dir = temp_dir.path().join("cli-keys");
+
+        unlock_with_keys_dir(
+            &daemon_addr,
+            "correct horse battery staple",
+            &keys_dir,
+            Duration::from_secs(5),
+        )
+        .await?;
+
+        let mut client = connect_client_with_keys_dir(&daemon_addr, &keys_dir).await?;
+        let health = client
+            .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+            .await?
+            .into_inner();
+        assert!(!health.server_onion.is_empty());
+
+        set_file_with_client(&mut client, "alpha.txt", b"alpha-body".to_vec()).await?;
+        assert_eq!(
+            list_files_with_client(&mut client).await?,
+            vec!["alpha.txt".to_string()]
+        );
+        assert_eq!(
+            get_file_with_client(&mut client, "alpha.txt").await?,
+            b"alpha-body".to_vec()
+        );
+
+        shutdown.cancel();
+        daemon_task.await??;
         Ok(())
     }
 
