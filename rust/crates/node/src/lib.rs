@@ -95,6 +95,22 @@ impl Node {
             .map(|filesystem| Store::new_with_time_source(filesystem, &master, clock.clone()))
             .transpose()?
             .map(Mutex::new);
+        let known_peers = store
+            .as_ref()
+            .map(|store| {
+                store
+                    .lock()
+                    .unwrap()
+                    .peers()
+                    .into_iter()
+                    .filter_map(|peer| {
+                        ed25519_dalek::PublicKey::from_bytes(&peer.onion_pubkey)
+                            .ok()
+                            .map(|public_key| keys::onion_hostname_from_public_key(&public_key))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         Ok(Self {
             ed25519_keypair: keypair,
@@ -102,7 +118,7 @@ impl Node {
             clock,
             started_at: Mutex::new(None),
             store,
-            known_peers: Mutex::new(BTreeSet::new()),
+            known_peers: Mutex::new(known_peers),
             storage_config: Mutex::new(clirpc::StorageConfig::default()),
             peer_connector: Mutex::new(None),
         })
@@ -147,8 +163,16 @@ impl Node {
 
     /// Add a peer onion hostname to the configured peer set.
     pub fn add_known_peer(&self, peer_onion: &str) -> Result<(), Status> {
-        keys::public_key_from_onion_hostname(peer_onion)
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
             .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+        self.with_store(|store| store.ensure_peer(peer_public_key.as_bytes()))
+            .or_else(|error| {
+                if error.code() == Code::FailedPrecondition {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            })?;
         self.known_peers
             .lock()
             .unwrap()
@@ -474,7 +498,9 @@ impl Node {
         let our_content = self.responder_content()?;
         Ok(match (our_content.as_ref(), peer_view_of_our_content) {
             (None, None) => true,
-            (Some(our_content), Some(peer_content)) => our_content.content_id == peer_content.content_id,
+            (Some(our_content), Some(peer_content)) => {
+                our_content.content_id == peer_content.content_id
+            }
             _ => false,
         })
     }
@@ -486,7 +512,10 @@ impl Node {
 
         for peer_onion in self.known_peers() {
             let is_online = match self.connect_peer_client(&peer_onion).await {
-                Ok(mut client) => client.health_check(bbrpc::HealthCheckRequest {}).await.is_ok(),
+                Ok(mut client) => client
+                    .health_check(bbrpc::HealthCheckRequest {})
+                    .await
+                    .is_ok(),
                 Err(_) => false,
             };
             let peer = clirpc::Peer {
@@ -1490,6 +1519,18 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn known_peers_persist_across_restart() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer = Node::new("persisted-peer")?;
+        let first = Node::with_local_storage("owner", filesystem.clone())?;
+        first.add_known_peer(peer.address())?;
+
+        let reloaded = Node::with_local_storage("owner", filesystem)?;
+        assert_eq!(reloaded.known_peers(), vec![peer.address().to_string()]);
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn p2p_revision_and_download_reflect_current_blob() -> anyhow::Result<()> {
         let server_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
@@ -2258,7 +2299,10 @@ mod tests {
             .into_inner()
             .try_collect::<Vec<_>>()
             .await?;
-        assert_eq!(failed_updates.last().map(|update| update.success), Some(false));
+        assert_eq!(
+            failed_updates.last().map(|update| update.success),
+            Some(false)
+        );
         assert_eq!(
             peer_score_seconds(&requester_node, responder_node.address())?,
             -1_800

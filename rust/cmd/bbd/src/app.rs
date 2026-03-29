@@ -984,6 +984,18 @@ mod tests {
         Ok(address.to_string())
     }
 
+    /// Remove persisted content blobs while preserving hidden sidecars.
+    fn remove_persisted_content_blobs(store_dir: &Path) -> Result<()> {
+        for entry in fs::read_dir(store_dir)? {
+            let entry = entry?;
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            fs::remove_file(entry.path())?;
+        }
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn dir_lock_blocks_second_owner() -> Result<()> {
         let temp_dir = TempDir::new()?;
@@ -1209,6 +1221,121 @@ mod tests {
 
         local_service.shutdown().await?;
         remote_service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restarted_daemon_recovers_from_persisted_peers() -> Result<()> {
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        let maintenance_config = MaintenanceConfig {
+            interval: Duration::from_millis(50),
+        };
+        let owner_dir = TempDir::new()?;
+        let peer_dir = TempDir::new()?;
+        let owner_service = DaemonService::with_maintenance_config(
+            owner_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            maintenance_config.clone(),
+        );
+        let peer_service = DaemonService::with_maintenance_config(
+            peer_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            maintenance_config.clone(),
+        );
+
+        owner_service
+            .unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: "owner-password".to_string(),
+            }))
+            .await?;
+        peer_service
+            .unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: "peer-password".to_string(),
+            }))
+            .await?;
+
+        let peer_onion = unlocked_node(&peer_service).await.address().to_string();
+        owner_service
+            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: peer_onion.clone(),
+                }),
+            }))
+            .await?;
+        owner_service
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        wait_for_async(Duration::from_secs(2), || {
+            let owner_service = &owner_service;
+            let peer_onion = peer_onion.clone();
+            async move {
+                let contracts = owner_service
+                    .get_contracts(tonic::Request::new(clirpc::GetContractsRequest {}))
+                    .await?
+                    .into_inner()
+                    .contracts;
+                Ok(contracts.into_iter().any(|contract| {
+                    contract
+                        .peer
+                        .as_ref()
+                        .is_some_and(|peer| peer.onion_service_id == peer_onion)
+                        && contract.our_content_synced
+                }))
+            }
+        })
+        .await?;
+
+        owner_service.shutdown().await?;
+        remove_persisted_content_blobs(&owner_dir.path().join("local"))?;
+
+        let restarted_service = DaemonService::with_maintenance_config(
+            owner_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            maintenance_config,
+        );
+        restarted_service
+            .unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: "owner-password".to_string(),
+            }))
+            .await?;
+
+        wait_for_async(Duration::from_secs(2), || {
+            let restarted_service = &restarted_service;
+            async move {
+                let files = restarted_service
+                    .list_files(tonic::Request::new(clirpc::ListFilesRequest {}))
+                    .await?
+                    .into_inner()
+                    .name;
+                Ok(files == vec!["alpha.txt".to_string()])
+            }
+        })
+        .await?;
+
+        let recovered = restarted_service
+            .get_file(tonic::Request::new(clirpc::GetFileRequest {
+                name: "alpha.txt".to_string(),
+            }))
+            .await?
+            .into_inner()
+            .file
+            .unwrap();
+        assert_eq!(recovered.data, b"alpha-body".to_vec());
+
+        restarted_service.shutdown().await?;
+        peer_service.shutdown().await?;
         Ok(())
     }
 

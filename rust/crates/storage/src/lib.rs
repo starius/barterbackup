@@ -327,6 +327,29 @@ impl Store {
         self.peers.clone()
     }
 
+    /// Ensure a peer exists in the encrypted sidecar even before any sync.
+    pub fn ensure_peer(&mut self, onion_pubkey: &[u8]) -> Result<(), StorageError> {
+        if onion_pubkey.is_empty() {
+            return Err(StorageError::InvalidFileName);
+        }
+
+        if self
+            .peers
+            .iter()
+            .any(|peer| peer.onion_pubkey.as_slice() == onion_pubkey)
+        {
+            return Ok(());
+        }
+
+        self.peers.push(storedpb::Peer {
+            onion_pubkey: onion_pubkey.to_vec(),
+            score_seconds: 0,
+            score_measured_at: 0,
+            content_id: Vec::new(),
+        });
+        self.persist_peer_state()
+    }
+
     /// Upsert the latest known content id for a peer.
     pub fn set_peer_content_id(
         &mut self,
@@ -866,6 +889,19 @@ mod tests {
         let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
         assert_eq!(reloaded.peers().len(), 1);
         assert_eq!(reloaded.peers()[0].onion_pubkey, b"peer-a".to_vec());
+    }
+
+    #[test]
+    fn ensure_peer_persists_empty_peer_entry() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+
+        store.ensure_peer(b"peer-a").unwrap();
+
+        let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        assert_eq!(reloaded.peers().len(), 1);
+        assert_eq!(reloaded.peers()[0].onion_pubkey, b"peer-a".to_vec());
+        assert!(reloaded.peers()[0].content_id.is_empty());
     }
 
     #[test]
