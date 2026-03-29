@@ -12,7 +12,7 @@ use prost::Message;
 use protos::storedpb;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -528,11 +528,15 @@ impl Store {
     /// Load the encrypted content blobs and sidecar state from disk.
     fn load(&mut self) -> Result<(), StorageError> {
         self.load_peer_state()?;
+        let foreign_files = self.foreign_content_files();
 
         let mut valid = Vec::new();
         let mut invalid = Vec::new();
         for name in self.fs.list()? {
             if name == PEER_STATE_FILE {
+                continue;
+            }
+            if foreign_files.contains(&name) {
                 continue;
             }
 
@@ -592,6 +596,15 @@ impl Store {
             blob_len: candidate.blob_len,
             file_name: candidate.name,
         });
+    }
+
+    /// Return the tracked foreign blob file names referenced by peers.
+    fn foreign_content_files(&self) -> BTreeSet<String> {
+        self.peers
+            .iter()
+            .filter(|peer| !peer.content_id.is_empty())
+            .map(|peer| content_file_name(&peer.content_id))
+            .collect()
     }
 
     /// Persist the current plaintext file set as a new encrypted revision.
@@ -889,6 +902,58 @@ mod tests {
         let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
         assert_eq!(reloaded.peers().len(), 1);
         assert_eq!(reloaded.peers()[0].onion_pubkey, b"peer-a".to_vec());
+    }
+
+    #[test]
+    fn load_ignores_tracked_foreign_blobs() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut local = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+        local.set_file("alpha.txt", b"local".to_vec()).unwrap();
+        let local_current = local.current_content().unwrap().clone();
+
+        // Build the foreign blob on a scratch filesystem so the foreign store
+        // never has to parse our local content with the wrong master key.
+        let foreign_master = keys::derive_master_priv("foreign-master");
+        let foreign_fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut foreign =
+            Store::new_with_time_source(foreign_fs, &foreign_master, time_source()).unwrap();
+        foreign.set_file("peer.txt", b"peer".to_vec()).unwrap();
+        let foreign_blob = foreign.current_blob().unwrap();
+        let foreign_id = foreign.current_content().unwrap().content_id.clone();
+
+        local.set_peer_content_id(b"peer-a", &foreign_id).unwrap();
+        fs.write_atomic(&content_file_name(&foreign_id), &foreign_blob)
+            .unwrap();
+
+        let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        assert_eq!(reloaded.get_file("alpha.txt").unwrap(), b"local".to_vec());
+        assert_eq!(reloaded.current_content().unwrap(), &local_current);
+        assert_eq!(reloaded.peers()[0].content_id, foreign_id);
+    }
+
+    #[test]
+    fn load_allows_only_tracked_foreign_blobs() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut local = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+
+        // Build the foreign blob on a scratch filesystem so the shared store
+        // sees it only as an opaque mirrored peer blob.
+        let foreign_master = keys::derive_master_priv("foreign-only-master");
+        let foreign_fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut foreign =
+            Store::new_with_time_source(foreign_fs, &foreign_master, time_source()).unwrap();
+        foreign.set_file("peer.txt", b"peer".to_vec()).unwrap();
+        let foreign_blob = foreign.current_blob().unwrap();
+        let foreign_id = foreign.current_content().unwrap().content_id.clone();
+
+        local.set_peer_content_id(b"peer-a", &foreign_id).unwrap();
+        fs.write_atomic(&content_file_name(&foreign_id), &foreign_blob)
+            .unwrap();
+
+        let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        assert!(reloaded.current_content().is_none());
+        assert!(reloaded.list_files().is_empty());
+        assert_eq!(reloaded.peers()[0].content_id, foreign_id);
     }
 
     #[test]
