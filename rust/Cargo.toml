@@ -2,6 +2,7 @@
 members = [
     "crates/protos",
     "crates/keys",
+    "crates/clock",
     "crates/content",
     "crates/storage",
     "crates/node",

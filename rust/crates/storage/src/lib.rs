@@ -6,6 +6,7 @@
 
 use aes_gcm_siv::aead::{Aead, Payload};
 use aes_gcm_siv::{Aes256GcmSiv, KeyInit, Nonce};
+use clock::{Clock, SystemClock};
 use content::{ContentCodec, DecodedContent, PlainFile, RevisionDescriptor, RevisionSeed};
 use prost::Message;
 use protos::storedpb;
@@ -69,37 +70,6 @@ pub enum StorageError {
     /// A general configuration or crypto setup error occurred.
     #[error("{0}")]
     Message(String),
-}
-
-/// Timestamp is the wall-clock input used to stamp new revisions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Timestamp {
-    /// secs is the Unix timestamp in whole seconds.
-    pub secs: u64,
-    /// nanos is the nanosecond component.
-    pub nanos: u32,
-}
-
-/// TimeSource provides deterministic timestamps for new revisions.
-pub trait TimeSource: Send + Sync {
-    /// Return the current timestamp.
-    fn now(&self) -> Timestamp;
-}
-
-/// SystemTimeSource returns timestamps from the host clock.
-#[derive(Debug, Default)]
-pub struct SystemTimeSource;
-
-impl TimeSource for SystemTimeSource {
-    fn now(&self) -> Timestamp {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock must be after the Unix epoch");
-        Timestamp {
-            secs: now.as_secs(),
-            nanos: now.subsec_nanos(),
-        }
-    }
 }
 
 /// Filesystem is the minimal atomic persistence API the store needs.
@@ -253,7 +223,7 @@ pub struct CurrentContent {
 /// Store owns the live local file set and the encrypted content blobs on disk.
 pub struct Store {
     fs: Arc<dyn Filesystem>,
-    time_source: Arc<dyn TimeSource>,
+    time_source: Arc<dyn Clock>,
     codec: ContentCodec,
     peer_cipher: Aes256GcmSiv,
     files: BTreeMap<String, Vec<u8>>,
@@ -264,14 +234,14 @@ pub struct Store {
 impl Store {
     /// Create a store backed by the system clock.
     pub fn new(fs: Arc<dyn Filesystem>, master: &[u8]) -> Result<Self, StorageError> {
-        Self::new_with_time_source(fs, master, Arc::new(SystemTimeSource))
+        Self::new_with_time_source(fs, master, Arc::new(SystemClock))
     }
 
     /// Create a store with an explicit time source for deterministic tests.
     pub fn new_with_time_source(
         fs: Arc<dyn Filesystem>,
         master: &[u8],
-        time_source: Arc<dyn TimeSource>,
+        time_source: Arc<dyn Clock>,
     ) -> Result<Self, StorageError> {
         if master.len() < 32 {
             return Err(StorageError::InvalidMasterKey(master.len()));
@@ -661,27 +631,6 @@ fn decrypt_sidecar(cipher: &Aes256GcmSiv, ciphertext: &[u8]) -> Result<Vec<u8>, 
 mod tests {
     use super::*;
 
-    /// FixedTimeSource returns scripted timestamps for deterministic revisions.
-    struct FixedTimeSource {
-        timestamps: Mutex<Vec<Timestamp>>,
-    }
-
-    impl FixedTimeSource {
-        /// Create a source from an oldest-to-newest timestamp list.
-        fn new(mut timestamps: Vec<Timestamp>) -> Self {
-            timestamps.reverse();
-            Self {
-                timestamps: Mutex::new(timestamps),
-            }
-        }
-    }
-
-    impl TimeSource for FixedTimeSource {
-        fn now(&self) -> Timestamp {
-            self.timestamps.lock().unwrap().pop().unwrap()
-        }
-    }
-
     /// FailingFilesystem injects a single write failure into an existing backend.
     struct FailingFilesystem {
         inner: Arc<dyn Filesystem>,
@@ -711,12 +660,10 @@ mod tests {
         }
     }
 
-    fn time_source() -> Arc<dyn TimeSource> {
-        Arc::new(FixedTimeSource::new(vec![
-            Timestamp { secs: 10, nanos: 1 },
-            Timestamp { secs: 20, nanos: 2 },
-            Timestamp { secs: 30, nanos: 3 },
-        ]))
+    fn time_source() -> Arc<dyn Clock> {
+        let clock = clock::ManualClock::new(clock::Timestamp::new(10, 1).unwrap());
+        clock.set(clock::Timestamp::new(10, 1).unwrap());
+        Arc::new(clock)
     }
 
     fn master() -> Vec<u8> {

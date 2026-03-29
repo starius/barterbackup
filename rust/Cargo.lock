@@ -848,6 +848,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "clock"
+version = "0.1.0"
+
+[[package]]
 name = "cmake"
 version = "0.1.54"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4123,6 +4127,7 @@ name = "storage"
 version = "0.1.0"
 dependencies = [
  "aes-gcm-siv",
+ "clock",
  "content",
  "hex",
  "keys",
