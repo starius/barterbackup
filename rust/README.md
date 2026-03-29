@@ -20,6 +20,10 @@ Current state
 - `nettor` runs the real Arti transport with deterministic hidden-service
   identity derived from the node seed.
 - `clock` provides deterministic wall-clock control for long-horizon node tests.
+- `clitls` runs PQ enforcement tests in the normal crate test suite, including
+  classical/PQ mismatch cases and a corrupted ClientHello path.
+- `bbd` maintenance tests can drive the background scheduler with manual ticks
+  so restart and refresh scenarios do not depend on real sleep loops.
 
 Security model
 

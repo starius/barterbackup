@@ -1,30 +1,34 @@
 BarterBackup (Rust) - Remaining work
 
-Current focus
+The large implementation/test gaps from the initial Rust bring-up are closed.
+What remains now is mostly product completion and operational hardening.
 
-- Keep the Rust implementation authoritative and maintain the Go tree only as a
-  semantic reference.
-- Prefer current dependency releases for Arti, tonic, rustls, and crypto.
-- Keep running heavy builds on `barterbackup-dev` through the remote scripts.
+Still open
 
-Remaining gaps
-
-- Add a full end-to-end daemon/CLI integration test that runs `bbd`, uses the
-  generated local CLI keys, and drives `bbcli` over the real local mTLS path.
-- Extend the daemon maintenance tests beyond the mock transport happy path to
-  cover recovery after local wipe, peer corruption, and repeated offline/online
-  transitions.
-- Add more adversarial tests around malformed peer responses, especially for
-  background maintenance and recovery loops.
-- Expand fuzzing coverage for encrypted content parsing and metadata decoding.
-- Revisit whether the daemon background scheduler itself should use a fully
-  synthetic async clock instead of real tokio time. The core score logic and
-  long-horizon node scenarios already use the manual clock, but the daemon loop
-  still uses real timer ticks.
+- Bootstrap a fresh node from only the seed plus minimal operator input.
+  Today a restarted node can recover from persisted peer metadata, but a
+  completely fresh machine still needs at least one reachable peer address to
+  begin recovery.
+- Surface divergent sibling timelines during recovery. Recovery currently picks
+  the newest revision by decrypted timestamp, but the daemon and CLI still need
+  RPCs and UX to show older conflicting branches and let the operator inspect
+  or switch them.
+- Decide how external Tor and pluggable transports fit into the final product.
+  The current implementation uses in-process Arti. Supporting users whose ISPs
+  block Tor still needs a product decision and implementation path.
+- Flesh out storage accounting and contract policy beyond the current scoring
+  and sync model. Storage quotas, expiration policy, and operator-facing
+  visibility are still basic.
+- Add deeper long-running fuzz and soak coverage. Property tests and multi-node
+  scenarios now cover the main parser and maintenance paths, but the project
+  still lacks dedicated `cargo-fuzz` targets and longer chaos-style network
+  campaigns.
 
 Guardrails
 
-- Do not weaken the onion hostname validation added to peer management.
-- Do not relax the enforced `X25519MLKEM768` peer TLS policy without an
-  explicit design decision.
-- Do not add plaintext local storage shortcuts for testing.
+- Keep the Rust implementation authoritative and use the Go tree only as a
+  semantic reference.
+- Prefer current dependency releases for Arti, tonic, rustls, and crypto.
+- Do not weaken onion hostname validation or the enforced `X25519MLKEM768`
+  policy without an explicit design decision.
+- Do not add plaintext storage shortcuts even for tests.
