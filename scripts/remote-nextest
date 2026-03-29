@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-# Run the Rust workspace with cargo-nextest on the remote builder.
-
-repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-
-"${repo_root}/scripts/remote-rust" cargo nextest run --workspace

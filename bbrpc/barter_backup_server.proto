@@ -2,8 +2,6 @@ syntax = "proto3";
 
 package bbrpc;
 
-option go_package = "github.com/starius/barterbackup/bbrpc";
-
 // BarterBackupServer is gRPC service implemented by BarterBackup daemon and
 // exposed to the world as an onion site. BarterBackup nodes speak to each other
 // using this protocol. A single main key must be used by a single instance of

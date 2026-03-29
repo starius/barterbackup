@@ -1,20 +1,24 @@
-.PHONY: install unit rpc fmt
+CARGO ?= cargo
 
-# Install the daemon binary.
-install:
-	CGO_ENABLED=0 go install ./cmd/bbd
-	CGO_ENABLED=0 go install ./cmd/bbcli
+.PHONY: build test unit fmt clippy install clean
 
+build:
+	$(CARGO) build --workspace
 
-unit:
-	CGO_ENABLED=0 go test ./...
+test:
+	$(CARGO) test --workspace
 
-# Generate Go protobuf and gRPC stubs inside the Nix dev shell.
-rpc:
-	nix develop --command sh -c '\
-	  protoc --go_out=paths=source_relative:. --go-grpc_out=paths=source_relative:. clirpc/*.proto bbrpc/*.proto storedpb/*.proto \
-	'
+unit: test
 
 fmt:
-	clang-format -i */*.proto
-	go fmt ./...
+	$(CARGO) fmt --all
+
+clippy:
+	$(CARGO) clippy --workspace --all-targets
+
+install:
+	$(CARGO) install --path cmd/bbd --locked
+	$(CARGO) install --path cmd/bbcli --locked
+
+clean:
+	$(CARGO) clean

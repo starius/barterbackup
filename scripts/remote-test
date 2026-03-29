@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-# Run the full Rust workspace test suite on the remote builder.
-
-repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-
-"${repo_root}/scripts/remote-rust" cargo test --workspace

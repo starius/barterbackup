@@ -2,8 +2,6 @@ syntax = "proto3";
 
 package storedpb;
 
-option go_package = "github.com/starius/barterbackup/storedpb";
-
 // ContentRevision specifies a particular version of user content produced
 // from client-provided files and set by a clirpc.SetFile call.
 // AEAD(ContentRevision) is used as content_id in bbrpc. The content of this

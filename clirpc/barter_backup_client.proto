@@ -2,8 +2,6 @@ syntax = "proto3";
 
 package clirpc;
 
-option go_package = "github.com/starius/barterbackup/clirpc";
-
 // BarterBackupClient is a gRPC service implemented by the BarterBackup
 // daemon and exposed locally. The CLI tool speaks to the daemon using this
 // protocol.

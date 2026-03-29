@@ -1,0 +1,17 @@
+[workspace]
+members = [
+    "crates/protos",
+    "crates/keys",
+    "crates/clock",
+    "crates/content",
+    "crates/storage",
+    "crates/transport",
+    "crates/node",
+    "crates/clitls",
+    "crates/netmock",
+    "crates/nettor",
+    "cmd/bbd",
+    "cmd/bbcli",
+]
+
+resolver = "2"

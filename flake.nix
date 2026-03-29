@@ -32,39 +32,29 @@
           inherit pkgs rustToolchain;
         });
     in {
-      devShells = forAllSystems ({ pkgs, rustToolchain }: {
-        default =
-          let
-            goToolchain = if pkgs ? go_1_25 then pkgs.go_1_25 else pkgs.go;
-          in
-          pkgs.mkShell {
-            packages = [
-              goToolchain
-              pkgs.protobuf
-              pkgs.protoc-gen-go
-              pkgs.protoc-gen-go-grpc
-              pkgs.clang-tools
-            ];
-            env = {
-              CGO_ENABLED = "0";
-            };
-          };
-        rust = pkgs.mkShell {
-          packages = [
+      devShells = forAllSystems ({ pkgs, rustToolchain }:
+        let
+          commonPackages = [
             rustToolchain
             pkgs.cargo-nextest
             pkgs.cargo-deny
             pkgs.cargo-audit
             pkgs.cargo-fuzz
             pkgs.clang
+            pkgs.clang-tools
             pkgs.git
             pkgs.openssl
             pkgs.pkg-config
             pkgs.protobuf
-            pkgs.rsync
             pkgs.sqlite
           ];
-        };
-      });
+        in {
+          default = pkgs.mkShell {
+            packages = commonPackages;
+          };
+          rust = pkgs.mkShell {
+            packages = commonPackages;
+          };
+        });
     };
 }
