@@ -579,6 +579,8 @@ fn build_cipher(label: &'static str, key: &[u8]) -> Result<Aes256GcmSiv, Content
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+    use std::collections::BTreeMap;
 
     const REVISION_KEY: [u8; 32] = [0x11; 32];
     const METADATA_KEY: [u8; 32] = [0x22; 32];
@@ -607,6 +609,42 @@ mod tests {
                 data: b"beta-body".to_vec(),
             },
         ]
+    }
+
+    /// Build a random but portable test file name.
+    fn arb_file_name() -> impl Strategy<Value = String> {
+        "[a-z][a-z0-9._-]{0,7}".prop_map(|name| name.to_string())
+    }
+
+    /// Build a deterministic file set with unique names.
+    fn arb_file_set() -> impl Strategy<Value = Vec<PlainFile>> {
+        proptest::collection::btree_map(
+            arb_file_name(),
+            proptest::collection::vec(any::<u8>(), 0..96),
+            1..5,
+        )
+        .prop_map(|files| {
+            files
+                .into_iter()
+                .map(|(name, data)| PlainFile { name, data })
+                .collect()
+        })
+    }
+
+    /// Return the parsed prefix of an encoded blob that is fully authenticated.
+    fn authenticated_prefix_len(encoded: &EncodedContent) -> usize {
+        let file_ciphertext_len = encoded
+            .metadata
+            .files
+            .iter()
+            .map(|file| encrypted_segment_len(file.file_length as usize))
+            .sum::<usize>();
+
+        HEADER_MAGIC.len()
+            + 1
+            + CONTENT_ID_LEN
+            + encoded.revision.metadata_ciphertext_len as usize
+            + file_ciphertext_len
     }
 
     #[test]
@@ -723,5 +761,58 @@ mod tests {
             codec.encode(seed, &sample_files(), &[]),
             Err(ContentError::InvalidRevision(_))
         ));
+    }
+
+    proptest! {
+        #[test]
+        fn property_round_trip_preserves_random_files(
+            files in arb_file_set(),
+            sequence in 1u64..10_000,
+            created_at_secs in 0u64..2_000_000_000,
+            created_at_nanos in 0u32..1_000_000_000,
+        ) {
+            let codec = codec();
+            let encoded = codec
+                .encode(
+                    RevisionSeed {
+                        sequence,
+                        created_at_secs,
+                        created_at_nanos,
+                    },
+                    &files,
+                    &[],
+                )
+                .unwrap();
+            let decoded = codec.decode(&encoded.bytes).unwrap();
+            let expected_files = files
+                .iter()
+                .map(|file| (file.name.clone(), file.data.clone()))
+                .collect::<BTreeMap<_, _>>();
+
+            prop_assert_eq!(decoded.files, expected_files);
+            prop_assert_eq!(decoded.content_id, encoded.content_id);
+            prop_assert_eq!(decoded.revision, encoded.revision);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn property_tampering_authenticated_bytes_is_detected(
+            files in arb_file_set(),
+            flip_seed in any::<usize>(),
+            flip_mask in 1u8..=0x80,
+        ) {
+            let codec = codec();
+            let encoded = codec
+                .encode(sample_seed(42), &files, &[])
+                .unwrap();
+            let prefix_len = authenticated_prefix_len(&encoded);
+            let flip_index = flip_seed % prefix_len;
+            let mut tampered = encoded.bytes.clone();
+            tampered[flip_index] ^= flip_mask;
+
+            let decoded = codec.decode(&tampered);
+            prop_assert!(decoded.is_err(), "tampering inside the authenticated prefix must fail");
+        }
     }
 }

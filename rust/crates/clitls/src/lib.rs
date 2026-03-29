@@ -532,36 +532,26 @@ fn secret_from_pkcs8_der(der: &[u8]) -> Result<SecretKey> {
 mod tests {
     use super::*;
 
-    #[cfg(feature = "pq_tls_tests")]
     use futures_util::StreamExt;
-    #[cfg(feature = "pq_tls_tests")]
     use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
-    #[cfg(feature = "pq_tls_tests")]
     use protos::clirpc::barter_backup_client_server::{
         BarterBackupClient, BarterBackupClientServer,
     };
-    #[cfg(feature = "pq_tls_tests")]
     use protos::clirpc::HealthCheckRequest;
-    #[cfg(feature = "pq_tls_tests")]
     use rustls::crypto::aws_lc_rs;
-    #[cfg(feature = "pq_tls_tests")]
+    use std::net::SocketAddr;
     use std::sync::Arc;
-    #[cfg(feature = "pq_tls_tests")]
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
-    #[cfg(feature = "pq_tls_tests")]
     use tokio_rustls::server::TlsStream;
-    #[cfg(feature = "pq_tls_tests")]
-    use tokio_stream::{wrappers::TcpListenerStream, StreamExt};
-    #[cfg(feature = "pq_tls_tests")]
+    use tokio_stream::wrappers::TcpListenerStream;
     use tonic::transport::Server;
-    #[cfg(feature = "pq_tls_tests")]
     use tonic::{Request, Status};
 
-    #[cfg(feature = "pq_tls_tests")]
     #[derive(Default)]
     struct Hc;
 
-    #[cfg(feature = "pq_tls_tests")]
     #[tonic::async_trait]
     impl BarterBackupClient for Hc {
         async fn local_health_check(
@@ -705,7 +695,6 @@ mod tests {
     }
 
     // Helper: start a PQ-only TLS clirpc server on localhost and return address.
-    #[cfg(feature = "pq_tls_tests")]
     async fn start_pq_server(
         expected_client_pub: PublicKey,
         server_priv: SecretKey,
@@ -715,7 +704,7 @@ mod tests {
         let addr = listener.local_addr()?;
         let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
         let svc = BarterBackupClientServer::new(Hc::default());
-        let incoming = TcpListenerStream::new(listener).filter_map(|result| {
+        let incoming = TcpListenerStream::new(listener).filter_map(move |result| {
             let tls_acceptor = tls_acceptor.clone();
 
             async move {
@@ -744,18 +733,62 @@ mod tests {
         Ok((format!("https://{}", addr), ServerHandle(handle)))
     }
 
-    #[cfg(feature = "pq_tls_tests")]
     struct ServerHandle(tokio::task::JoinHandle<Result<(), tonic::transport::Error>>);
 
-    #[cfg(feature = "pq_tls_tests")]
     impl Drop for ServerHandle {
         fn drop(&mut self) {
             self.0.abort();
         }
     }
 
+    /// start_corrupting_proxy flips one byte in the first client TLS flight.
+    async fn start_corrupting_proxy(target: SocketAddr) -> Result<ServerHandleWithAddr> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let proxy_addr = listener.local_addr()?;
+        let handle = tokio::spawn(async move {
+            let (mut client, _) = listener.accept().await?;
+            let mut server = tokio::net::TcpStream::connect(target).await?;
+
+            // The only configured TLS 1.3 key share is the hybrid
+            // X25519MLKEM768 group, so corrupting a byte well inside the first
+            // ClientHello payload should break the PQ-backed handshake.
+            let mut first_flight = vec![0u8; 4096];
+            let read_len = client.read(&mut first_flight).await?;
+            if read_len == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "client closed before sending ClientHello",
+                ));
+            }
+            let flip_index = if read_len > 128 { 128 } else { read_len - 1 };
+            first_flight[flip_index] ^= 0x01;
+            server.write_all(&first_flight[..read_len]).await?;
+
+            let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await?;
+            Ok(())
+        });
+
+        Ok(ServerHandleWithAddr {
+            addr: format!("https://{proxy_addr}"),
+            handle,
+        })
+    }
+
+    /// ServerHandleWithAddr keeps one background server task alive.
+    struct ServerHandleWithAddr {
+        /// addr is the externally reachable `https://` address.
+        addr: String,
+        /// handle owns the spawned task lifetime.
+        handle: tokio::task::JoinHandle<Result<(), std::io::Error>>,
+    }
+
+    impl Drop for ServerHandleWithAddr {
+        fn drop(&mut self) {
+            self.handle.abort();
+        }
+    }
+
     // Client with classical X25519-only provider (no PQ).
-    #[cfg(feature = "pq_tls_tests")]
     fn x25519_only_client_config(
         server_pub: &PublicKey,
         client_priv: &SecretKey,
@@ -766,7 +799,7 @@ mod tests {
         let cfg = rustls::ClientConfig::builder_with_provider(provider.into())
             .with_protocol_versions(&[&TLS13])?
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(PinServer {
+            .with_custom_certificate_verifier(Arc::new(PinServerKeyVerifier {
                 expected: server_pub.to_bytes(),
             }))
             .with_client_auth_cert(vec![client_cert], client_key)
@@ -774,7 +807,6 @@ mod tests {
         Ok(cfg)
     }
 
-    #[cfg(feature = "pq_tls_tests")]
     #[tokio::test(flavor = "multi_thread")]
     async fn pq_server_vs_x25519_client_fails() -> Result<()> {
         let (server_pub, server_priv) = generate_ed25519()?;
@@ -791,7 +823,6 @@ mod tests {
     }
 
     // Server with classical X25519-only provider.
-    #[cfg(feature = "pq_tls_tests")]
     fn x25519_only_server_config(
         expected_client_pub: &PublicKey,
         _server_priv: &SecretKey,
@@ -866,7 +897,6 @@ mod tests {
         Ok(cfg)
     }
 
-    #[cfg(feature = "pq_tls_tests")]
     #[tokio::test(flavor = "multi_thread")]
     async fn pq_client_vs_x25519_server_fails() -> Result<()> {
         let (server_pub, server_priv) = generate_ed25519()?;
@@ -878,7 +908,7 @@ mod tests {
         let addr = listener.local_addr()?;
         let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(srv_cfg));
         let svc = BarterBackupClientServer::new(Hc::default());
-        let incoming = TcpListenerStream::new(listener).filter_map(|result| {
+        let incoming = TcpListenerStream::new(listener).filter_map(move |result| {
             let tls_acceptor = tls_acceptor.clone();
 
             async move {
@@ -914,7 +944,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "pq_tls_tests")]
     #[tokio::test(flavor = "multi_thread")]
     async fn pq_client_and_server_succeed() -> Result<()> {
         let (server_pub, server_priv) = generate_ed25519()?;
@@ -924,6 +953,31 @@ mod tests {
         let channel = connect_channel(&addr, good_cfg).await?;
         let mut cli = BarterBackupClientClient::new(channel);
         let _ = cli.local_health_check(HealthCheckRequest {}).await; // Will likely fail due to dummy svc, but handshake succeeded.
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn corrupted_pq_client_hello_fails() -> Result<()> {
+        let (server_pub, server_priv) = generate_ed25519()?;
+        let (client_pub, client_priv) = generate_ed25519()?;
+        let (server_addr, _server) = start_pq_server(client_pub, server_priv).await?;
+        let target = server_addr
+            .strip_prefix("https://")
+            .context("strip server scheme")?
+            .parse::<SocketAddr>()?;
+        let proxy = start_corrupting_proxy(target).await?;
+
+        let good_cfg = build_client_tls(&server_pub, &client_priv)?;
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            connect_channel(&proxy.addr, good_cfg),
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(Err(_)) | Err(_)),
+            "tampering with the PQ ClientHello flight must fail"
+        );
+
         Ok(())
     }
 }

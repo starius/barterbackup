@@ -14,3 +14,6 @@ protos = { path = "../protos" }
 rand = "0.8"
 sha2 = "0.10"
 thiserror = "2"
+
+[dev-dependencies]
+proptest = "1"
