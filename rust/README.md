@@ -1,70 +1,110 @@
-BarterBackup (Rust) — Overview
+BarterBackup (Rust)
 
-This is a commented Rust scaffold of the BarterBackup project.
-It mirrors the Go layout and decisions described in AGENTS.md, but uses idiomatic Rust libraries:
+This Rust workspace is the active implementation of BarterBackup.
+The Go tree remains in the repository as a behavioral reference, but the Rust
+code now provides the working daemon, CLI, encrypted storage, peer transport,
+and multi-node test coverage.
 
-- gRPC: tonic + prost
-- Protobuf codegen: tonic-prost-build with vendored `protoc` (no host install needed)
-- Tor transport (embedded): arti (in-process Tor). The Tor network integration is stubbed and documented; hooking gRPC streams into arti rendezvous streams is planned.
-- Keys and crypto: argon2, hkdf, ed25519-dalek, sha2
+Current state
 
- Status
+- `bbd` starts a local mTLS-protected `clirpc` daemon, stays locked until
+  `Unlock`, verifies a fingerprint for existing data directories, then starts
+  the deterministic onion-backed peer runtime and background maintenance loop.
+- `bbcli` manages files, peers, storage settings, contracts, and recovery over
+  local `clirpc`.
+- `node` implements both `clirpc` and `bbrpc` behavior, peer synchronization,
+  contract proposal/checking, scoring, and recovery helpers.
+- `storage` persists encrypted revisions and mirrored peer blobs with atomic
+  rename-based writes.
+- `netmock` provides TLS-backed multi-node tests without Tor.
+- `nettor` runs the real Arti transport with deterministic hidden-service
+  identity derived from the node seed.
+- `clock` provides deterministic wall-clock control for long-horizon node tests.
 
-- Protos: Compiled to Rust types and services (bbrpc, clirpc, storedpb) via vendored `protoc`.
-- Keys: DeriveMasterPriv, DeriveKey, DeriveEd25519FromMaster ported and tested with the same vectors as Go.
-- Node: Skeleton node with addresses derived from Ed25519 -> v3 onion, LocalHealthCheck implemented. bbrpc HealthCheck is stubbed with a clear TODO for client certificate extraction.
-- Network: Mock and Tor transports are scaffolded. MockNetwork will grow to use TLS+TCP with tonic. TorNetwork includes a design and pointers to arti-experiment, but is not wired to gRPC yet.
-- CLI/Daemon: Minimal stubs. TLS wiring moving to `clitls`.
-- TLS (clitls): mutual TLS with SPKI pinning and PQ-hybrid enforcement (X25519+ML‑KEM‑768) using rustls + rustls-post-quantum.
+Security model
 
-Why not fully wire arti → gRPC in this first pass?
+- Master secret: Argon2id from the user seed/password.
+- Derived keys: HKDF-SHA256 with domain-separated labels.
+- Node identity: deterministic Ed25519 keypair -> Tor v3 onion hostname.
+- Peer transport: Tor onion services plus mutual TLS 1.3 with
+  `X25519MLKEM768` enforced through `rustls-post-quantum`.
+- Local CLI transport: separate pinned mutual TLS credentials.
+- At-rest data: encrypted content blobs and encrypted metadata only. User file
+  bodies are never written to disk in plaintext by the storage layer.
 
-Arti exposes incoming rendezvous streams (AsyncRead/AsyncWrite), while tonic usually serves via a socket listener. Tonic does support `serve_with_incoming`, so it’s feasible to adapt arti streams into tonic’s incoming stream. Doing so cleanly requires a small adapter layer and TLS setup with rustls. That’s the next logical step once we agree on the shape here.
+Workspace map
 
-Crate map (mirrors Go structure)
+- `crates/protos`: gRPC/protobuf types and services.
+- `crates/keys`: seed derivation, HKDF labels, onion hostname conversion.
+- `crates/clitls`: local and peer TLS configuration and certificate helpers.
+- `crates/content`: encrypted content blob format.
+- `crates/storage`: encrypted local and mirrored-peer storage.
+- `crates/clock`: system and manual clocks for deterministic tests.
+- `crates/transport`: peer dial abstraction.
+- `crates/netmock`: TLS-backed mock peer transport.
+- `crates/nettor`: Arti-backed Tor peer transport.
+- `crates/node`: node state, RPC services, recovery, contracts, scoring.
+- `cmd/bbd`: daemon binary.
+- `cmd/bbcli`: CLI binary.
 
-- crates/protos: Compiled protobuf stubs and service traits (bbrpc, clirpc, storedpb).
-- crates/keys: Key derivation utilities.
-- crates/node: Node orchestration combining protos + network + keys.
-- crates/clitls: Mutual TLS helpers and key file I/O compatible with Go (`server.pub`, `client.key`).
-- crates/netmock: In-memory/local testing transport (to be fleshed out using TCP + rustls).
-- crates/nettor: Tor transport (arti-based, planned adapter).
-- cmd/bbd: Daemon entry (stub).
-- cmd/bbcli: CLI entry (stub).
+Build and test
 
-Build
+From `rust/`:
 
-- From `rust/`: `cargo build`.
-  - Protos are generated at build time using vendored `protoc` (no host install).
-- Make targets:
-  - `make build` — builds only `bbd` and `bbcli` (release). Injects `PATH=/home/user/nix/result-apps/bin` for Nix shells.
-  - `make unit` — runs tests for `keys`, `clitls`, `node` with `--all-features` (enables optional PQ tests when requested).
-- Tests (manual):
-  - Core: `cargo test -p keys -p clitls -p node`
-  - PQ fallback: `cargo test -p clitls --features pq_tls_tests`
+- Build everything: `cargo build --workspace`
+- Test everything: `cargo test --workspace`
+- Focused packages:
+  - `cargo test -p node`
+  - `cargo test -p bbd`
+  - `cargo test -p bbcli`
+  - `cargo test -p nettor`
 
-Static binaries (self-contained)
+Remote builder workflow
 
-- Preferred: build against musl for static linking.
-  - Install toolchain: `rustup target add x86_64-unknown-linux-musl` and `apt-get install musl-tools` (or your distro’s equivalent).
-  - Build: `cargo build --release --target x86_64-unknown-linux-musl -p bbd -p bbcli`.
-  - Resulting files: `target/x86_64-unknown-linux-musl/release/bbd` and `.../bbcli`.
-  - Verify static: `file target/x86_64-unknown-linux-musl/release/bbd` should include “statically linked”.
-  - Linker note: we default to `x86_64-unknown-linux-musl-gcc` in `.cargo/config.toml` (works on Nix and many distros). If you only have `musl-gcc`, override with `CC_x86_64_unknown_linux_musl=musl-gcc cargo build ...`.
-- Containerized (no rustup needed): use a musl cross image that already includes the target.
-  - Example: `docker run --rm -v "$PWD":/work -w /work messense/rust-musl-cross:x86_64-musl cargo build --release --target x86_64-unknown-linux-musl -p bbd -p bbcli`.
-  - Artifacts will appear under your local `target/x86_64-unknown-linux-musl/release/`.
+Heavy builds should run on `barterbackup-dev` through the helper scripts in the
+repo root.
 
-Nix users
+- Sync and run one Rust command remotely:
+  - `./scripts/remote-rust cargo test -p node`
+- Run the main Rust test suite remotely:
+  - `./scripts/remote-test`
+- Run nextest remotely:
+  - `./scripts/remote-nextest`
 
-- You need a toolchain that includes the musl target’s std. Two options:
-  - rustup: `nix shell nixpkgs#rustup nixpkgs#pkgsCross.musl64.stdenv.cc -c bash -lc 'rustup toolchain install stable && rustup target add x86_64-unknown-linux-musl && cd rust && cargo build --release --target x86_64-unknown-linux-musl -p bbd -p bbcli'`
-  - Oxalica overlay: use a shell with `rust-bin.stable.latest.default.override { targets = [ "x86_64-unknown-linux-musl" ]; }` and `pkgsCross.musl64.stdenv.cc`, then `cargo build --release --target x86_64-unknown-linux-musl -p bbd -p bbcli`.
+`remote-rust` automatically drops the throwaway remote `rust/target`
+directory when the builder is low on disk space before syncing sources.
 
+Nix
+
+The top-level `flake.nix` provides a Rust dev shell with a recent toolchain and
+common tooling.
+
+- Enter the Rust shell locally:
+  - `nix develop .#rust`
+- Useful tools in the shell include:
+  - `cargo-nextest`
+  - `cargo-deny`
+  - `cargo-audit`
+  - `cargo-fuzz`
+  - `protobuf`
+  - `clang`
+
+End-to-end shape
+
+A usable workflow today is:
+
+1. Start `bbd`.
+2. Use `bbcli unlock <seed-or-password>`.
+3. Use `bbcli set-file`, `get-file`, `list-files`, and `connect-peer`.
+4. Let the daemon background loop propose contracts, refresh mirrored content,
+   run checks, and drive recovery.
+5. Use `bbcli get-contracts`, `check-contract`, `propose-contract`, and
+   `recover-content` to inspect or force the same workflows manually.
 
 Notes
 
-- TLS: enforced TLS 1.3 with PQ-hybrid `X25519MLKEM768` using `rustls-post-quantum`. Connections that do not offer this kx group fail the handshake (see clitls tests).
-- Tonic: workspace uses tonic 0.14.2 and prost 0.14.1 consistently.
-- clitls files: `server.pub` is a PEM-encoded SPKI (Ed25519). `client.key` is a PEM-encoded PKCS#8 v1 Ed25519 private key. `clitls::write_keys/read_keys` are compatible with the Go formats.
-- For onion v3 address derivation, use `torut`/arti pieces; full wiring to be completed in `crates/nettor`.
+- The Rust workspace intentionally favors battle-tested primitives and explicit
+  documentation over a line-for-line Go port.
+- The `arti-experiment` repository remains useful only as historical evidence
+  that deterministic Arti hidden-service keys were possible. The production
+  transport in this workspace is built against current Arti crates.

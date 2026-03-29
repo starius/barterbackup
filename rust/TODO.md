@@ -1,40 +1,30 @@
-BarterBackup (Rust) — Notes and TODOs
+BarterBackup (Rust) - Remaining work
 
-Summary
+Current focus
 
-- This is a scaffolded Rust port mirroring the Go layout. It focuses on clarity and comments so we can evaluate a Rust direction.
-- gRPC: tonic + prost. Protos compiled from the existing files in bbrpc/, clirpc/, storedpb/.
-- Keys and crypto: Argon2id + HKDF + Ed25519 (ed25519-dalek), matching Go outputs.
-- Tor transport: arti (in-process Tor). Adapter to tonic incoming streams is sketched.
+- Keep the Rust implementation authoritative and maintain the Go tree only as a
+  semantic reference.
+- Prefer current dependency releases for Arti, tonic, rustls, and crypto.
+- Keep running heavy builds on `barterbackup-dev` through the remote scripts.
 
-Open TODOs
+Remaining gaps
 
-- P2P TLS and client-onion inference
-  - Implement rustls mutual TLS for P2P (mock network) and extract the client certificate in tonic server context to compute client_onion in bbrpc::HealthCheck (matches Go).
-  - Enforce TLS 1.3 and X25519. PQ hybrid X25519MLKEM768 is not exposed in rustls yet — track for future.
+- Add a full end-to-end daemon/CLI integration test that runs `bbd`, uses the
+  generated local CLI keys, and drives `bbcli` over the real local mTLS path.
+- Extend the daemon maintenance tests beyond the mock transport happy path to
+  cover recovery after local wipe, peer corruption, and repeated offline/online
+  transitions.
+- Add more adversarial tests around malformed peer responses, especially for
+  background maintenance and recovery loops.
+- Expand fuzzing coverage for encrypted content parsing and metadata decoding.
+- Revisit whether the daemon background scheduler itself should use a fully
+  synthetic async clock instead of real tokio time. The core score logic and
+  long-horizon node scenarios already use the manual clock, but the daemon loop
+  still uses real timer ticks.
 
-- Mock network (netmock)
-  - Provide helpers to spin up tonic servers over TCP + rustls with client auth.
-  - Provide client builders that pin server public key and load client key.
-  - Port Go tests: HealthCheck with two nodes, client_onion/server_onion assertions.
+Guardrails
 
-- Tor transport (nettor)
-  - Use arti to launch onion service with Ed25519 derived from master key (purpose "tor/onion/v3").
-  - Wrap arti rendezvous streams into a tonic-compatible Incoming stream (serve_with_incoming) with rustls on top.
-  - Add onion self-dial for testing (optional) or rely on mock network tests.
-
-- Local CLI gRPC
-  - Replace h2c with rustls and key pinning analogous to Go clitls. Keep self-signed, long-lived certs.
-  - Add env var prefixes: BBD_/BBCLI_, flags parity with Go.
-
-- Protos/codegen
-  - Current build.rs relies on local protoc. If needed, pre-generate and commit prost code to avoid protoc dependency.
-
-- Structure parity
-  - Keep services implemented on a single Node, split files if helpful (mirroring internal/bbnode/* in Go) while staying idiomatic Rust.
-
-Design notes
-
-- Onion address derivation uses torut v3 to compute the .onion from the Ed25519 public key, mirroring bine/torutil in Go.
-- keys::derive_master_priv/derive_key/derive_ed25519_from_master produce identical bytes to Go (tests included).
-
+- Do not weaken the onion hostname validation added to peer management.
+- Do not relax the enforced `X25519MLKEM768` peer TLS policy without an
+  explicit design decision.
+- Do not add plaintext local storage shortcuts for testing.
