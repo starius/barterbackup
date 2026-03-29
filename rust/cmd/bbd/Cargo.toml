@@ -5,8 +5,9 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+async-trait = "0.1"
 clap = { version = "4", features = ["derive", "env"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 node = { path = "../../crates/node" }
@@ -16,6 +17,13 @@ tonic = { version = "0.14.2", features = ["transport", "tls-connect-info"] }
 futures-util = "0.3"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-rustls = "0.26"
+tokio-util = "0.7"
 clitls = { path = "../../crates/clitls" }
 dirs = "5"
- 
+fs2 = "0.4"
+hex = "0.4"
+keys = { path = "../../crates/keys" }
+nettor = { path = "../../crates/nettor" }
+
+[dev-dependencies]
+tempfile = "3"
