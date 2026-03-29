@@ -531,6 +531,7 @@ dependencies = [
  "futures-util",
  "node",
  "protos",
+ "storage",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
@@ -2510,12 +2511,14 @@ name = "node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "content",
  "ed25519-dalek 1.0.1",
  "futures",
  "hex",
  "keys",
  "protos",
  "sha2 0.10.9",
+ "storage",
  "tokio",
  "tokio-stream",
  "tonic",

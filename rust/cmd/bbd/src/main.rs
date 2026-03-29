@@ -5,7 +5,9 @@ use dirs::home_dir;
 use futures_util::StreamExt;
 use node::{CliService, Node};
 use protos::clirpc::barter_backup_client_server::BarterBackupClientServer;
+use std::path::PathBuf;
 use std::sync::Arc;
+use storage::OsFilesystem;
 use tokio::net::TcpStream;
 use tokio_rustls::server::TlsStream;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -23,6 +25,10 @@ struct Args {
     #[arg(long, env = "BBD_CLI_ADDR", default_value = "127.0.0.1:50051")]
     cli_addr: String,
 
+    /// Directory for encrypted daemon content storage.
+    #[arg(long, env = "BBD_DATA_DIR")]
+    data_dir: Option<String>,
+
     /// Directory for CLI TLS keys (server.pub and client.key).
     #[arg(long, env = "BBD_CLI_KEYS_DIR")]
     cli_keys_dir: Option<String>,
@@ -35,9 +41,16 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    let node = std::sync::Arc::new(Node::new(&args.password)?);
+    let data_dir = args.data_dir.map(PathBuf::from).unwrap_or_else(|| {
+        home_dir()
+            .map(|path| path.join(".barterbackup/data"))
+            .unwrap()
+    });
+    let store_dir = data_dir.join("store");
+    let filesystem = Arc::new(OsFilesystem::new(&store_dir)?);
+    let node = std::sync::Arc::new(Node::with_local_storage(&args.password, filesystem)?);
     node.mark_started();
-    info!(onion = %node.address(), "Node initialized");
+    info!(onion = %node.address(), data_dir = %data_dir.display(), "Node initialized");
 
     let cli_listener = tokio::net::TcpListener::bind(&args.cli_addr).await?;
     let cli_addr = cli_listener.local_addr()?;
