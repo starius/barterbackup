@@ -5,13 +5,13 @@
 //! transport still need further work.
 
 use anyhow::Result;
+use clock::{Clock, SystemClock, Timestamp};
 use futures::{stream, Stream};
 use protos::{bbrpc, clirpc};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use storage::{Filesystem, StorageError, Store};
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tonic::{Code, Response, Status};
@@ -33,8 +33,10 @@ pub struct Node {
     ed25519_keypair: ed25519_dalek::Keypair,
     /// onion_address is the stable Tor v3 hostname for the node identity key.
     onion_address: String,
+    /// clock provides deterministic wall-clock time for scheduling and tests.
+    clock: Arc<dyn Clock>,
     /// started_at tracks daemon uptime for local health checks.
-    started_at: Mutex<Option<Instant>>,
+    started_at: Mutex<Option<Timestamp>>,
     /// store holds the encrypted local content store when configured.
     store: Option<Mutex<Store>>,
     /// known_peers is the locally configured peer list.
@@ -48,12 +50,21 @@ pub struct Node {
 impl Node {
     /// Create a node identity without attaching a local encrypted store.
     pub fn new(seed: &str) -> Result<Self> {
-        Self::build(seed, None)
+        Self::build(seed, None, Arc::new(SystemClock))
     }
 
     /// Create a node identity with a local encrypted store.
     pub fn with_local_storage(seed: &str, filesystem: Arc<dyn Filesystem>) -> Result<Self> {
-        Self::build(seed, Some(filesystem))
+        Self::build(seed, Some(filesystem), Arc::new(SystemClock))
+    }
+
+    /// Create a node identity with a local encrypted store and explicit clock.
+    pub fn with_local_storage_and_clock(
+        seed: &str,
+        filesystem: Arc<dyn Filesystem>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self> {
+        Self::build(seed, Some(filesystem), clock)
     }
 
     /// Return the node onion hostname.
@@ -63,7 +74,7 @@ impl Node {
 
     /// Mark the node as started so uptime can be reported.
     pub fn mark_started(&self) {
-        *self.started_at.lock().unwrap() = Some(Instant::now());
+        *self.started_at.lock().unwrap() = Some(self.clock.now());
     }
 
     /// Return the deterministic Ed25519 keypair.
@@ -72,18 +83,23 @@ impl Node {
     }
 
     /// Build a node, optionally attaching an encrypted local store.
-    fn build(seed: &str, filesystem: Option<Arc<dyn Filesystem>>) -> Result<Self> {
+    fn build(
+        seed: &str,
+        filesystem: Option<Arc<dyn Filesystem>>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self> {
         let master = keys::derive_master_priv(seed);
         let (keypair, public_key) = keys::derive_ed25519_from_master(&master, "tor/onion/v3")?;
         let onion_address = keys::onion_hostname_from_public_key(&public_key);
         let store = filesystem
-            .map(|filesystem| Store::new(filesystem, &master))
+            .map(|filesystem| Store::new_with_time_source(filesystem, &master, clock.clone()))
             .transpose()?
             .map(Mutex::new);
 
         Ok(Self {
             ed25519_keypair: keypair,
             onion_address,
+            clock,
             started_at: Mutex::new(None),
             store,
             known_peers: Mutex::new(BTreeSet::new()),
@@ -97,7 +113,7 @@ impl Node {
         self.started_at
             .lock()
             .unwrap()
-            .map(|started_at| Instant::now().duration_since(started_at).as_secs() as i64)
+            .map(|started_at| self.clock.now().secs.saturating_sub(started_at.secs) as i64)
             .unwrap_or(0)
     }
 
@@ -264,6 +280,126 @@ impl Node {
     /// Report whether a peer-visible content id is already stored locally.
     fn has_content_blob(&self, content_id: &[u8]) -> Result<bool, Status> {
         self.with_store(|store| Ok(store.has_content_blob(content_id)))
+    }
+
+    /// Mirror or clear the latest advertised content for a peer.
+    async fn sync_peer_content_info(
+        &self,
+        peer_onion: &str,
+        peer_public_key: &ed25519_dalek::PublicKey,
+        content_info: Option<&bbrpc::ContentInfo>,
+    ) -> Result<(), Status> {
+        let previous_content_id = self.with_store(|store| {
+            Ok(store
+                .peers()
+                .into_iter()
+                .find(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes())
+                .map(|peer| peer.content_id)
+                .filter(|content_id| !content_id.is_empty()))
+        })?;
+
+        match content_info {
+            Some(content_info) => {
+                if !self.has_content_blob(&content_info.content_id)? {
+                    let blob = self
+                        .download_peer_blob(peer_onion, &content_info.content_id)
+                        .await?;
+                    self.with_store(|store| {
+                        store.write_content_blob(&content_info.content_id, &blob)
+                    })?;
+                }
+                self.with_store(|store| {
+                    store.set_peer_content_id(peer_public_key.as_bytes(), &content_info.content_id)
+                })?;
+                if let Some(previous_content_id) = previous_content_id {
+                    if previous_content_id != content_info.content_id {
+                        self.remove_unused_foreign_blob(&previous_content_id)?;
+                    }
+                }
+            }
+            None => {
+                self.with_store(|store| store.clear_peer_content_id(peer_public_key.as_bytes()))?;
+                if let Some(previous_content_id) = previous_content_id {
+                    self.remove_unused_foreign_blob(&previous_content_id)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Return the persisted score state for a peer.
+    fn peer_score_state(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+    ) -> Result<(i64, i64), Status> {
+        self.with_store(|store| {
+            let peer = store
+                .peers()
+                .into_iter()
+                .find(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes());
+            Ok(peer
+                .map(|peer| (peer.score_seconds, peer.score_measured_at))
+                .unwrap_or((0, 0)))
+        })
+    }
+
+    /// Persist the updated score state for a peer.
+    fn update_peer_score(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+        passed: bool,
+    ) -> Result<i64, Status> {
+        let (score_seconds, measured_at) = self.peer_score_state(peer_public_key)?;
+        let now_secs = i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX);
+        let elapsed = if measured_at > 0 {
+            now_secs.saturating_sub(measured_at)
+        } else {
+            0
+        };
+        let new_score = if passed {
+            score_seconds.saturating_add(elapsed)
+        } else {
+            score_seconds.saturating_sub(elapsed)
+        };
+
+        self.with_store(|store| {
+            store.set_peer_score(peer_public_key.as_bytes(), new_score, now_secs)
+        })?;
+        Ok(new_score)
+    }
+
+    /// Choose a deterministic sample section inside a content blob.
+    fn sample_section(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+        content_id: &[u8],
+        blob_len: usize,
+    ) -> (usize, usize) {
+        const SAMPLE_LEN: usize = 16 * 1024;
+
+        if blob_len == 0 {
+            return (0, 0);
+        }
+        let section_len = SAMPLE_LEN.min(blob_len);
+
+        // Hash peer identity, revision, and current time so repeated checks
+        // move across the blob while remaining deterministic in tests.
+        let mut hasher = Sha256::new();
+        hasher.update(peer_public_key.as_bytes());
+        hasher.update(content_id);
+        hasher.update(self.clock.now().secs.to_le_bytes());
+        let digest = hasher.finalize();
+        let mut offset_bytes = [0u8; 8];
+        offset_bytes.copy_from_slice(&digest[..8]);
+        let max_offset = blob_len - section_len;
+        let offset = if max_offset == 0 {
+            0
+        } else {
+            (u64::from_le_bytes(offset_bytes) as usize) % (max_offset + 1)
+        };
+
+        (offset, section_len)
     }
 }
 
@@ -467,9 +603,46 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         &self,
         _request: tonic::Request<clirpc::GetContractsRequest>,
     ) -> Result<tonic::Response<clirpc::GetContractsResponse>, tonic::Status> {
-        Ok(Response::new(clirpc::GetContractsResponse {
-            contracts: Vec::new(),
-        }))
+        let known_peers = self.node.known_peers.lock().unwrap().clone();
+        let contracts = self.node.with_store(|store| {
+            let peers = store.peers();
+            let mut contracts = Vec::new();
+
+            for known_peer in &known_peers {
+                let peer_public_key = match keys::public_key_from_onion_hostname(known_peer) {
+                    Ok(peer_public_key) => peer_public_key,
+                    Err(_) => continue,
+                };
+                let peer = peers
+                    .iter()
+                    .find(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes());
+                let their_content_length = peer
+                    .and_then(|peer| {
+                        if peer.content_id.is_empty() {
+                            None
+                        } else {
+                            store.read_blob_by_id(&peer.content_id).ok()
+                        }
+                    })
+                    .map(|blob| i64::try_from(blob.len()).unwrap_or(i64::MAX))
+                    .unwrap_or(0);
+
+                contracts.push(clirpc::ContractInfo {
+                    peer: Some(clirpc::Peer {
+                        onion_service_id: known_peer.clone(),
+                    }),
+                    our_content_synced: false,
+                    our_remaining_seconds: 0,
+                    their_remaining_seconds: peer.map(|peer| peer.score_seconds).unwrap_or(0),
+                    their_content_length,
+                    online: false,
+                });
+            }
+
+            Ok(contracts)
+        })?;
+
+        Ok(Response::new(clirpc::GetContractsResponse { contracts }))
     }
 
     async fn propose_contract(
@@ -481,9 +654,116 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
 
     async fn check_contract(
         &self,
-        _request: tonic::Request<clirpc::CheckContractRequest>,
+        request: tonic::Request<clirpc::CheckContractRequest>,
     ) -> Result<tonic::Response<Self::CheckContractStream>, tonic::Status> {
-        Ok(Response::new(Box::pin(stream::empty())))
+        let peer = request
+            .into_inner()
+            .peer
+            .ok_or_else(|| Status::invalid_argument("peer is required"))?;
+        if peer.onion_service_id.is_empty() {
+            return Err(Status::invalid_argument("peer onion is required"));
+        }
+        let peer_public_key = keys::public_key_from_onion_hostname(&peer.onion_service_id)
+            .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+
+        let mut updates = vec![Ok(clirpc::CheckContractUpdate {
+            state: clirpc::ContractState::ConnectingToPeer as i32,
+            success: false,
+            our_content_length: 0,
+            our_content_section_offset: 0,
+            our_content_section_length: 0,
+        })];
+
+        let mut client = self
+            .node
+            .connect_peer_client(&peer.onion_service_id)
+            .await?;
+        let revision = client
+            .get_content_revision(bbrpc::GetContentRevisionRequest {})
+            .await
+            .map_err(|error| Status::unavailable(format!("get content revision: {error}")))?
+            .into_inner();
+        self.node
+            .sync_peer_content_info(
+                &peer.onion_service_id,
+                &peer_public_key,
+                revision.responder_content.as_ref(),
+            )
+            .await?;
+
+        updates.push(Ok(clirpc::CheckContractUpdate {
+            state: clirpc::ContractState::CheckingContents as i32,
+            success: false,
+            our_content_length: 0,
+            our_content_section_offset: 0,
+            our_content_section_length: 0,
+        }));
+
+        let Some(our_content) = self.node.responder_content()? else {
+            self.node.update_peer_score(&peer_public_key, true)?;
+            updates.push(Ok(clirpc::CheckContractUpdate {
+                state: clirpc::ContractState::Completed as i32,
+                success: true,
+                our_content_length: 0,
+                our_content_section_offset: 0,
+                our_content_section_length: 0,
+            }));
+            return Ok(Response::new(Box::pin(stream::iter(updates))));
+        };
+
+        if revision
+            .requester_content
+            .as_ref()
+            .map(|content_info| content_info.content_id.as_slice())
+            != Some(our_content.content_id.as_slice())
+        {
+            self.node.update_peer_score(&peer_public_key, false)?;
+            updates.push(Ok(clirpc::CheckContractUpdate {
+                state: clirpc::ContractState::OurContentRevisionMissing as i32,
+                success: false,
+                our_content_length: our_content.content_length,
+                our_content_section_offset: 0,
+                our_content_section_length: 0,
+            }));
+            return Ok(Response::new(Box::pin(stream::iter(updates))));
+        }
+
+        let local_blob = self.node.with_store(|store| store.current_blob())?;
+        let (section_offset, section_length) =
+            self.node
+                .sample_section(&peer_public_key, &our_content.content_id, local_blob.len());
+        let download = client
+            .download(bbrpc::DownloadRequest {
+                content_id: our_content.content_id.clone(),
+                offset: i64::try_from(section_offset).unwrap_or(i64::MAX),
+                reference_content_id: Vec::new(),
+            })
+            .await
+            .map_err(|error| Status::unavailable(format!("download sampled section: {error}")))?
+            .into_inner();
+        let expected_hash = Sha256::digest(&local_blob);
+        let passed = download.sha256.as_slice() == expected_hash.as_slice()
+            && matches!(
+                download.section,
+                Some(bbrpc::download_response::Section::RawBytes(ref raw_bytes))
+                    if raw_bytes.value.len() >= section_length
+                        && raw_bytes.value[..section_length]
+                            == local_blob[section_offset..section_offset + section_length]
+            );
+        self.node.update_peer_score(&peer_public_key, passed)?;
+        updates.push(Ok(clirpc::CheckContractUpdate {
+            state: if passed {
+                clirpc::ContractState::Completed as i32
+            } else {
+                clirpc::ContractState::InvalidContentReturned as i32
+            },
+            success: passed,
+            our_content_length: our_content.content_length,
+            our_content_section_offset: i64::try_from(section_offset).unwrap_or(i64::MAX),
+            our_content_section_length: i64::try_from(section_length).unwrap_or(i64::MAX),
+        }));
+
+        Ok(Response::new(Box::pin(stream::iter(updates))))
     }
 
     async fn recover_content(
@@ -576,46 +856,13 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
             }
         }
 
-        let previous_content_id = self.node.with_store(|store| {
-            Ok(store
-                .peers()
-                .into_iter()
-                .find(|peer| peer.onion_pubkey.as_slice() == peer_identity.public_key.as_bytes())
-                .map(|peer| peer.content_id)
-                .filter(|content_id| !content_id.is_empty()))
-        })?;
-
-        match requester_content {
-            Some(content_info) => {
-                if !self.node.has_content_blob(&content_info.content_id)? {
-                    let blob = self
-                        .node
-                        .download_peer_blob(&peer_identity.onion_address, &content_info.content_id)
-                        .await?;
-                    self.node.with_store(|store| {
-                        store.write_content_blob(&content_info.content_id, &blob)
-                    })?;
-                }
-                self.node.with_store(|store| {
-                    store.set_peer_content_id(
-                        peer_identity.public_key.as_bytes(),
-                        &content_info.content_id,
-                    )
-                })?;
-                if let Some(previous_content_id) = previous_content_id {
-                    if previous_content_id != content_info.content_id {
-                        self.node.remove_unused_foreign_blob(&previous_content_id)?;
-                    }
-                }
-            }
-            None => {
-                self.node
-                    .with_store(|store| store.remove_peer(peer_identity.public_key.as_bytes()))?;
-                if let Some(previous_content_id) = previous_content_id {
-                    self.node.remove_unused_foreign_blob(&previous_content_id)?;
-                }
-            }
-        }
+        self.node
+            .sync_peer_content_info(
+                &peer_identity.onion_address,
+                &peer_identity.public_key,
+                requester_content.as_ref(),
+            )
+            .await?;
 
         Ok(Response::new(bbrpc::SetContentRevisionResponse {}))
     }
@@ -688,6 +935,8 @@ fn map_storage_error(error: StorageError) -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clock::{ManualClock, Timestamp};
+    use futures::TryStreamExt;
     use protos::bbrpc::barter_backup_server_client::BarterBackupServerClient;
     use protos::bbrpc::barter_backup_server_server::BarterBackupServerServer;
     use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
@@ -758,6 +1007,21 @@ mod tests {
         connector
             .connect(server_node.address(), client_secret)
             .await
+    }
+
+    /// Return the persisted score for `peer_onion` from the node store.
+    fn peer_score_seconds(node: &Node, peer_onion: &str) -> anyhow::Result<i64> {
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)?;
+        let score = node.with_store(|store| {
+            Ok(store
+                .peers()
+                .into_iter()
+                .find(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes())
+                .map(|peer| peer.score_seconds)
+                .unwrap_or(0))
+        })?;
+
+        Ok(score)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1036,6 +1300,196 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::NotFound);
+
+        requester_server.abort();
+        responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_contract_uses_manual_time_for_scores() -> anyhow::Result<()> {
+        let requester_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let responder_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage_and_clock(
+            "requester",
+            requester_filesystem,
+            requester_clock.clone(),
+        )?);
+        let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let responder_node = Arc::new(Node::with_local_storage_and_clock(
+            "responder",
+            responder_filesystem,
+            responder_clock.clone(),
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        responder_node.set_peer_connector(connector.clone());
+        requester_node
+            .known_peers
+            .lock()
+            .unwrap()
+            .insert(responder_node.address().to_string());
+
+        let requester_cli = CliService::new(requester_node.clone());
+        requester_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let requester_server =
+            spawn_registered_p2p_server(requester_node.clone(), connector.as_ref()).await?;
+        let responder_server =
+            spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
+        let mut requester_to_responder = connect_p2p_client(
+            requester_node.clone(),
+            responder_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
+        requester_to_responder
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                requester_content: Some(requester_node.responder_content()?.unwrap()),
+            })
+            .await?;
+
+        let first_updates = requester_cli
+            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: responder_node.address().to_string(),
+                }),
+            }))
+            .await?
+            .into_inner()
+            .try_collect::<Vec<_>>()
+            .await?;
+        assert_eq!(
+            first_updates.last().map(|update| update.success),
+            Some(true)
+        );
+        assert_eq!(
+            peer_score_seconds(&requester_node, responder_node.address())?,
+            0
+        );
+
+        requester_clock.advance(Duration::from_secs(3_600));
+        let second_updates = requester_cli
+            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: responder_node.address().to_string(),
+                }),
+            }))
+            .await?
+            .into_inner()
+            .try_collect::<Vec<_>>()
+            .await?;
+        assert_eq!(
+            second_updates.last().map(|update| update.success),
+            Some(true)
+        );
+        assert_eq!(
+            peer_score_seconds(&requester_node, responder_node.address())?,
+            3_600
+        );
+
+        requester_server.abort();
+        responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_contract_penalizes_missing_our_content() -> anyhow::Result<()> {
+        let requester_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let responder_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage_and_clock(
+            "requester",
+            requester_filesystem,
+            requester_clock.clone(),
+        )?);
+        let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let responder_node = Arc::new(Node::with_local_storage_and_clock(
+            "responder",
+            responder_filesystem,
+            responder_clock.clone(),
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        responder_node.set_peer_connector(connector.clone());
+        requester_node
+            .known_peers
+            .lock()
+            .unwrap()
+            .insert(responder_node.address().to_string());
+
+        let requester_cli = CliService::new(requester_node.clone());
+        requester_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let requester_server =
+            spawn_registered_p2p_server(requester_node.clone(), connector.as_ref()).await?;
+        let responder_server =
+            spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
+        let mut requester_to_responder = connect_p2p_client(
+            requester_node.clone(),
+            responder_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
+        requester_to_responder
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                requester_content: Some(requester_node.responder_content()?.unwrap()),
+            })
+            .await?;
+
+        requester_clock.advance(Duration::from_secs(3_600));
+        requester_cli
+            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: responder_node.address().to_string(),
+                }),
+            }))
+            .await?
+            .into_inner()
+            .try_collect::<Vec<_>>()
+            .await?;
+        assert_eq!(
+            peer_score_seconds(&requester_node, responder_node.address())?,
+            0
+        );
+
+        let requester_public_key = keys::public_key_from_onion_hostname(requester_node.address())?;
+        responder_node.with_store(|store| store.remove_peer(requester_public_key.as_bytes()))?;
+
+        requester_clock.advance(Duration::from_secs(1_800));
+        let failed_updates = requester_cli
+            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: responder_node.address().to_string(),
+                }),
+            }))
+            .await?
+            .into_inner()
+            .try_collect::<Vec<_>>()
+            .await?;
+        assert_eq!(
+            failed_updates.last().map(|update| update.state),
+            Some(clirpc::ContractState::OurContentRevisionMissing as i32)
+        );
+        assert_eq!(
+            peer_score_seconds(&requester_node, responder_node.address())?,
+            -1_800
+        );
 
         requester_server.abort();
         responder_server.abort();

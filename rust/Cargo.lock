@@ -2530,6 +2530,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clitls",
+ "clock",
  "content",
  "ed25519-dalek 1.0.1",
  "futures",

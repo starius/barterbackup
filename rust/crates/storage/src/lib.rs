@@ -355,6 +355,54 @@ impl Store {
         self.persist_peer_state()
     }
 
+    /// Set the persisted score state for a peer.
+    pub fn set_peer_score(
+        &mut self,
+        onion_pubkey: &[u8],
+        score_seconds: i64,
+        score_measured_at: i64,
+    ) -> Result<(), StorageError> {
+        if onion_pubkey.is_empty() {
+            return Err(StorageError::InvalidFileName);
+        }
+
+        if let Some(peer) = self
+            .peers
+            .iter_mut()
+            .find(|peer| peer.onion_pubkey == onion_pubkey)
+        {
+            peer.score_seconds = score_seconds;
+            peer.score_measured_at = score_measured_at;
+        } else {
+            self.peers.push(storedpb::Peer {
+                onion_pubkey: onion_pubkey.to_vec(),
+                score_seconds,
+                score_measured_at,
+                content_id: Vec::new(),
+            });
+        }
+
+        self.persist_peer_state()
+    }
+
+    /// Clear the mirrored content id for a peer while preserving score state.
+    pub fn clear_peer_content_id(&mut self, onion_pubkey: &[u8]) -> Result<(), StorageError> {
+        if onion_pubkey.is_empty() {
+            return Err(StorageError::InvalidFileName);
+        }
+
+        if let Some(peer) = self
+            .peers
+            .iter_mut()
+            .find(|peer| peer.onion_pubkey == onion_pubkey)
+        {
+            peer.content_id.clear();
+            self.persist_peer_state()?;
+        }
+
+        Ok(())
+    }
+
     /// Remove a peer entry if it exists.
     pub fn remove_peer(&mut self, onion_pubkey: &[u8]) -> Result<(), StorageError> {
         let before = self.peers.len();

@@ -19,6 +19,8 @@ pub enum Error {
     HkdfShortRead,
     #[error("empty masterPriv")]
     EmptyMaster,
+    #[error("invalid onion hostname: {0}")]
+    InvalidOnionHostname(String),
     #[error("ed25519 conversion: {0}")]
     Ed25519(#[from] SignatureError),
 }
@@ -99,6 +101,29 @@ pub fn onion_hostname_from_public_key(public_key: &PublicKey) -> String {
     )
 }
 
+/// Parse and validate a Tor v3 onion hostname into an Ed25519 public key.
+pub fn public_key_from_onion_hostname(onion_hostname: &str) -> Result<PublicKey, Error> {
+    const ONION_BODY_LEN: usize = 35;
+
+    let onion_body = onion_hostname
+        .strip_suffix(".onion")
+        .ok_or_else(|| Error::InvalidOnionHostname(onion_hostname.to_string()))?;
+    let decoded = BASE32_NOPAD
+        .decode(onion_body.to_ascii_uppercase().as_bytes())
+        .map_err(|_| Error::InvalidOnionHostname(onion_hostname.to_string()))?;
+    if decoded.len() != ONION_BODY_LEN || decoded[34] != 0x03 {
+        return Err(Error::InvalidOnionHostname(onion_hostname.to_string()));
+    }
+
+    let public_key = PublicKey::from_bytes(&decoded[..32])?;
+    let expected = onion_hostname_from_public_key(&public_key);
+    if expected != onion_hostname {
+        return Err(Error::InvalidOnionHostname(onion_hostname.to_string()));
+    }
+
+    Ok(public_key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +187,15 @@ mod tests {
             onion_hostname_from_public_key(&pub1),
             "qay7kgbb3iroqbexxqzyzi4mw6wcyzzzw4dnz73xnvhhdjrooesggeqd.onion"
         );
+    }
+
+    #[test]
+    fn test_public_key_from_onion_hostname_round_trips() {
+        let master = derive_master_priv("test-seed");
+        let (_, pub1) = derive_ed25519_from_master(&master, "tor/onion/v3").unwrap();
+        let onion = onion_hostname_from_public_key(&pub1);
+
+        assert_eq!(public_key_from_onion_hostname(&onion).unwrap(), pub1);
+        assert!(public_key_from_onion_hostname("invalid").is_err());
     }
 }
