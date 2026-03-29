@@ -18,6 +18,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "aead"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d122413f284cf2d62fb1b7db97e02edb8cda96d769b16e443a4f6195e35662b0"
+dependencies = [
+ "crypto-common",
+ "generic-array",
+]
+
+[[package]]
 name = "aes"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -26,6 +36,21 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures",
+ "zeroize",
+]
+
+[[package]]
+name = "aes-gcm-siv"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae0784134ba9375416d469ec31e7c5f9fa94405049cf08c5ce5b4698be673e0d"
+dependencies = [
+ "aead",
+ "aes",
+ "cipher",
+ "ctr",
+ "polyval",
+ "subtle",
  "zeroize",
 ]
 
@@ -181,7 +206,7 @@ checksum = "762b291c47fcdf8cd3285e97f63ef6e7231f22e46f160a5f0469056ec9b357e5"
 dependencies = [
  "async-trait",
  "cfg-if",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "derive_more",
  "educe",
@@ -875,6 +900,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
+name = "content"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm-siv",
+ "prost",
+ "protos",
+ "rand 0.8.5",
+ "sha2 0.10.9",
+ "thiserror 2.0.16",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1018,6 +1055,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1bfb12502f3fc46cca1bb51ac28df9d618d813cdc3d2f25b9fe775a34af26bb3"
 dependencies = [
  "generic-array",
+ "rand_core 0.6.4",
  "typenum",
 ]
 
@@ -1197,40 +1235,12 @@ dependencies = [
 
 [[package]]
 name = "derive-deftly"
-version = "0.14.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e8ea84d0109517cc2253d4a679bdda1e8989e9bd86987e9e4f75ffdda0095fd1"
-dependencies = [
- "derive-deftly-macros 0.14.6",
- "heck",
-]
-
-[[package]]
-name = "derive-deftly"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "957bb73a3a9c0bbcac67e129b81954661b3cfcb9e28873d8441f91b54852e77a"
 dependencies = [
- "derive-deftly-macros 1.2.0",
+ "derive-deftly-macros",
  "heck",
-]
-
-[[package]]
-name = "derive-deftly-macros"
-version = "0.14.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "357422a457ccb850dc8f1c1680e0670079560feaad6c2e247e3f345c4fab8a3f"
-dependencies = [
- "heck",
- "indexmap 2.11.4",
- "itertools 0.14.0",
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "sha3",
- "strum",
- "syn 2.0.106",
- "void",
 ]
 
 [[package]]
@@ -2994,6 +3004,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "polyval"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d1fe60d06143b2430aa532c94cfe9e29783047f06c0d7fd359a9a51b729fa25"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "opaque-debug",
+ "universal-hash",
+]
+
+[[package]]
 name = "postage"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3227,7 +3249,7 @@ version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e2023f41b5fcb7c30eb5300a5733edfaa9e0e0d502d51b586f65633fd39e40c"
 dependencies = [
- "derive-deftly 0.14.6",
+ "derive-deftly",
  "libc",
  "paste",
  "thiserror 2.0.16",
@@ -4532,7 +4554,7 @@ version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f9af921284870b0e545a8a9a0b978361e6f6c3afefdff90f91f96061ad99fdf"
 dependencies = [
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "educe",
  "futures",
  "oneshot-fused-workaround",
@@ -4568,7 +4590,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d120e944bf70897e2ae1c707b37c2bc14d10521c9ee1fe85bb54eb5c1231cc2d"
 dependencies = [
  "bytes",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "digest 0.10.7",
  "educe",
  "getrandom 0.3.3",
@@ -4589,7 +4611,7 @@ dependencies = [
  "bitflags 2.9.4",
  "bytes",
  "caret",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_more",
  "educe",
  "itertools 0.14.0",
@@ -4684,7 +4706,7 @@ dependencies = [
  "async-trait",
  "bounded-vec-deque",
  "cfg-if",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "derive_more",
  "downcast-rs",
@@ -4732,7 +4754,7 @@ checksum = "eb6f79e5f2607d53d8d85afe820996ee8aff76364fed3d05d89c154f10254c80"
 dependencies = [
  "amplify",
  "cfg-if",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "educe",
  "either",
@@ -4901,7 +4923,7 @@ checksum = "0a3aee5964d73897692e8087e0dac49cf21930553bb1daa606081c14d1113165"
 dependencies = [
  "amplify",
  "base64ct",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "derive_more",
  "dyn-clone",
@@ -4942,7 +4964,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "79d70b6b00b728023ed797986990f4993be21657b155c9c9ec6cf4fdea44bc2e"
 dependencies = [
  "async-trait",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_more",
  "educe",
  "either",
@@ -4987,7 +5009,7 @@ checksum = "7ee7fd02bab6dfff82784ae97baf59ff165af452450a3e3c0d59c199d29475c6"
 dependencies = [
  "cipher",
  "data-encoding",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_more",
  "digest 0.10.7",
  "hex",
@@ -5021,7 +5043,7 @@ dependencies = [
  "async-trait",
  "base64ct",
  "cfg-if",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "derive_more",
  "digest 0.10.7",
@@ -5075,7 +5097,7 @@ version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11362a2b9645527d6346ef2ed3bd4b382a054e14d22662985bbb0db107e3e4a2"
 dependencies = [
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_more",
  "downcast-rs",
  "paste",
@@ -5099,7 +5121,7 @@ dependencies = [
  "amplify",
  "arrayvec",
  "cfg-if",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "derive_more",
  "downcast-rs",
@@ -5139,7 +5161,7 @@ dependencies = [
  "base64ct",
  "by_address",
  "caret",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "derive_more",
  "hex",
@@ -5168,7 +5190,7 @@ dependencies = [
  "ctr",
  "curve25519-dalek 4.1.3",
  "der-parser 10.0.0",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_more",
  "digest 0.10.7",
  "ed25519-dalek 2.2.0",
@@ -5218,7 +5240,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0d40af8dfaaea4accaf9c329b40a017afd6ff316721d92346f1caf8c2d26757"
 dependencies = [
  "cfg-if",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_more",
  "dyn-clone",
  "educe",
@@ -5284,7 +5306,7 @@ dependencies = [
  "base64ct",
  "bitflags 2.9.4",
  "cipher",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "derive_more",
  "digest 0.10.7",
@@ -5328,7 +5350,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59f50ebed5e79c8a1a95a3acdef6b727c3defdb80913a03ba8b469668a2fc5be"
 dependencies = [
  "amplify",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_more",
  "filetime",
  "fs-mistrust",
@@ -5365,7 +5387,7 @@ dependencies = [
  "cipher",
  "coarsetime",
  "criterion-cycles-per-byte",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_builder_fork_arti",
  "derive_more",
  "digest 0.10.7",
@@ -5479,7 +5501,7 @@ dependencies = [
  "amplify",
  "assert_matches",
  "async-trait",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_more",
  "educe",
  "futures",
@@ -5507,7 +5529,7 @@ checksum = "0e4bf7fba95ee18ab338a054ebe79ecf0e88162785ecebedf352fde22faf5ed8"
 dependencies = [
  "amplify",
  "caret",
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "educe",
  "safelog",
  "subtle",
@@ -5522,7 +5544,7 @@ version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8192ae4e49a47b7cd45e563fcc487e84fc25103be0f76a747f1cb8f59a4644c7"
 dependencies = [
- "derive-deftly 1.2.0",
+ "derive-deftly",
  "derive_more",
  "serde",
  "thiserror 2.0.16",
@@ -5696,6 +5718,16 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "universal-hash"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc1de2c688dc15305988b563c3854064043356019f97a4b46276fe734c4f07ea"
+dependencies = [
+ "crypto-common",
+ "subtle",
+]
 
 [[package]]
 name = "untrusted"
