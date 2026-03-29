@@ -9,7 +9,12 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+async-trait = "0.1"
+clitls = { path = "../clitls" }
+ed25519-dalek = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+keys = { path = "../keys" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "io-util"] }
 tracing = "0.1"
 arti-client = { version = "0.34", default-features = false, features = [
     "tokio",
@@ -22,7 +27,17 @@ arti-client = { version = "0.34", default-features = false, features = [
     "ephemeral-keystore",
 ] }
 tor-hsservice = "0.34"
+tor-hscrypto = "0.34"
+tor-llcrypto = "0.34"
+tor-cell = "0.34"
 tor-keymgr = "0.34"
 tor-config = "0.34"
+tor-proto = "0.34"
+tor-rtcompat = "0.34"
 futures = "0.3"
 safelog = "0.5"
+tokio-rustls = "0.26"
+tokio-stream = { version = "0.1", features = ["sync"] }
+tonic = { version = "0.14.2", features = ["transport"] }
+tower = { version = "0.5", features = ["util"] }
+transport = { path = "../transport" }

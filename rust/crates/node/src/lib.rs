@@ -150,12 +150,16 @@ impl Node {
         &self,
         request: &tonic::Request<T>,
     ) -> Result<PeerIdentity, Status> {
-        let tls_info = request
+        let peer_certificates = request
             .extensions()
             .get::<TlsConnectInfo<TcpConnectInfo>>()
-            .ok_or_else(|| Status::unauthenticated("client certificate required"))?;
-        let peer_certificates = tls_info
-            .peer_certs()
+            .and_then(|tls_info| tls_info.peer_certs())
+            .or_else(|| {
+                request
+                    .extensions()
+                    .get::<TlsConnectInfo<()>>()
+                    .and_then(|tls_info| tls_info.peer_certs())
+            })
             .ok_or_else(|| Status::unauthenticated("client certificate required"))?;
         let end_entity = peer_certificates
             .first()
