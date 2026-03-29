@@ -5,7 +5,7 @@
 //! - DeriveKey(master_priv, purpose, len) uses HKDF-SHA256 with purpose label.
 //! - DeriveEd25519FromMaster(master_priv, "tor/onion/v3") -> ed25519 keypair.
 
-use argon2::{password_hash::SaltString, Algorithm, Argon2, Params, Version};
+use argon2::{Algorithm, Argon2, Params, Version};
 use ed25519_dalek::{Keypair, PublicKey, SecretKey, SignatureError};
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
@@ -13,11 +13,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("hkdf short read")] 
+    #[error("hkdf short read")]
     HkdfShortRead,
-    #[error("empty masterPriv")] 
+    #[error("empty masterPriv")]
     EmptyMaster,
-    #[error("ed25519 conversion: {0}")] 
+    #[error("ed25519 conversion: {0}")]
     Ed25519(#[from] SignatureError),
 }
 
@@ -64,7 +64,10 @@ pub fn derive_ed25519_from_master(
     let seed = derive_key(master_priv, purpose, 32)?;
     let sk = SecretKey::from_bytes(&seed)?;
     let pk: PublicKey = (&sk).into();
-    let kp = Keypair { secret: sk, public: pk };
+    let kp = Keypair {
+        secret: sk,
+        public: pk,
+    };
     let pubk = kp.public.clone();
     Ok((kp, pubk))
 }
@@ -81,7 +84,7 @@ mod tests {
             ("password", "b9a023e45bd280e4cc6d093feb81dc1f34423523f7ac6e730e337ab4b3d79ff0112b694de0cd1fad90ed55393222e5a47f656c20f488be5522afe98bd7f9de07"),
             ("pässwörd", "4fd00b3a4ca5cf0d5e81f9b1caad16f9596158726ea0c942f13157699cd4c0a57ccfcd04850ca56c180769a180d1d8752047b9c1f60fe9d1c5f62e42297e851d"),
         ];
-        for (seed, want_hex) in cases { 
+        for (seed, want_hex) in cases {
             let got = derive_master_priv(seed);
             assert_eq!(hx(&got), want_hex);
             assert_eq!(got.len(), 64);
@@ -92,9 +95,15 @@ mod tests {
     fn test_derive_key_table() {
         let master = derive_master_priv("test-seed");
         let k32 = derive_key(&master, "purpose-32", 32).unwrap();
-        assert_eq!(hx(k32), "e5f72051031a2bb3c75a9f50d8640fd3fdfbc7cd01fd9f9fee96d9e01e522225");
+        assert_eq!(
+            hx(k32),
+            "e5f72051031a2bb3c75a9f50d8640fd3fdfbc7cd01fd9f9fee96d9e01e522225"
+        );
         let ed_seed = derive_key(&master, "tor/onion/v3", 32).unwrap();
-        assert_eq!(hx(ed_seed), "d3ce31dc0f3a710b4a3d42259a7628a894c4b6c2bd3a0ed6e6bb0a8e003b2348");
+        assert_eq!(
+            hx(ed_seed),
+            "d3ce31dc0f3a710b4a3d42259a7628a894c4b6c2bd3a0ed6e6bb0a8e003b2348"
+        );
         let k48 = derive_key(&master, "purpose-48", 48).unwrap();
         assert_eq!(hx(k48), "35278391bd7b851be5a795a3d46713350ac6488bfaeb67bcdcec37919c099461aaa6267470cc8d284173d182f5797fd2");
     }
@@ -104,10 +113,16 @@ mod tests {
         assert!(derive_ed25519_from_master(&[], "tor/onion/v3").is_err());
         let master = derive_master_priv("test-seed");
         let (kp1, pub1) = derive_ed25519_from_master(&master, "tor/onion/v3").unwrap();
-        assert_eq!(hx(pub1.as_bytes()), "8031f51821da22e80497bc338ca38cb7ac2c6739b706dcff776d4e71a62e7124");
+        assert_eq!(
+            hx(pub1.as_bytes()),
+            "8031f51821da22e80497bc338ca38cb7ac2c6739b706dcff776d4e71a62e7124"
+        );
         assert_eq!(hx(kp1.to_bytes()), "d3ce31dc0f3a710b4a3d42259a7628a894c4b6c2bd3a0ed6e6bb0a8e003b23488031f51821da22e80497bc338ca38cb7ac2c6739b706dcff776d4e71a62e7124");
         let (kp2, pub2) = derive_ed25519_from_master(&master, "ed25519/generic").unwrap();
-        assert_eq!(hx(pub2.as_bytes()), "06ccbedc5b86851cd0ee8c648e4bfcc75347431a8c39d0dcb066a8497694d931");
+        assert_eq!(
+            hx(pub2.as_bytes()),
+            "06ccbedc5b86851cd0ee8c648e4bfcc75347431a8c39d0dcb066a8497694d931"
+        );
         assert_eq!(hx(kp2.to_bytes()), "f1b56590d316b35d65d1088325395f52359bf3f65c68c683e7d82b7eb8dcb52d06ccbedc5b86851cd0ee8c648e4bfcc75347431a8c39d0dcb066a8497694d931");
     }
 }

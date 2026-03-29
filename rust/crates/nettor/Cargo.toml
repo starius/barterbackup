@@ -11,13 +11,18 @@ path = "src/lib.rs"
 anyhow = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 tracing = "0.1"
-arti-client = { version = "0.22", default-features = false, features = ["tokio"] }
-tor-hsservice = "0.22"
-tor-hscrypto = "0.22"
-tor-llcrypto = "0.22"
-tor-keymgr = "0.22"
-tor-config = "0.22"
+arti-client = { version = "0.34", default-features = false, features = [
+    "tokio",
+    "onion-service-client",
+    "onion-service-service",
+    "keymgr",
+    "experimental-api",
+    "rustls",
+    "static-sqlite",
+    "ephemeral-keystore",
+] }
+tor-hsservice = "0.34"
+tor-keymgr = "0.34"
+tor-config = "0.34"
 futures = "0.3"
-tokio-stream = "0.1"
-rustls = "0.23"
-
+safelog = "0.5"

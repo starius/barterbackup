@@ -6,15 +6,14 @@
 use anyhow::Result;
 use futures::{stream, Stream};
 use protos::{bbrpc, clirpc};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use std::pin::Pin;
-use tonic::{Request, Response, Status};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use tonic::{Response, Status};
 
 /// Node represents a single BarterBackup instance.
 /// It implements both the peer-to-peer and local CLI services.
 pub struct Node {
-    master_priv: Vec<u8>,
     // Ed25519 private key in ed25519-dalek format.
     ed_kp: ed25519_dalek::Keypair,
     onion_addr: String,
@@ -31,7 +30,6 @@ impl Node {
         // For the prototype we use a stable placeholder derived from the pubkey bytes.
         let onion = hex::encode(pubk.as_bytes());
         Ok(Self {
-            master_priv: master,
             ed_kp: kp,
             onion_addr: format!("{}.onion", onion),
             started_at: Arc::new(Mutex::new(None)),
@@ -39,10 +37,14 @@ impl Node {
     }
 
     /// Returns the onion address of the node.
-    pub fn address(&self) -> &str { &self.onion_addr }
+    pub fn address(&self) -> &str {
+        &self.onion_addr
+    }
 
     /// Marks the node as started (used for uptime calculation).
-    pub fn mark_started(&self) { *self.started_at.lock().unwrap() = Some(Instant::now()); }
+    pub fn mark_started(&self) {
+        *self.started_at.lock().unwrap() = Some(Instant::now());
+    }
 
     /// Return uptime in seconds since `mark_started`, or 0 if not started.
     fn uptime_seconds(&self) -> i64 {
@@ -54,7 +56,9 @@ impl Node {
     }
 
     /// Returns a reference to the Ed25519 keypair.
-    pub fn ed25519_keypair(&self) -> &ed25519_dalek::Keypair { &self.ed_kp }
+    pub fn ed25519_keypair(&self) -> &ed25519_dalek::Keypair {
+        &self.ed_kp
+    }
 }
 
 // -------------------- clirpc --------------------
@@ -64,14 +68,28 @@ pub struct CliService {
 }
 
 impl CliService {
-    pub fn new(node: Arc<Node>) -> Self { Self { node } }
+    pub fn new(node: Arc<Node>) -> Self {
+        Self { node }
+    }
 }
 
 #[tonic::async_trait]
 impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
-    type ProposeContractStream = Pin<Box<dyn Stream<Item = Result<clirpc::ProposeContractUpdate, tonic::Status>> + Send + 'static>>;
-    type CheckContractStream = Pin<Box<dyn Stream<Item = Result<clirpc::CheckContractUpdate, tonic::Status>> + Send + 'static>>;
-    type RecoverContentStream = Pin<Box<dyn Stream<Item = Result<clirpc::RecoverContentUpdate, tonic::Status>> + Send + 'static>>;
+    type ProposeContractStream = Pin<
+        Box<
+            dyn Stream<Item = Result<clirpc::ProposeContractUpdate, tonic::Status>>
+                + Send
+                + 'static,
+        >,
+    >;
+    type CheckContractStream = Pin<
+        Box<dyn Stream<Item = Result<clirpc::CheckContractUpdate, tonic::Status>> + Send + 'static>,
+    >;
+    type RecoverContentStream = Pin<
+        Box<
+            dyn Stream<Item = Result<clirpc::RecoverContentUpdate, tonic::Status>> + Send + 'static,
+        >,
+    >;
 
     async fn local_health_check(
         &self,
@@ -95,56 +113,81 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         &self,
         _request: tonic::Request<clirpc::ConnectPeerRequest>,
     ) -> Result<tonic::Response<clirpc::ConnectPeerResponse>, tonic::Status> {
-        Err(Status::unimplemented("ConnectPeer not implemented in prototype"))
+        Err(Status::unimplemented(
+            "ConnectPeer not implemented in prototype",
+        ))
     }
 
     async fn connected_peers(
         &self,
         _request: tonic::Request<clirpc::ConnectedPeersRequest>,
     ) -> Result<tonic::Response<clirpc::ConnectedPeersResponse>, tonic::Status> {
-        Err(Status::unimplemented("ConnectedPeers not implemented in prototype"))
+        Err(Status::unimplemented(
+            "ConnectedPeers not implemented in prototype",
+        ))
     }
 
     async fn set_file(
         &self,
         _request: tonic::Request<clirpc::SetFileRequest>,
     ) -> Result<tonic::Response<clirpc::SetFileResponse>, tonic::Status> {
-        Err(Status::unimplemented("SetFile not implemented in prototype"))
+        Err(Status::unimplemented(
+            "SetFile not implemented in prototype",
+        ))
+    }
+
+    async fn delete_file(
+        &self,
+        _request: tonic::Request<clirpc::DeleteFileRequest>,
+    ) -> Result<tonic::Response<clirpc::DeleteFileResponse>, tonic::Status> {
+        Err(Status::unimplemented(
+            "DeleteFile not implemented in prototype",
+        ))
     }
 
     async fn get_file(
         &self,
         _request: tonic::Request<clirpc::GetFileRequest>,
     ) -> Result<tonic::Response<clirpc::GetFileResponse>, tonic::Status> {
-        Err(Status::unimplemented("GetFile not implemented in prototype"))
+        Err(Status::unimplemented(
+            "GetFile not implemented in prototype",
+        ))
     }
 
     async fn list_files(
         &self,
         _request: tonic::Request<clirpc::ListFilesRequest>,
     ) -> Result<tonic::Response<clirpc::ListFilesResponse>, tonic::Status> {
-        Err(Status::unimplemented("ListFiles not implemented in prototype"))
+        Err(Status::unimplemented(
+            "ListFiles not implemented in prototype",
+        ))
     }
 
     async fn set_storage_config(
         &self,
         _request: tonic::Request<clirpc::SetStorageConfigRequest>,
     ) -> Result<tonic::Response<clirpc::SetStorageConfigResponse>, tonic::Status> {
-        Err(Status::unimplemented("SetStorageConfig not implemented in prototype"))
+        Err(Status::unimplemented(
+            "SetStorageConfig not implemented in prototype",
+        ))
     }
 
     async fn get_storage_config(
         &self,
         _request: tonic::Request<clirpc::GetStorageConfigRequest>,
     ) -> Result<tonic::Response<clirpc::GetStorageConfigResponse>, tonic::Status> {
-        Err(Status::unimplemented("GetStorageConfig not implemented in prototype"))
+        Err(Status::unimplemented(
+            "GetStorageConfig not implemented in prototype",
+        ))
     }
 
     async fn get_contracts(
         &self,
         _request: tonic::Request<clirpc::GetContractsRequest>,
     ) -> Result<tonic::Response<clirpc::GetContractsResponse>, tonic::Status> {
-        Err(Status::unimplemented("GetContracts not implemented in prototype"))
+        Err(Status::unimplemented(
+            "GetContracts not implemented in prototype",
+        ))
     }
 
     async fn propose_contract(
@@ -179,7 +222,9 @@ pub struct P2pService {
 }
 
 impl P2pService {
-    pub fn new(node: Arc<Node>) -> Self { Self { node } }
+    pub fn new(node: Arc<Node>) -> Self {
+        Self { node }
+    }
 }
 
 #[tonic::async_trait]
@@ -202,35 +247,36 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         &self,
         _request: tonic::Request<bbrpc::PeerExchangeRequest>,
     ) -> Result<tonic::Response<bbrpc::PeerExchangeResponse>, tonic::Status> {
-        Err(Status::unimplemented("PeerExchange not implemented in prototype"))
+        Err(Status::unimplemented(
+            "PeerExchange not implemented in prototype",
+        ))
     }
 
     async fn get_content_revision(
         &self,
         _request: tonic::Request<bbrpc::GetContentRevisionRequest>,
     ) -> Result<tonic::Response<bbrpc::GetContentRevisionResponse>, tonic::Status> {
-        Err(Status::unimplemented("GetContentRevision not implemented in prototype"))
+        Err(Status::unimplemented(
+            "GetContentRevision not implemented in prototype",
+        ))
     }
 
     async fn set_content_revision(
         &self,
         _request: tonic::Request<bbrpc::SetContentRevisionRequest>,
     ) -> Result<tonic::Response<bbrpc::SetContentRevisionResponse>, tonic::Status> {
-        Err(Status::unimplemented("SetContentRevision not implemented in prototype"))
+        Err(Status::unimplemented(
+            "SetContentRevision not implemented in prototype",
+        ))
     }
 
     async fn download(
         &self,
         _request: tonic::Request<bbrpc::DownloadRequest>,
     ) -> Result<tonic::Response<bbrpc::DownloadResponse>, tonic::Status> {
-        Err(Status::unimplemented("Download not implemented in prototype"))
-    }
-
-    async fn encrypted_download(
-        &self,
-        _request: tonic::Request<bbrpc::EncryptedDownloadRequest>,
-    ) -> Result<tonic::Response<bbrpc::EncryptedDownloadResponse>, tonic::Status> {
-        Err(Status::unimplemented("EncryptedDownload not implemented in prototype"))
+        Err(Status::unimplemented(
+            "Download not implemented in prototype",
+        ))
     }
 }
 
@@ -241,25 +287,29 @@ mod tests {
     use super::*;
     use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
     use protos::clirpc::barter_backup_client_server::BarterBackupClientServer;
+    use std::time::Duration;
 
-    #[tokio::test(flavor = "multi_thread")] 
+    #[tokio::test(flavor = "multi_thread")]
     async fn local_healthcheck_reports_uptime_and_onion() -> anyhow::Result<()> {
         let node = Arc::new(Node::new("password")?);
         node.mark_started();
 
         // Serve clirpc over a local TCP listener (tonic h2c).
         let svc = CliService::new(node.clone());
-        let router = tonic::transport::Server::builder()
-            .add_service(BarterBackupClientServer::new(svc));
+        let router =
+            tonic::transport::Server::builder().add_service(BarterBackupClientServer::new(svc));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
-        let serve = router.serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
+        let serve =
+            router.serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
         let server = tokio::spawn(serve);
 
         // Client connects without TLS (local-only test using h2c).
         let endpoint = format!("http://{}", addr);
-        let channel = tonic::transport::Endpoint::from_shared(endpoint)?.connect().await?;
+        let channel = tonic::transport::Endpoint::from_shared(endpoint)?
+            .connect()
+            .await?;
         let mut client = BarterBackupClientClient::new(channel);
 
         let r1 = client
