@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Run a Rust command inside the remote Nix dev shell after syncing sources.
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+remote_host="${REMOTE_HOST:-barterbackup-dev}"
+remote_path="${REMOTE_PATH:-/root/barterbackup-rust2}"
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: scripts/remote-rust <command> [args...]" >&2
+  exit 1
+fi
+
+# Push the current local sources to the throwaway remote workspace first.
+"${repo_root}/scripts/remote-sync"
+
+# Quote the command once for the remote shell and once for bash -lc inside the
+# dev shell so arbitrary cargo arguments survive intact.
+printf -v command_string '%q ' "$@"
+printf -v remote_workdir '%q' "${remote_path}"
+printf -v remote_script '%q' "cd rust && ${command_string}"
+
+ssh "${remote_host}" \
+  "source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
+   cd ${remote_workdir} && \
+   nix \
+     --extra-experimental-features 'nix-command flakes' \
+     develop .#rust -c bash -c ${remote_script}"

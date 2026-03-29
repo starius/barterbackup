@@ -1,18 +1,38 @@
 {
   description = "BarterBackup development environment";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    rust-overlay.url = "github:oxalica/rust-overlay";
+  };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, rust-overlay }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system:
         let
-          pkgs = import nixpkgs { inherit system; };
+          overlays = [ (import rust-overlay) ];
+          pkgs = import nixpkgs {
+            inherit system overlays;
+          };
+          rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+            extensions = [
+              "cargo"
+              "clippy"
+              "rust-analyzer"
+              "rust-src"
+              "rustfmt"
+            ];
+            targets = [
+              "x86_64-unknown-linux-musl"
+            ];
+          };
         in
-        f pkgs);
+        f {
+          inherit pkgs rustToolchain;
+        });
     in {
-      devShells = forAllSystems (pkgs: {
+      devShells = forAllSystems ({ pkgs, rustToolchain }: {
         default =
           let
             goToolchain = if pkgs ? go_1_25 then pkgs.go_1_25 else pkgs.go;
@@ -29,6 +49,22 @@
               CGO_ENABLED = "0";
             };
           };
+        rust = pkgs.mkShell {
+          packages = [
+            rustToolchain
+            pkgs.cargo-nextest
+            pkgs.cargo-deny
+            pkgs.cargo-audit
+            pkgs.cargo-fuzz
+            pkgs.clang
+            pkgs.git
+            pkgs.openssl
+            pkgs.pkg-config
+            pkgs.protobuf
+            pkgs.rsync
+            pkgs.sqlite
+          ];
+        };
       });
     };
 }
