@@ -86,6 +86,7 @@ enum MaintenanceMode {
     /// Interval uses a real-time periodic timer.
     Interval,
     /// Manual waits for explicit test ticks while still honoring wakeups.
+    #[cfg(test)]
     Manual(Arc<Notify>),
 }
 
@@ -108,6 +109,7 @@ impl MaintenanceConfig {
     }
 
     /// Create a manual maintenance configuration for deterministic tests.
+    #[cfg(test)]
     fn manual(tick: Arc<Notify>) -> Self {
         Self {
             interval: Duration::from_secs(60),
@@ -127,6 +129,7 @@ enum MaintenanceSchedule {
     /// Interval waits on a real tokio timer.
     Interval(tokio::time::Interval),
     /// Manual waits on an explicit trigger notification.
+    #[cfg(test)]
     Manual(Arc<Notify>),
 }
 
@@ -139,6 +142,7 @@ impl MaintenanceSchedule {
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 Self::Interval(interval)
             }
+            #[cfg(test)]
             MaintenanceMode::Manual(tick) => Self::Manual(tick.clone()),
         }
     }
@@ -157,6 +161,7 @@ impl MaintenanceSchedule {
                     _ = maintenance_wakeup.notified() => true,
                 }
             }
+            #[cfg(test)]
             Self::Manual(tick) => {
                 tokio::select! {
                     _ = shutdown.cancelled() => false,
