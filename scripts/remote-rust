@@ -6,11 +6,22 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 remote_host="${REMOTE_HOST:-barterbackup-dev}"
 remote_path="${REMOTE_PATH:-/root/barterbackup-rust2}"
+min_free_kb=$((12 * 1024 * 1024))
 
 if [ "$#" -eq 0 ]; then
   echo "usage: scripts/remote-rust <command> [args...]" >&2
   exit 1
 fi
+
+# Keep the throwaway builder usable on small disks by dropping the remote Rust
+# target dir before sync whenever free space gets too low.
+printf -v remote_path_quoted '%q' "${remote_path}"
+ssh "${remote_host}" \
+  "mkdir -p ${remote_path_quoted} && \
+   free_kb=\$(df -Pk ${remote_path_quoted} | tail -n 1 | tr -s ' ' | cut -d' ' -f4) && \
+   if [ \"\${free_kb}\" -lt ${min_free_kb} ]; then \
+     rm -rf ${remote_path_quoted}/rust/target; \
+   fi"
 
 # Push the current local sources to the throwaway remote workspace first.
 "${repo_root}/scripts/remote-sync"
