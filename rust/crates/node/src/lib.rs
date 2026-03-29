@@ -145,6 +145,22 @@ impl Node {
         *self.peer_connector.lock().unwrap() = Some(peer_connector);
     }
 
+    /// Add a peer onion hostname to the configured peer set.
+    pub fn add_known_peer(&self, peer_onion: &str) -> Result<(), Status> {
+        keys::public_key_from_onion_hostname(peer_onion)
+            .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+        self.known_peers
+            .lock()
+            .unwrap()
+            .insert(peer_onion.to_string());
+        Ok(())
+    }
+
+    /// Return the configured peer onion hostnames in deterministic order.
+    pub fn known_peers(&self) -> Vec<String> {
+        self.known_peers.lock().unwrap().iter().cloned().collect()
+    }
+
     /// Extract the authenticated peer identity from the request TLS state.
     fn peer_identity_from_request<T>(
         &self,
@@ -423,6 +439,442 @@ impl Node {
     fn restore_current_blob(&self, blob: &[u8]) -> Result<(), Status> {
         self.with_store(|store| store.restore_current_content_blob(blob))
     }
+
+    /// Return the stored blob length for a peer's mirrored content, if any.
+    fn mirrored_peer_content_length(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+    ) -> Result<i64, Status> {
+        self.with_store(|store| {
+            let peer = store
+                .peers()
+                .into_iter()
+                .find(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes());
+            let Some(peer) = peer else {
+                return Ok(0);
+            };
+            if peer.content_id.is_empty() {
+                return Ok(0);
+            }
+
+            match store.read_blob_by_id(&peer.content_id) {
+                Ok(blob) => Ok(i64::try_from(blob.len()).unwrap_or(i64::MAX)),
+                Err(StorageError::FileNotFound) => Ok(0),
+                Err(error) => Err(error),
+            }
+        })
+    }
+
+    /// Report whether our current local content matches the peer's advertised
+    /// copy of our revision.
+    fn our_content_synced_with_peer(
+        &self,
+        peer_view_of_our_content: Option<&bbrpc::ContentInfo>,
+    ) -> Result<bool, Status> {
+        let our_content = self.responder_content()?;
+        Ok(match (our_content.as_ref(), peer_view_of_our_content) {
+            (None, None) => true,
+            (Some(our_content), Some(peer_content)) => our_content.content_id == peer_content.content_id,
+            _ => false,
+        })
+    }
+
+    /// Build the connected-peer response by probing each configured peer.
+    pub async fn connected_peers_response(&self) -> Result<clirpc::ConnectedPeersResponse, Status> {
+        let mut connected_peers = Vec::new();
+        let mut offline_peers = Vec::new();
+
+        for peer_onion in self.known_peers() {
+            let is_online = match self.connect_peer_client(&peer_onion).await {
+                Ok(mut client) => client.health_check(bbrpc::HealthCheckRequest {}).await.is_ok(),
+                Err(_) => false,
+            };
+            let peer = clirpc::Peer {
+                onion_service_id: peer_onion,
+            };
+            if is_online {
+                connected_peers.push(peer);
+            } else {
+                offline_peers.push(peer);
+            }
+        }
+
+        Ok(clirpc::ConnectedPeersResponse {
+            connected_peers,
+            online_not_connected_peers: Vec::new(),
+            offline_peers,
+        })
+    }
+
+    /// Build a live contract snapshot for the configured peers.
+    pub async fn get_contracts_response(&self) -> Result<clirpc::GetContractsResponse, Status> {
+        let mut contracts = Vec::new();
+
+        for peer_onion in self.known_peers() {
+            let peer_public_key = match keys::public_key_from_onion_hostname(&peer_onion) {
+                Ok(peer_public_key) => peer_public_key,
+                Err(_) => continue,
+            };
+            let mut online = false;
+            let mut our_content_synced = false;
+            let mut our_remaining_seconds = 0;
+
+            // Probe the peer live so the contract view reflects reachability
+            // and can opportunistically refresh mirrored peer blobs.
+            if let Ok(mut client) = self.connect_peer_client(&peer_onion).await {
+                if let Ok(revision) = client
+                    .get_content_revision(bbrpc::GetContentRevisionRequest {})
+                    .await
+                    .map(|response| response.into_inner())
+                {
+                    online = true;
+                    our_remaining_seconds = revision.requester_remaining_seconds;
+                    our_content_synced =
+                        self.our_content_synced_with_peer(revision.requester_content.as_ref())?;
+                    let _ = self
+                        .sync_peer_content_info(
+                            &peer_onion,
+                            &peer_public_key,
+                            revision.responder_content.as_ref(),
+                        )
+                        .await;
+                }
+            }
+
+            contracts.push(clirpc::ContractInfo {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: peer_onion,
+                }),
+                our_content_synced,
+                our_remaining_seconds,
+                their_remaining_seconds: self.peer_score_state(&peer_public_key)?.0,
+                their_content_length: self.mirrored_peer_content_length(&peer_public_key)?,
+                online,
+            });
+        }
+
+        Ok(clirpc::GetContractsResponse { contracts })
+    }
+
+    /// Propose or renew a contract with one peer and report the progress
+    /// updates that should be streamed to the caller.
+    pub async fn propose_contract_updates(
+        &self,
+        peer_onion: &str,
+    ) -> Result<Vec<clirpc::ProposeContractUpdate>, Status> {
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
+            .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+        let mut updates = vec![clirpc::ProposeContractUpdate {
+            state: clirpc::ContractState::ConnectingToPeer as i32,
+            success: false,
+            their_content_length: 0,
+            their_content_downloaded_bytes: 0,
+            our_content_length: 0,
+            our_content_uploaded_bytes: 0,
+        }];
+
+        // Query the peer's live contract state before deciding what needs to
+        // be synchronized in either direction.
+        let mut client = self.connect_peer_client(peer_onion).await?;
+        let revision = client
+            .get_content_revision(bbrpc::GetContentRevisionRequest {})
+            .await
+            .map_err(|error| Status::unavailable(format!("get content revision: {error}")))?
+            .into_inner();
+        let their_content_length = revision
+            .responder_content
+            .as_ref()
+            .map(|content_info| content_info.content_length)
+            .unwrap_or(0);
+        let downloaded_their_content = revision
+            .responder_content
+            .as_ref()
+            .filter(|content_info| {
+                self.has_content_blob(&content_info.content_id)
+                    .map(|present| !present)
+                    .unwrap_or(false)
+            })
+            .map(|content_info| content_info.content_length)
+            .unwrap_or(0);
+        self.sync_peer_content_info(
+            peer_onion,
+            &peer_public_key,
+            revision.responder_content.as_ref(),
+        )
+        .await?;
+
+        updates.push(clirpc::ProposeContractUpdate {
+            state: clirpc::ContractState::ProposingContract as i32,
+            success: false,
+            their_content_length,
+            their_content_downloaded_bytes: downloaded_their_content,
+            our_content_length: 0,
+            our_content_uploaded_bytes: 0,
+        });
+
+        // Upload our current revision only when the peer does not already hold
+        // the exact same content identifier.
+        let our_content = self.responder_content()?;
+        let our_content_length = our_content
+            .as_ref()
+            .map(|content_info| content_info.content_length)
+            .unwrap_or(0);
+        let mut uploaded_our_content = 0;
+        let peer_has_our_content = revision
+            .requester_content
+            .as_ref()
+            .map(|content_info| content_info.content_id.clone());
+        let desired_content_id = our_content
+            .as_ref()
+            .map(|content_info| content_info.content_id.clone());
+        if peer_has_our_content != desired_content_id {
+            client
+                .set_content_revision(bbrpc::SetContentRevisionRequest {
+                    requester_content: our_content.clone(),
+                })
+                .await
+                .map_err(|error| Status::unavailable(format!("set content revision: {error}")))?;
+            uploaded_our_content = our_content_length;
+        }
+
+        updates.push(clirpc::ProposeContractUpdate {
+            state: clirpc::ContractState::SyncingContents as i32,
+            success: false,
+            their_content_length,
+            their_content_downloaded_bytes: downloaded_their_content,
+            our_content_length,
+            our_content_uploaded_bytes: uploaded_our_content,
+        });
+        updates.push(clirpc::ProposeContractUpdate {
+            state: clirpc::ContractState::Completed as i32,
+            success: true,
+            their_content_length,
+            their_content_downloaded_bytes: downloaded_their_content,
+            our_content_length,
+            our_content_uploaded_bytes: uploaded_our_content,
+        });
+
+        Ok(updates)
+    }
+
+    /// Verify a peer contract, update the peer score, and return the streamed
+    /// progress updates that describe the check.
+    pub async fn check_contract_updates(
+        &self,
+        peer_onion: &str,
+    ) -> Result<Vec<clirpc::CheckContractUpdate>, Status> {
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
+            .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+        let mut updates = vec![clirpc::CheckContractUpdate {
+            state: clirpc::ContractState::ConnectingToPeer as i32,
+            success: false,
+            our_content_length: 0,
+            our_content_section_offset: 0,
+            our_content_section_length: 0,
+        }];
+
+        // Refresh the peer's advertised content before validating their copy of
+        // our own revision.
+        let mut client = self.connect_peer_client(peer_onion).await?;
+        let revision = client
+            .get_content_revision(bbrpc::GetContentRevisionRequest {})
+            .await
+            .map_err(|error| Status::unavailable(format!("get content revision: {error}")))?
+            .into_inner();
+        self.sync_peer_content_info(
+            peer_onion,
+            &peer_public_key,
+            revision.responder_content.as_ref(),
+        )
+        .await?;
+
+        updates.push(clirpc::CheckContractUpdate {
+            state: clirpc::ContractState::CheckingContents as i32,
+            success: false,
+            our_content_length: 0,
+            our_content_section_offset: 0,
+            our_content_section_length: 0,
+        });
+
+        let Some(our_content) = self.responder_content()? else {
+            self.update_peer_score(&peer_public_key, true)?;
+            updates.push(clirpc::CheckContractUpdate {
+                state: clirpc::ContractState::Completed as i32,
+                success: true,
+                our_content_length: 0,
+                our_content_section_offset: 0,
+                our_content_section_length: 0,
+            });
+            return Ok(updates);
+        };
+
+        if revision
+            .requester_content
+            .as_ref()
+            .map(|content_info| content_info.content_id.as_slice())
+            != Some(our_content.content_id.as_slice())
+        {
+            self.update_peer_score(&peer_public_key, false)?;
+            updates.push(clirpc::CheckContractUpdate {
+                state: clirpc::ContractState::OurContentRevisionMissing as i32,
+                success: false,
+                our_content_length: our_content.content_length,
+                our_content_section_offset: 0,
+                our_content_section_length: 0,
+            });
+            return Ok(updates);
+        }
+
+        // Sample a deterministic section of our current encrypted blob and
+        // verify the peer returns exactly the same bytes and whole-blob hash.
+        let local_blob = self.with_store(|store| store.current_blob())?;
+        let (section_offset, section_length) =
+            self.sample_section(&peer_public_key, &our_content.content_id, local_blob.len());
+        let download = client
+            .download(bbrpc::DownloadRequest {
+                content_id: our_content.content_id.clone(),
+                offset: i64::try_from(section_offset).unwrap_or(i64::MAX),
+                reference_content_id: Vec::new(),
+            })
+            .await
+            .map_err(|error| Status::unavailable(format!("download sampled section: {error}")))?
+            .into_inner();
+        let expected_hash = Sha256::digest(&local_blob);
+        let passed = download.sha256.as_slice() == expected_hash.as_slice()
+            && matches!(
+                download.section,
+                Some(bbrpc::download_response::Section::RawBytes(ref raw_bytes))
+                    if raw_bytes.value.len() >= section_length
+                        && raw_bytes.value[..section_length]
+                            == local_blob[section_offset..section_offset + section_length]
+            );
+        self.update_peer_score(&peer_public_key, passed)?;
+        updates.push(clirpc::CheckContractUpdate {
+            state: if passed {
+                clirpc::ContractState::Completed as i32
+            } else {
+                clirpc::ContractState::InvalidContentReturned as i32
+            },
+            success: passed,
+            our_content_length: our_content.content_length,
+            our_content_section_offset: i64::try_from(section_offset).unwrap_or(i64::MAX),
+            our_content_section_length: i64::try_from(section_length).unwrap_or(i64::MAX),
+        });
+
+        Ok(updates)
+    }
+
+    /// Discover the newest recoverable content revision across known peers and
+    /// return the recovery summary that should be streamed to the caller.
+    pub async fn recover_content_update(&self) -> Result<clirpc::RecoverContentUpdate, Status> {
+        #[derive(Clone)]
+        struct Candidate {
+            /// key orders content revisions without downloading full bodies.
+            key: (u64, u64, u32, u32),
+            /// content_id is the recoverable encrypted revision identifier.
+            content_id: Vec<u8>,
+            /// content_length is the encrypted blob length advertised by peers.
+            content_length: i64,
+            /// peers are the peers that reported the same candidate revision.
+            peers: Vec<String>,
+        }
+
+        let mut candidates = BTreeMap::<Vec<u8>, Candidate>::new();
+        let mut peers_with_any_versions = 0i64;
+
+        // Ask every known peer which version of our content it holds and keep
+        // only the metadata needed to pick the newest revision.
+        for peer_onion in self.known_peers() {
+            let mut client = match self.connect_peer_client(&peer_onion).await {
+                Ok(client) => client,
+                Err(_) => continue,
+            };
+            let revision = match client
+                .get_content_revision(bbrpc::GetContentRevisionRequest {})
+                .await
+            {
+                Ok(revision) => revision.into_inner(),
+                Err(_) => continue,
+            };
+            let Some(content_info) = revision.requester_content else {
+                continue;
+            };
+            let key = match self.revision_key(&content_info.content_id) {
+                Ok(key) => key,
+                Err(_) => continue,
+            };
+
+            peers_with_any_versions += 1;
+            candidates
+                .entry(content_info.content_id.clone())
+                .and_modify(|candidate| candidate.peers.push(peer_onion.clone()))
+                .or_insert(Candidate {
+                    key,
+                    content_id: content_info.content_id,
+                    content_length: content_info.content_length,
+                    peers: vec![peer_onion],
+                });
+        }
+
+        // Download the single newest candidate only when it is newer than our
+        // current local revision.
+        let most_recent = candidates
+            .values()
+            .max_by_key(|candidate| candidate.key)
+            .cloned();
+        let mut most_recent_downloaded_bytes = 0i64;
+        let mut most_recent_downloaded_files = 0i64;
+        let mut recovered_most_recent_version = false;
+
+        if let Some(candidate) = most_recent.as_ref() {
+            let current_content = self.responder_content()?;
+            let already_current = current_content
+                .as_ref()
+                .is_some_and(|content_info| content_info.content_id == candidate.content_id);
+            if already_current {
+                recovered_most_recent_version = true;
+            } else if let Some(source_peer) = candidate.peers.first() {
+                let blob = self
+                    .download_peer_blob(source_peer, &candidate.content_id)
+                    .await?;
+                self.restore_current_blob(&blob)?;
+                most_recent_downloaded_bytes = i64::try_from(blob.len()).unwrap_or(i64::MAX);
+                most_recent_downloaded_files = self.with_store(|store| {
+                    Ok(i64::try_from(store.list_files().len()).unwrap_or(i64::MAX))
+                })?;
+                recovered_most_recent_version = true;
+            }
+        }
+
+        Ok(clirpc::RecoverContentUpdate {
+            most_recent_content_id: most_recent
+                .as_ref()
+                .map(|candidate| candidate.content_id.clone())
+                .unwrap_or_default(),
+            most_recent_ts: most_recent
+                .as_ref()
+                .map(|candidate| i64::try_from(candidate.key.1).unwrap_or(i64::MAX))
+                .unwrap_or(0),
+            most_recent_ts_ns: most_recent
+                .as_ref()
+                .map(|candidate| i64::from(candidate.key.2))
+                .unwrap_or(0),
+            most_recent_length: most_recent
+                .as_ref()
+                .map(|candidate| candidate.content_length)
+                .unwrap_or(0),
+            num_peers_with_most_recent_version: most_recent
+                .as_ref()
+                .map(|candidate| i64::try_from(candidate.peers.len()).unwrap_or(i64::MAX))
+                .unwrap_or(0),
+            total_versions_found: i64::try_from(candidates.len()).unwrap_or(i64::MAX),
+            num_peers_with_any_versions: peers_with_any_versions,
+            most_recent_downloaded_bytes,
+            most_recent_downloaded_files,
+            total_downloaded_bytes: most_recent_downloaded_bytes,
+            recovered_most_recent_version,
+        })
+    }
 }
 
 /// CliService exposes the local daemon RPC surface.
@@ -494,11 +946,7 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
             return Err(Status::invalid_argument("peer onion is required"));
         }
 
-        self.node
-            .known_peers
-            .lock()
-            .unwrap()
-            .insert(peer.onion_service_id);
+        self.node.add_known_peer(&peer.onion_service_id)?;
         Ok(Response::new(clirpc::ConnectPeerResponse {}))
     }
 
@@ -506,21 +954,7 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         &self,
         _request: tonic::Request<clirpc::ConnectedPeersRequest>,
     ) -> Result<tonic::Response<clirpc::ConnectedPeersResponse>, tonic::Status> {
-        let connected_peers = self
-            .node
-            .known_peers
-            .lock()
-            .unwrap()
-            .iter()
-            .cloned()
-            .map(|onion_service_id| clirpc::Peer { onion_service_id })
-            .collect();
-
-        Ok(Response::new(clirpc::ConnectedPeersResponse {
-            connected_peers,
-            online_not_connected_peers: Vec::new(),
-            offline_peers: Vec::new(),
-        }))
+        Ok(Response::new(self.node.connected_peers_response().await?))
     }
 
     async fn set_file(
@@ -625,46 +1059,7 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         &self,
         _request: tonic::Request<clirpc::GetContractsRequest>,
     ) -> Result<tonic::Response<clirpc::GetContractsResponse>, tonic::Status> {
-        let known_peers = self.node.known_peers.lock().unwrap().clone();
-        let contracts = self.node.with_store(|store| {
-            let peers = store.peers();
-            let mut contracts = Vec::new();
-
-            for known_peer in &known_peers {
-                let peer_public_key = match keys::public_key_from_onion_hostname(known_peer) {
-                    Ok(peer_public_key) => peer_public_key,
-                    Err(_) => continue,
-                };
-                let peer = peers
-                    .iter()
-                    .find(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes());
-                let their_content_length = peer
-                    .and_then(|peer| {
-                        if peer.content_id.is_empty() {
-                            None
-                        } else {
-                            store.read_blob_by_id(&peer.content_id).ok()
-                        }
-                    })
-                    .map(|blob| i64::try_from(blob.len()).unwrap_or(i64::MAX))
-                    .unwrap_or(0);
-
-                contracts.push(clirpc::ContractInfo {
-                    peer: Some(clirpc::Peer {
-                        onion_service_id: known_peer.clone(),
-                    }),
-                    our_content_synced: false,
-                    our_remaining_seconds: 0,
-                    their_remaining_seconds: peer.map(|peer| peer.score_seconds).unwrap_or(0),
-                    their_content_length,
-                    online: false,
-                });
-            }
-
-            Ok(contracts)
-        })?;
-
-        Ok(Response::new(clirpc::GetContractsResponse { contracts }))
+        Ok(Response::new(self.node.get_contracts_response().await?))
     }
 
     async fn propose_contract(
@@ -678,99 +1073,13 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         if peer.onion_service_id.is_empty() {
             return Err(Status::invalid_argument("peer onion is required"));
         }
-        let peer_public_key = keys::public_key_from_onion_hostname(&peer.onion_service_id)
-            .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
-
-        let mut updates = vec![Ok(clirpc::ProposeContractUpdate {
-            state: clirpc::ContractState::ConnectingToPeer as i32,
-            success: false,
-            their_content_length: 0,
-            their_content_downloaded_bytes: 0,
-            our_content_length: 0,
-            our_content_uploaded_bytes: 0,
-        })];
-
-        let mut client = self
+        let updates = self
             .node
-            .connect_peer_client(&peer.onion_service_id)
-            .await?;
-        let revision = client
-            .get_content_revision(bbrpc::GetContentRevisionRequest {})
-            .await
-            .map_err(|error| Status::unavailable(format!("get content revision: {error}")))?
-            .into_inner();
-        let their_content_length = revision
-            .responder_content
-            .as_ref()
-            .map(|content_info| content_info.content_length)
-            .unwrap_or(0);
-        let downloaded_their_content = revision
-            .responder_content
-            .as_ref()
-            .filter(|content_info| {
-                self.node
-                    .has_content_blob(&content_info.content_id)
-                    .map(|present| !present)
-                    .unwrap_or(false)
-            })
-            .map(|content_info| content_info.content_length)
-            .unwrap_or(0);
-        self.node
-            .sync_peer_content_info(
-                &peer.onion_service_id,
-                &peer_public_key,
-                revision.responder_content.as_ref(),
-            )
-            .await?;
-
-        updates.push(Ok(clirpc::ProposeContractUpdate {
-            state: clirpc::ContractState::ProposingContract as i32,
-            success: false,
-            their_content_length,
-            their_content_downloaded_bytes: downloaded_their_content,
-            our_content_length: 0,
-            our_content_uploaded_bytes: 0,
-        }));
-
-        let our_content = self.node.responder_content()?;
-        let our_content_length = our_content
-            .as_ref()
-            .map(|content_info| content_info.content_length)
-            .unwrap_or(0);
-        let mut uploaded_our_content = 0;
-        let peer_has_our_content = revision
-            .requester_content
-            .as_ref()
-            .map(|content_info| content_info.content_id.clone());
-        let desired_content_id = our_content
-            .as_ref()
-            .map(|content_info| content_info.content_id.clone());
-        if peer_has_our_content != desired_content_id {
-            client
-                .set_content_revision(bbrpc::SetContentRevisionRequest {
-                    requester_content: our_content.clone(),
-                })
-                .await
-                .map_err(|error| Status::unavailable(format!("set content revision: {error}")))?;
-            uploaded_our_content = our_content_length;
-        }
-
-        updates.push(Ok(clirpc::ProposeContractUpdate {
-            state: clirpc::ContractState::SyncingContents as i32,
-            success: false,
-            their_content_length,
-            their_content_downloaded_bytes: downloaded_their_content,
-            our_content_length,
-            our_content_uploaded_bytes: uploaded_our_content,
-        }));
-        updates.push(Ok(clirpc::ProposeContractUpdate {
-            state: clirpc::ContractState::Completed as i32,
-            success: true,
-            their_content_length,
-            their_content_downloaded_bytes: downloaded_their_content,
-            our_content_length,
-            our_content_uploaded_bytes: uploaded_our_content,
-        }));
+            .propose_contract_updates(&peer.onion_service_id)
+            .await?
+            .into_iter()
+            .map(Ok)
+            .collect::<Vec<_>>();
 
         Ok(Response::new(Box::pin(stream::iter(updates))))
     }
@@ -786,105 +1095,13 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         if peer.onion_service_id.is_empty() {
             return Err(Status::invalid_argument("peer onion is required"));
         }
-        let peer_public_key = keys::public_key_from_onion_hostname(&peer.onion_service_id)
-            .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
-
-        let mut updates = vec![Ok(clirpc::CheckContractUpdate {
-            state: clirpc::ContractState::ConnectingToPeer as i32,
-            success: false,
-            our_content_length: 0,
-            our_content_section_offset: 0,
-            our_content_section_length: 0,
-        })];
-
-        let mut client = self
+        let updates = self
             .node
-            .connect_peer_client(&peer.onion_service_id)
-            .await?;
-        let revision = client
-            .get_content_revision(bbrpc::GetContentRevisionRequest {})
-            .await
-            .map_err(|error| Status::unavailable(format!("get content revision: {error}")))?
-            .into_inner();
-        self.node
-            .sync_peer_content_info(
-                &peer.onion_service_id,
-                &peer_public_key,
-                revision.responder_content.as_ref(),
-            )
-            .await?;
-
-        updates.push(Ok(clirpc::CheckContractUpdate {
-            state: clirpc::ContractState::CheckingContents as i32,
-            success: false,
-            our_content_length: 0,
-            our_content_section_offset: 0,
-            our_content_section_length: 0,
-        }));
-
-        let Some(our_content) = self.node.responder_content()? else {
-            self.node.update_peer_score(&peer_public_key, true)?;
-            updates.push(Ok(clirpc::CheckContractUpdate {
-                state: clirpc::ContractState::Completed as i32,
-                success: true,
-                our_content_length: 0,
-                our_content_section_offset: 0,
-                our_content_section_length: 0,
-            }));
-            return Ok(Response::new(Box::pin(stream::iter(updates))));
-        };
-
-        if revision
-            .requester_content
-            .as_ref()
-            .map(|content_info| content_info.content_id.as_slice())
-            != Some(our_content.content_id.as_slice())
-        {
-            self.node.update_peer_score(&peer_public_key, false)?;
-            updates.push(Ok(clirpc::CheckContractUpdate {
-                state: clirpc::ContractState::OurContentRevisionMissing as i32,
-                success: false,
-                our_content_length: our_content.content_length,
-                our_content_section_offset: 0,
-                our_content_section_length: 0,
-            }));
-            return Ok(Response::new(Box::pin(stream::iter(updates))));
-        }
-
-        let local_blob = self.node.with_store(|store| store.current_blob())?;
-        let (section_offset, section_length) =
-            self.node
-                .sample_section(&peer_public_key, &our_content.content_id, local_blob.len());
-        let download = client
-            .download(bbrpc::DownloadRequest {
-                content_id: our_content.content_id.clone(),
-                offset: i64::try_from(section_offset).unwrap_or(i64::MAX),
-                reference_content_id: Vec::new(),
-            })
-            .await
-            .map_err(|error| Status::unavailable(format!("download sampled section: {error}")))?
-            .into_inner();
-        let expected_hash = Sha256::digest(&local_blob);
-        let passed = download.sha256.as_slice() == expected_hash.as_slice()
-            && matches!(
-                download.section,
-                Some(bbrpc::download_response::Section::RawBytes(ref raw_bytes))
-                    if raw_bytes.value.len() >= section_length
-                        && raw_bytes.value[..section_length]
-                            == local_blob[section_offset..section_offset + section_length]
-            );
-        self.node.update_peer_score(&peer_public_key, passed)?;
-        updates.push(Ok(clirpc::CheckContractUpdate {
-            state: if passed {
-                clirpc::ContractState::Completed as i32
-            } else {
-                clirpc::ContractState::InvalidContentReturned as i32
-            },
-            success: passed,
-            our_content_length: our_content.content_length,
-            our_content_section_offset: i64::try_from(section_offset).unwrap_or(i64::MAX),
-            our_content_section_length: i64::try_from(section_length).unwrap_or(i64::MAX),
-        }));
+            .check_contract_updates(&peer.onion_service_id)
+            .await?
+            .into_iter()
+            .map(Ok)
+            .collect::<Vec<_>>();
 
         Ok(Response::new(Box::pin(stream::iter(updates))))
     }
@@ -893,108 +1110,7 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         &self,
         _request: tonic::Request<clirpc::RecoverContentRequest>,
     ) -> Result<tonic::Response<Self::RecoverContentStream>, tonic::Status> {
-        #[derive(Clone)]
-        struct Candidate {
-            key: (u64, u64, u32, u32),
-            content_id: Vec<u8>,
-            content_length: i64,
-            peers: Vec<String>,
-        }
-
-        let known_peers = self.node.known_peers.lock().unwrap().clone();
-        let mut candidates = BTreeMap::<Vec<u8>, Candidate>::new();
-        let mut peers_with_any_versions = 0i64;
-
-        for peer_onion in &known_peers {
-            let mut client = match self.node.connect_peer_client(peer_onion).await {
-                Ok(client) => client,
-                Err(_) => continue,
-            };
-            let revision = match client
-                .get_content_revision(bbrpc::GetContentRevisionRequest {})
-                .await
-            {
-                Ok(revision) => revision.into_inner(),
-                Err(_) => continue,
-            };
-            let Some(content_info) = revision.requester_content else {
-                continue;
-            };
-            let key = match self.node.revision_key(&content_info.content_id) {
-                Ok(key) => key,
-                Err(_) => continue,
-            };
-
-            peers_with_any_versions += 1;
-            candidates
-                .entry(content_info.content_id.clone())
-                .and_modify(|candidate| candidate.peers.push(peer_onion.clone()))
-                .or_insert(Candidate {
-                    key,
-                    content_id: content_info.content_id,
-                    content_length: content_info.content_length,
-                    peers: vec![peer_onion.clone()],
-                });
-        }
-
-        let most_recent = candidates
-            .values()
-            .max_by_key(|candidate| candidate.key)
-            .cloned();
-        let mut most_recent_downloaded_bytes = 0i64;
-        let mut most_recent_downloaded_files = 0i64;
-        let mut recovered_most_recent_version = false;
-
-        if let Some(candidate) = most_recent.as_ref() {
-            let current_content = self.node.responder_content()?;
-            let already_current = current_content
-                .as_ref()
-                .is_some_and(|content_info| content_info.content_id == candidate.content_id);
-            if already_current {
-                recovered_most_recent_version = true;
-            } else if let Some(source_peer) = candidate.peers.first() {
-                let blob = self
-                    .node
-                    .download_peer_blob(source_peer, &candidate.content_id)
-                    .await?;
-                self.node.restore_current_blob(&blob)?;
-                most_recent_downloaded_bytes = i64::try_from(blob.len()).unwrap_or(i64::MAX);
-                most_recent_downloaded_files = self.node.with_store(|store| {
-                    Ok(i64::try_from(store.list_files().len()).unwrap_or(i64::MAX))
-                })?;
-                recovered_most_recent_version = true;
-            }
-        }
-
-        let update = clirpc::RecoverContentUpdate {
-            most_recent_content_id: most_recent
-                .as_ref()
-                .map(|candidate| candidate.content_id.clone())
-                .unwrap_or_default(),
-            most_recent_ts: most_recent
-                .as_ref()
-                .map(|candidate| i64::try_from(candidate.key.1).unwrap_or(i64::MAX))
-                .unwrap_or(0),
-            most_recent_ts_ns: most_recent
-                .as_ref()
-                .map(|candidate| i64::from(candidate.key.2))
-                .unwrap_or(0),
-            most_recent_length: most_recent
-                .as_ref()
-                .map(|candidate| candidate.content_length)
-                .unwrap_or(0),
-            num_peers_with_most_recent_version: most_recent
-                .as_ref()
-                .map(|candidate| i64::try_from(candidate.peers.len()).unwrap_or(i64::MAX))
-                .unwrap_or(0),
-            total_versions_found: i64::try_from(candidates.len()).unwrap_or(i64::MAX),
-            num_peers_with_any_versions: peers_with_any_versions,
-            most_recent_downloaded_bytes,
-            most_recent_downloaded_files,
-            total_downloaded_bytes: most_recent_downloaded_bytes,
-            recovered_most_recent_version,
-        };
-
+        let update = self.node.recover_content_update().await?;
         Ok(Response::new(Box::pin(stream::iter(vec![Ok(update)]))))
     }
 }
@@ -1030,16 +1146,26 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         request: tonic::Request<bbrpc::PeerExchangeRequest>,
     ) -> Result<tonic::Response<bbrpc::PeerExchangeResponse>, tonic::Status> {
         let request = request.into_inner();
-        let mut known_peers = self.node.known_peers.lock().unwrap();
         for peer in request.peers {
-            known_peers.insert(hex::encode(peer.onion_pubkey));
+            let public_key = match ed25519_dalek::PublicKey::from_bytes(&peer.onion_pubkey) {
+                Ok(public_key) => public_key,
+                Err(_) => continue,
+            };
+            self.node
+                .add_known_peer(&keys::onion_hostname_from_public_key(&public_key))?;
         }
 
-        let peers = known_peers
+        let peers = self
+            .node
+            .known_peers()
             .iter()
             .cloned()
-            .map(|hex_pubkey| bbrpc::Peer {
-                onion_pubkey: hex::decode(hex_pubkey).unwrap_or_default(),
+            .filter_map(|peer_onion| {
+                keys::public_key_from_onion_hostname(&peer_onion)
+                    .ok()
+                    .map(|public_key| bbrpc::Peer {
+                        onion_pubkey: public_key.to_bytes().to_vec(),
+                    })
             })
             .collect();
         Ok(Response::new(bbrpc::PeerExchangeResponse { peers }))
@@ -1417,6 +1543,46 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn connected_peers_classifies_online_and_offline_nodes() -> anyhow::Result<()> {
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage("requester", requester_filesystem)?);
+        let online_node = Arc::new(Node::new("online-peer")?);
+        let offline_node = Arc::new(Node::new("offline-peer")?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        requester_node.add_known_peer(online_node.address())?;
+        requester_node.add_known_peer(offline_node.address())?;
+
+        let online_server =
+            spawn_registered_p2p_server(online_node.clone(), connector.as_ref()).await?;
+        let cli = CliService::new(requester_node.clone());
+
+        let response = cli
+            .connected_peers(tonic::Request::new(clirpc::ConnectedPeersRequest {}))
+            .await?
+            .into_inner();
+        assert_eq!(
+            response
+                .connected_peers
+                .into_iter()
+                .map(|peer| peer.onion_service_id)
+                .collect::<Vec<_>>(),
+            vec![online_node.address().to_string()]
+        );
+        assert_eq!(
+            response
+                .offline_peers
+                .into_iter()
+                .map(|peer| peer.onion_service_id)
+                .collect::<Vec<_>>(),
+            vec![offline_node.address().to_string()]
+        );
+
+        online_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn set_content_revision_downloads_and_tracks_peer_blob() -> anyhow::Result<()> {
         let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let requester_node = Arc::new(Node::with_local_storage("requester", requester_filesystem)?);
@@ -1525,6 +1691,56 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::NotFound);
+
+        requester_server.abort();
+        responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_contracts_reports_live_sync_state() -> anyhow::Result<()> {
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage("requester", requester_filesystem)?);
+        let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let responder_node = Arc::new(Node::with_local_storage("responder", responder_filesystem)?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        responder_node.set_peer_connector(connector.clone());
+        requester_node.add_known_peer(responder_node.address())?;
+
+        let requester_cli = CliService::new(requester_node.clone());
+        requester_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let requester_server =
+            spawn_registered_p2p_server(requester_node.clone(), connector.as_ref()).await?;
+        let responder_server =
+            spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
+        requester_cli
+            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: responder_node.address().to_string(),
+                }),
+            }))
+            .await?
+            .into_inner()
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        let contracts = requester_cli
+            .get_contracts(tonic::Request::new(clirpc::GetContractsRequest {}))
+            .await?
+            .into_inner()
+            .contracts;
+        assert_eq!(contracts.len(), 1);
+        assert!(contracts[0].online);
+        assert!(contracts[0].our_content_synced);
 
         requester_server.abort();
         responder_server.abort();

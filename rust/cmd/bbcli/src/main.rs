@@ -562,14 +562,24 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn peer_and_storage_helpers_round_trip() -> anyhow::Result<()> {
-        let mut client = spawn_cli_server().await?;
+        let local_filesystem: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let local_node = Arc::new(Node::with_local_storage("local", local_filesystem)?);
+        let peer_a = Arc::new(Node::new("peer-a")?);
+        let peer_b = Arc::new(Node::new("peer-b")?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        local_node.set_peer_connector(connector.clone());
+        let mut client = spawn_cli_server_for_node(local_node.clone()).await?;
+        let peer_a_server =
+            spawn_registered_p2p_server(peer_a.clone(), connector.as_ref()).await?;
+        let peer_b_server =
+            spawn_registered_p2p_server(peer_b.clone(), connector.as_ref()).await?;
 
-        connect_peer_with_client(&mut client, "peer-a.onion").await?;
-        connect_peer_with_client(&mut client, "peer-b.onion").await?;
+        connect_peer_with_client(&mut client, peer_a.address()).await?;
+        connect_peer_with_client(&mut client, peer_b.address()).await?;
         let peers = connected_peers_with_client(&mut client).await?;
         assert_eq!(
             peers,
-            vec!["peer-a.onion".to_string(), "peer-b.onion".to_string()]
+            vec![peer_a.address().to_string(), peer_b.address().to_string()]
         );
 
         set_storage_config_with_client(&mut client, 1024, 3).await?;
@@ -583,6 +593,9 @@ mod tests {
             1024
         );
         assert_eq!(config.info.unwrap().our_content_bytes, 0);
+
+        peer_a_server.abort();
+        peer_b_server.abort();
         Ok(())
     }
 
