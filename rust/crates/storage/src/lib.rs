@@ -425,6 +425,11 @@ impl Store {
         self.fs.read(&content_file_name(content_id))
     }
 
+    /// Parse and authenticate a content id for this store.
+    pub fn parse_content_id(&self, content_id: &[u8]) -> Result<RevisionDescriptor, StorageError> {
+        self.codec.parse_content_id(content_id).map_err(Into::into)
+    }
+
     /// Report whether a content blob exists for the supplied content id.
     pub fn has_content_blob(&self, content_id: &[u8]) -> bool {
         self.read_blob_by_id(content_id).is_ok()
@@ -438,6 +443,33 @@ impl Store {
     /// Remove a stored content blob if it exists.
     pub fn remove_content_blob(&self, content_id: &[u8]) -> Result<(), StorageError> {
         self.fs.remove(&content_file_name(content_id))
+    }
+
+    /// Restore an encrypted blob as the active local content revision.
+    pub fn restore_current_content_blob(&mut self, blob: &[u8]) -> Result<(), StorageError> {
+        let decoded = self.codec.decode(blob)?;
+        let file_name = content_file_name(&decoded.content_id);
+        self.fs.write_atomic(&file_name, blob)?;
+
+        let previous_name = self
+            .current
+            .as_ref()
+            .map(|current| current.file_name.clone());
+        self.files = decoded.files.clone();
+        self.current = Some(CurrentContent {
+            revision: decoded.revision,
+            content_id: decoded.content_id,
+            blob_len: blob.len(),
+            file_name: file_name.clone(),
+        });
+
+        if let Some(previous_name) = previous_name {
+            if previous_name != file_name {
+                let _ = self.fs.remove(&previous_name);
+            }
+        }
+
+        Ok(())
     }
 
     /// Remove non-local blobs that are not in the supplied valid set.

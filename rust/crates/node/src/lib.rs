@@ -9,7 +9,7 @@ use clock::{Clock, SystemClock, Timestamp};
 use futures::{stream, Stream};
 use protos::{bbrpc, clirpc};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use storage::{Filesystem, StorageError, Store};
@@ -401,6 +401,24 @@ impl Node {
 
         (offset, section_len)
     }
+
+    /// Parse a content id into the ordering tuple used for recovery.
+    fn revision_key(&self, content_id: &[u8]) -> Result<(u64, u64, u32, u32), Status> {
+        self.with_store(|store| {
+            let revision = store.parse_content_id(content_id)?;
+            Ok((
+                revision.sequence,
+                revision.created_at_secs,
+                revision.created_at_nanos,
+                revision.metadata_ciphertext_len,
+            ))
+        })
+    }
+
+    /// Restore an encrypted blob as our current local content.
+    fn restore_current_blob(&self, blob: &[u8]) -> Result<(), Status> {
+        self.with_store(|store| store.restore_current_content_blob(blob))
+    }
 }
 
 /// CliService exposes the local daemon RPC surface.
@@ -647,9 +665,110 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
 
     async fn propose_contract(
         &self,
-        _request: tonic::Request<clirpc::ProposeContractRequest>,
+        request: tonic::Request<clirpc::ProposeContractRequest>,
     ) -> Result<tonic::Response<Self::ProposeContractStream>, tonic::Status> {
-        Ok(Response::new(Box::pin(stream::empty())))
+        let peer = request
+            .into_inner()
+            .peer
+            .ok_or_else(|| Status::invalid_argument("peer is required"))?;
+        if peer.onion_service_id.is_empty() {
+            return Err(Status::invalid_argument("peer onion is required"));
+        }
+        let peer_public_key = keys::public_key_from_onion_hostname(&peer.onion_service_id)
+            .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+
+        let mut updates = vec![Ok(clirpc::ProposeContractUpdate {
+            state: clirpc::ContractState::ConnectingToPeer as i32,
+            success: false,
+            their_content_length: 0,
+            their_content_downloaded_bytes: 0,
+            our_content_length: 0,
+            our_content_uploaded_bytes: 0,
+        })];
+
+        let mut client = self
+            .node
+            .connect_peer_client(&peer.onion_service_id)
+            .await?;
+        let revision = client
+            .get_content_revision(bbrpc::GetContentRevisionRequest {})
+            .await
+            .map_err(|error| Status::unavailable(format!("get content revision: {error}")))?
+            .into_inner();
+        let their_content_length = revision
+            .responder_content
+            .as_ref()
+            .map(|content_info| content_info.content_length)
+            .unwrap_or(0);
+        let downloaded_their_content = revision
+            .responder_content
+            .as_ref()
+            .filter(|content_info| {
+                self.node
+                    .has_content_blob(&content_info.content_id)
+                    .map(|present| !present)
+                    .unwrap_or(false)
+            })
+            .map(|content_info| content_info.content_length)
+            .unwrap_or(0);
+        self.node
+            .sync_peer_content_info(
+                &peer.onion_service_id,
+                &peer_public_key,
+                revision.responder_content.as_ref(),
+            )
+            .await?;
+
+        updates.push(Ok(clirpc::ProposeContractUpdate {
+            state: clirpc::ContractState::ProposingContract as i32,
+            success: false,
+            their_content_length,
+            their_content_downloaded_bytes: downloaded_their_content,
+            our_content_length: 0,
+            our_content_uploaded_bytes: 0,
+        }));
+
+        let our_content = self.node.responder_content()?;
+        let our_content_length = our_content
+            .as_ref()
+            .map(|content_info| content_info.content_length)
+            .unwrap_or(0);
+        let mut uploaded_our_content = 0;
+        let peer_has_our_content = revision
+            .requester_content
+            .as_ref()
+            .map(|content_info| content_info.content_id.clone());
+        let desired_content_id = our_content
+            .as_ref()
+            .map(|content_info| content_info.content_id.clone());
+        if peer_has_our_content != desired_content_id {
+            client
+                .set_content_revision(bbrpc::SetContentRevisionRequest {
+                    requester_content: our_content.clone(),
+                })
+                .await
+                .map_err(|error| Status::unavailable(format!("set content revision: {error}")))?;
+            uploaded_our_content = our_content_length;
+        }
+
+        updates.push(Ok(clirpc::ProposeContractUpdate {
+            state: clirpc::ContractState::SyncingContents as i32,
+            success: false,
+            their_content_length,
+            their_content_downloaded_bytes: downloaded_their_content,
+            our_content_length,
+            our_content_uploaded_bytes: uploaded_our_content,
+        }));
+        updates.push(Ok(clirpc::ProposeContractUpdate {
+            state: clirpc::ContractState::Completed as i32,
+            success: true,
+            their_content_length,
+            their_content_downloaded_bytes: downloaded_their_content,
+            our_content_length,
+            our_content_uploaded_bytes: uploaded_our_content,
+        }));
+
+        Ok(Response::new(Box::pin(stream::iter(updates))))
     }
 
     async fn check_contract(
@@ -770,7 +889,109 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         &self,
         _request: tonic::Request<clirpc::RecoverContentRequest>,
     ) -> Result<tonic::Response<Self::RecoverContentStream>, tonic::Status> {
-        Ok(Response::new(Box::pin(stream::empty())))
+        #[derive(Clone)]
+        struct Candidate {
+            key: (u64, u64, u32, u32),
+            content_id: Vec<u8>,
+            content_length: i64,
+            peers: Vec<String>,
+        }
+
+        let known_peers = self.node.known_peers.lock().unwrap().clone();
+        let mut candidates = BTreeMap::<Vec<u8>, Candidate>::new();
+        let mut peers_with_any_versions = 0i64;
+
+        for peer_onion in &known_peers {
+            let mut client = match self.node.connect_peer_client(peer_onion).await {
+                Ok(client) => client,
+                Err(_) => continue,
+            };
+            let revision = match client
+                .get_content_revision(bbrpc::GetContentRevisionRequest {})
+                .await
+            {
+                Ok(revision) => revision.into_inner(),
+                Err(_) => continue,
+            };
+            let Some(content_info) = revision.requester_content else {
+                continue;
+            };
+            let key = match self.node.revision_key(&content_info.content_id) {
+                Ok(key) => key,
+                Err(_) => continue,
+            };
+
+            peers_with_any_versions += 1;
+            candidates
+                .entry(content_info.content_id.clone())
+                .and_modify(|candidate| candidate.peers.push(peer_onion.clone()))
+                .or_insert(Candidate {
+                    key,
+                    content_id: content_info.content_id,
+                    content_length: content_info.content_length,
+                    peers: vec![peer_onion.clone()],
+                });
+        }
+
+        let most_recent = candidates
+            .values()
+            .max_by_key(|candidate| candidate.key)
+            .cloned();
+        let mut most_recent_downloaded_bytes = 0i64;
+        let mut most_recent_downloaded_files = 0i64;
+        let mut recovered_most_recent_version = false;
+
+        if let Some(candidate) = most_recent.as_ref() {
+            let current_content = self.node.responder_content()?;
+            let already_current = current_content
+                .as_ref()
+                .is_some_and(|content_info| content_info.content_id == candidate.content_id);
+            if already_current {
+                recovered_most_recent_version = true;
+            } else if let Some(source_peer) = candidate.peers.first() {
+                let blob = self
+                    .node
+                    .download_peer_blob(source_peer, &candidate.content_id)
+                    .await?;
+                self.node.restore_current_blob(&blob)?;
+                most_recent_downloaded_bytes = i64::try_from(blob.len()).unwrap_or(i64::MAX);
+                most_recent_downloaded_files = self.node.with_store(|store| {
+                    Ok(i64::try_from(store.list_files().len()).unwrap_or(i64::MAX))
+                })?;
+                recovered_most_recent_version = true;
+            }
+        }
+
+        let update = clirpc::RecoverContentUpdate {
+            most_recent_content_id: most_recent
+                .as_ref()
+                .map(|candidate| candidate.content_id.clone())
+                .unwrap_or_default(),
+            most_recent_ts: most_recent
+                .as_ref()
+                .map(|candidate| i64::try_from(candidate.key.1).unwrap_or(i64::MAX))
+                .unwrap_or(0),
+            most_recent_ts_ns: most_recent
+                .as_ref()
+                .map(|candidate| i64::from(candidate.key.2))
+                .unwrap_or(0),
+            most_recent_length: most_recent
+                .as_ref()
+                .map(|candidate| candidate.content_length)
+                .unwrap_or(0),
+            num_peers_with_most_recent_version: most_recent
+                .as_ref()
+                .map(|candidate| i64::try_from(candidate.peers.len()).unwrap_or(i64::MAX))
+                .unwrap_or(0),
+            total_versions_found: i64::try_from(candidates.len()).unwrap_or(i64::MAX),
+            num_peers_with_any_versions: peers_with_any_versions,
+            most_recent_downloaded_bytes,
+            most_recent_downloaded_files,
+            total_downloaded_bytes: most_recent_downloaded_bytes,
+            recovered_most_recent_version,
+        };
+
+        Ok(Response::new(Box::pin(stream::iter(vec![Ok(update)]))))
     }
 }
 
@@ -1493,6 +1714,176 @@ mod tests {
 
         requester_server.abort();
         responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn propose_contract_syncs_both_sides() -> anyhow::Result<()> {
+        let left_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let left_node = Arc::new(Node::with_local_storage("left", left_filesystem)?);
+        let right_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let right_node = Arc::new(Node::with_local_storage("right", right_filesystem)?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        left_node.set_peer_connector(connector.clone());
+        right_node.set_peer_connector(connector.clone());
+        left_node
+            .known_peers
+            .lock()
+            .unwrap()
+            .insert(right_node.address().to_string());
+
+        let left_cli = CliService::new(left_node.clone());
+        let right_cli = CliService::new(right_node.clone());
+        left_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "left.txt".to_string(),
+                    data: b"left-body".to_vec(),
+                }),
+            }))
+            .await?;
+        right_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "right.txt".to_string(),
+                    data: b"right-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let left_server =
+            spawn_registered_p2p_server(left_node.clone(), connector.as_ref()).await?;
+        let right_server =
+            spawn_registered_p2p_server(right_node.clone(), connector.as_ref()).await?;
+        let updates = left_cli
+            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: right_node.address().to_string(),
+                }),
+            }))
+            .await?
+            .into_inner()
+            .try_collect::<Vec<_>>()
+            .await?;
+        assert_eq!(updates.last().map(|update| update.success), Some(true));
+
+        let right_content = right_node.responder_content()?.unwrap();
+        let mirrored_right_blob =
+            left_node.with_store(|store| store.read_blob_by_id(&right_content.content_id))?;
+        assert_eq!(
+            mirrored_right_blob,
+            right_node.with_store(|store| store.current_blob())?
+        );
+
+        let left_content = left_node.responder_content()?.unwrap();
+        let left_public_key = keys::public_key_from_onion_hostname(left_node.address())?;
+        let right_peer_entry = right_node.with_store(|store| {
+            Ok(store
+                .peers()
+                .into_iter()
+                .find(|peer| peer.onion_pubkey.as_slice() == left_public_key.as_bytes()))
+        })?;
+        assert_eq!(
+            right_peer_entry.map(|peer| peer.content_id),
+            Some(left_content.content_id)
+        );
+
+        left_server.abort();
+        right_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recover_content_selects_latest_peer_version() -> anyhow::Result<()> {
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner_node = Arc::new(Node::with_local_storage("owner", owner_filesystem)?);
+        let peer_a_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer_a = Arc::new(Node::with_local_storage("peer-a", peer_a_filesystem)?);
+        let peer_b_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer_b = Arc::new(Node::with_local_storage("peer-b", peer_b_filesystem)?);
+        let recovered_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let recovered_node = Arc::new(Node::with_local_storage("owner", recovered_filesystem)?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        owner_node.set_peer_connector(connector.clone());
+        peer_a.set_peer_connector(connector.clone());
+        peer_b.set_peer_connector(connector.clone());
+        recovered_node.set_peer_connector(connector.clone());
+        recovered_node
+            .known_peers
+            .lock()
+            .unwrap()
+            .insert(peer_a.address().to_string());
+        recovered_node
+            .known_peers
+            .lock()
+            .unwrap()
+            .insert(peer_b.address().to_string());
+
+        let owner_cli = CliService::new(owner_node.clone());
+        owner_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"version-1".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let owner_server =
+            spawn_registered_p2p_server(owner_node.clone(), connector.as_ref()).await?;
+        let peer_a_server = spawn_registered_p2p_server(peer_a.clone(), connector.as_ref()).await?;
+        let peer_b_server = spawn_registered_p2p_server(peer_b.clone(), connector.as_ref()).await?;
+        let mut owner_to_a =
+            connect_p2p_client(owner_node.clone(), peer_a.clone(), connector.as_ref()).await?;
+        let mut owner_to_b =
+            connect_p2p_client(owner_node.clone(), peer_b.clone(), connector.as_ref()).await?;
+        let version_1 = owner_node.responder_content()?.unwrap();
+        owner_to_a
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                requester_content: Some(version_1.clone()),
+            })
+            .await?;
+        owner_to_b
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                requester_content: Some(version_1.clone()),
+            })
+            .await?;
+
+        owner_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"version-2".to_vec(),
+                }),
+            }))
+            .await?;
+        let version_2 = owner_node.responder_content()?.unwrap();
+        owner_to_a
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                requester_content: Some(version_2.clone()),
+            })
+            .await?;
+
+        let recovered_cli = CliService::new(recovered_node.clone());
+        let updates = recovered_cli
+            .recover_content(tonic::Request::new(clirpc::RecoverContentRequest {}))
+            .await?
+            .into_inner()
+            .try_collect::<Vec<_>>()
+            .await?;
+        let final_update = updates.last().unwrap();
+        assert_eq!(final_update.most_recent_content_id, version_2.content_id);
+        assert_eq!(final_update.num_peers_with_most_recent_version, 1);
+        assert_eq!(final_update.total_versions_found, 2);
+        assert_eq!(final_update.num_peers_with_any_versions, 2);
+        assert!(final_update.recovered_most_recent_version);
+
+        let recovered_file = recovered_node.with_store(|store| store.get_file("alpha.txt"))?;
+        assert_eq!(recovered_file, b"version-2".to_vec());
+
+        peer_b_server.abort();
+        peer_a_server.abort();
+        owner_server.abort();
         Ok(())
     }
 }
