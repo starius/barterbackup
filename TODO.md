@@ -26,8 +26,8 @@ Still open
 
 Guardrails
 
-- Keep the Rust implementation authoritative and use the Go tree only as a
-  semantic reference.
+- Keep the Rust implementation authoritative and do not reintroduce legacy
+  compatibility shortcuts without an explicit design decision.
 - Prefer current dependency releases for Arti, tonic, rustls, and crypto.
 - Do not weaken onion hostname validation or the enforced `X25519MLKEM768`
   policy without an explicit design decision.

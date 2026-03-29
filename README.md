@@ -1,89 +1,173 @@
-# barterbackup
+# BarterBackup
 
-Mutual backup system: you store my data, I store yours.
+BarterBackup is a pure Rust mutual-backup system built around a daemon
+(`bbd`) and a CLI (`bbcli`).
 
-**Overview**
-- BarterBackup is a daemon + CLI that lets peers mutually back up data over
-  Tor onion services. Each node stores an encrypted blob for its peers in
-  exchange for peers storing its own encrypted blob.
-- The system negotiates storage “contracts”, verifies availability with spot
-  checks, and can recover content from multiple replicas.
+Each node keeps one encrypted content blob derived from the user's file set,
+stores encrypted blobs for peers, and recovers the newest revision from peers
+when local state is lost. Peer traffic runs over Tor onion services with
+mutual TLS and enforced post-quantum hybrid key exchange.
 
-**Terminology**
-- File: A user‑provided input sent by the client. There can be many files.
-- Content: A single finalized encrypted blob derived from the current set of
-  files. This is the unit that is stored locally and backed up to peers.
+## Features
 
-**Architecture**
-- clirpc (CLI ↔ daemon): Local gRPC API used by the CLI.
-- bbrpc (daemon ↔ peer): Public gRPC API exposed via the node’s onion site.
-- storedpb (on‑disk): Metadata and revision information persisted locally.
+- locked-start daemon with local admin RPC (`clirpc`)
+- peer-to-peer RPC (`bbrpc`) over Arti onion services
+- TLS 1.3 with `X25519MLKEM768` enforced for peer and local RPC traffic
+- deterministic node identity derived from the main seed/password
+- encrypted local storage and encrypted mirrored peer storage
+- atomic content writes with rename-based replacement
+- multi-node tests, manual clocks, and adversarial transport/parser coverage
 
-**Key APIs**
-- clirpc service
-  - Unlock: Provide the main password (derives the master secret key).
-  - ConnectPeer, ConnectedPeers: Manage peer connectivity by onion ID.
-  - SetFile, GetFile, ListFiles: Manage the file set that forms current
-    content. ListFiles returns only names.
-  - SetStorageConfig, GetStorageConfig: Control how much peer data to store
-    and the minimum replica count; daemon reports capacity and obligations.
-  - GetContracts: View current storage contracts with peers.
-  - ProposeContract, CheckContract, RecoverContent: Long‑running/streaming
-    operations to form, verify, and recover content from peers.
+## Repository layout
 
-- bbrpc service
-  - PeerExchange: Share peer onion identities for discovery.
-  - GetContentRevision, SetContentRevision: Sync which content revision is
-    stored on each side and propose updates/deletions.
-  - Download: Retrieve sections of content, optionally using reference
-    sections for efficient deltas. Response includes a SHA-256 hash.
+- `cmd/bbd`: daemon binary
+- `cmd/bbcli`: CLI binary
+- `crates/*`: Rust libraries
+- `bbrpc`, `clirpc`, `storedpb`: protobuf definitions
+- `flake.nix`: Nix development shell
+- `Makefile`: convenience targets for build/test/fmt/clippy/install
 
-- storedpb messages
-  - ContentRevision: Marks a concrete version produced by SetFile; its AEAD
-    becomes the content_id used in bbrpc. Keys derived from it encrypt
-    Metadata (AEAD) and content (AES‑CTR).
-  - Metadata: Tracks the most recent revision, content_length, content_sha256,
-    and per‑peer records.
-  - Peer: Stores onion_pubkey and scoring fields used to evaluate peers over
-    time.
+## Development environment
 
-**Security Model**
-- Unlock derives a master secret from the main password. Keys from this secret
-  encrypt content and metadata and identify the node’s onion service.
-- Content is encrypted; Metadata is AEAD‑encrypted; content payload uses
-  AES‑CTR. Encrypted downloads can be AEAD‑protected using a shared password
-  configured out‑of‑band.
-- All inter‑node communication happens over Tor onion services.
+The simplest way to get a working toolchain is:
 
-**Developer Notes**
-- RPC code generation (reproducible):
-  - Tools come from the Nix dev shell (`flake.nix`); no host installs needed.
-  - Generate stubs: `make rpc` (runs via `nix develop --command ...`).
-  - Generated `.pb.go` files are committed to the repo.
-  - Tools are pinned by `flake.lock`. If you change proto files, re-run
-    `make rpc` and commit changes.
-  - Go package options are set in each `.proto` via `option go_package`.
-- Proto style rules:
-  - Comments are English sentences: start with a capital letter and end with
-    punctuation.
-  - Field comments must start with the field name (for example, "name is …",
-    "encrypted_download_request is …").
-  - Wrap comments at about 80 characters (tabs count as 8 spaces).
+```bash
+nix develop
+```
 
-**Status and TODOs**
-- Client API uses SetFile/GetFile/ListFiles for file management.
-- clirpc message types for contract management and recovery are defined;
-  implementations may still evolve.
-- Next steps:
-  - Implement contract lifecycle and background verification.
-  - Enforce storage allocation and replica policies.
-  - Implement recovery orchestration and progress reporting.
-  - Flesh out missing clirpc messages and wire daemon/CLI flow.
+The Nix shell provides a recent Rust toolchain plus common development tools.
 
-**Quick Usage Flow (Conceptual)**
-- Start the daemon (exposes local clirpc and onion bbrpc).
-- Use the CLI to:
-  - Unlock with the main password.
-  - Connect to peers by onion ID.
-  - Add files with SetFile; inspect with ListFiles/GetFile.
-  - Propose/verify contracts; recovery runs automatically in the background.
+Without Nix, use a current stable Rust toolchain. Protobuf compilation uses a
+vendored `protoc`, so a host `protoc` installation is not required.
+
+## Build
+
+```bash
+cargo build --workspace
+```
+
+Build release binaries:
+
+```bash
+cargo build --release -p bbd -p bbcli
+```
+
+Install the binaries into Cargo's install root:
+
+```bash
+make install
+```
+
+## Test
+
+Run the full workspace test suite:
+
+```bash
+cargo test --workspace
+```
+
+Useful focused runs:
+
+```bash
+cargo test -p bbd
+cargo test -p bbcli
+cargo test -p node
+cargo test -p clitls
+cargo test -p content
+```
+
+Other helpers:
+
+```bash
+make fmt
+make clippy
+```
+
+## Configuration
+
+Daemon:
+
+- `BBD_CLI_ADDR`: local `clirpc` listen address, default `127.0.0.1:9911`
+- `BBD_DATA_DIR`: daemon state directory, default `~/.barterbackup`
+
+CLI:
+
+- `BBCLI_DAEMON_ADDR`: daemon address, default `https://127.0.0.1:9911`
+- `BBCLI_CLI_KEYS_DIR`: directory containing `server.pub` and `client.key`
+
+Important current behavior:
+
+- the daemon generates local admin mTLS keys under `<data-dir>/cli-keys`
+- those keys are currently regenerated on each daemon start
+- if you use a custom `BBD_DATA_DIR`, point `BBCLI_CLI_KEYS_DIR` at the same
+  directory's `cli-keys` subdirectory
+
+The daemon also takes an exclusive lock on `<data-dir>/.lock`, so two `bbd`
+instances cannot use the same state directory concurrently.
+
+## Quick start
+
+Start the daemon:
+
+```bash
+cargo run --bin bbd --
+```
+
+Unlock it with the main seed/password. Interactive usage will prompt and mask
+input; non-interactive usage can stream the password through stdin:
+
+```bash
+printf '%s' 'correct horse battery staple' | \
+  cargo run --bin bbcli -- unlock --password-stdin
+```
+
+If you use a custom data directory:
+
+```bash
+BBD_DATA_DIR=/tmp/barterbackup cargo run --bin bbd --
+printf '%s' 'correct horse battery staple' | \
+  BBCLI_CLI_KEYS_DIR=/tmp/barterbackup/cli-keys \
+  cargo run --bin bbcli -- unlock --password-stdin
+```
+
+Add a peer:
+
+```bash
+cargo run --bin bbcli -- connect-peer <peer-onion-id>
+```
+
+Manage files:
+
+```bash
+cargo run --bin bbcli -- set-file alpha.txt ./alpha.txt
+cargo run --bin bbcli -- list-files
+cargo run --bin bbcli -- get-file alpha.txt ./alpha.out
+cargo run --bin bbcli -- delete-file alpha.txt
+```
+
+Inspect contracts and recovery:
+
+```bash
+cargo run --bin bbcli -- get-contracts
+cargo run --bin bbcli -- propose-contract <peer-onion-id>
+cargo run --bin bbcli -- check-contract <peer-onion-id>
+cargo run --bin bbcli -- recover-content
+```
+
+## Security model
+
+- the main seed/password is stretched with Argon2id
+- subkeys are derived with HKDF-SHA256
+- node identity is a deterministic Ed25519 keypair
+- peer transport uses Arti onion services plus mutual TLS
+- TLS is restricted to TLS 1.3 with `X25519MLKEM768`
+- user data is stored only in encrypted content blobs and encrypted peer
+  sidecars
+
+## Notes
+
+- `bbd` starts locked and only serves local admin RPC until `Unlock`
+- `bbcli unlock` waits for the daemon to become ready instead of failing on
+  early startup races
+- protobufs are compiled at build time; there are no checked-in generated Rust
+  stubs to refresh manually
