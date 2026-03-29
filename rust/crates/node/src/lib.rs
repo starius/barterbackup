@@ -769,7 +769,9 @@ impl Node {
             .map_err(|error| Status::unavailable(format!("download sampled section: {error}")))?
             .into_inner();
         let expected_hash = Sha256::digest(&local_blob);
-        let passed = download.sha256.as_slice() == expected_hash.as_slice()
+        let expected_total_length = i64::try_from(local_blob.len()).unwrap_or(i64::MAX);
+        let passed = download.total_length == expected_total_length
+            && download.sha256.as_slice() == expected_hash.as_slice()
             && matches!(
                 download.section,
                 Some(bbrpc::download_response::Section::RawBytes(ref raw_bytes))
@@ -862,16 +864,34 @@ impl Node {
                 .is_some_and(|content_info| content_info.content_id == candidate.content_id);
             if already_current {
                 recovered_most_recent_version = true;
-            } else if let Some(source_peer) = candidate.peers.first() {
-                let blob = self
-                    .download_peer_blob(source_peer, &candidate.content_id)
-                    .await?;
-                self.restore_current_blob(&blob)?;
-                most_recent_downloaded_bytes = i64::try_from(blob.len()).unwrap_or(i64::MAX);
-                most_recent_downloaded_files = self.with_store(|store| {
-                    Ok(i64::try_from(store.list_files().len()).unwrap_or(i64::MAX))
-                })?;
-                recovered_most_recent_version = true;
+            } else {
+                // Try every peer that advertised the newest revision so one
+                // broken replica cannot block recovery from another copy.
+                let mut last_error = None;
+                for source_peer in &candidate.peers {
+                    match self
+                        .download_peer_blob(source_peer, &candidate.content_id)
+                        .await
+                    {
+                        Ok(blob) => {
+                            self.restore_current_blob(&blob)?;
+                            most_recent_downloaded_bytes =
+                                i64::try_from(blob.len()).unwrap_or(i64::MAX);
+                            most_recent_downloaded_files = self.with_store(|store| {
+                                Ok(i64::try_from(store.list_files().len()).unwrap_or(i64::MAX))
+                            })?;
+                            recovered_most_recent_version = true;
+                            last_error = None;
+                            break;
+                        }
+                        Err(error) => {
+                            last_error = Some(error);
+                        }
+                    }
+                }
+                if let Some(error) = last_error {
+                    return Err(error);
+                }
             }
         }
 
@@ -1315,6 +1335,7 @@ fn map_storage_error(error: StorageError) -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use clock::{ManualClock, Timestamp};
     use futures::TryStreamExt;
     use protos::bbrpc::barter_backup_server_client::BarterBackupServerClient;
@@ -1323,9 +1344,13 @@ mod tests {
     use protos::clirpc::barter_backup_client_server::{
         BarterBackupClient, BarterBackupClientServer,
     };
+    use std::collections::BTreeMap;
     use std::sync::Arc;
+    use std::sync::RwLock;
     use std::time::Duration;
+    use tokio_stream::wrappers::TcpListenerStream;
     use tonic::transport::Endpoint;
+    use tonic::{Request, Response};
     use transport::PeerConnector;
 
     /// Spawn an h2c local CLI server for integration-style node tests.
@@ -1367,6 +1392,143 @@ mod tests {
         Ok((endpoint, handle))
     }
 
+    /// DownloadBehavior defines how a static peer answers download requests.
+    #[derive(Clone)]
+    enum DownloadBehavior {
+        /// Response returns a fixed download response payload.
+        Response(bbrpc::DownloadResponse),
+    }
+
+    /// StaticPeerService serves fixed revision and download responses.
+    #[derive(Clone)]
+    struct StaticPeerService {
+        /// revision_response is returned from GetContentRevision.
+        revision_response: bbrpc::GetContentRevisionResponse,
+        /// download_behavior controls Download responses.
+        download_behavior: DownloadBehavior,
+    }
+
+    impl StaticPeerService {
+        /// Create a static service with the provided responses.
+        fn new(
+            revision_response: bbrpc::GetContentRevisionResponse,
+            download_behavior: DownloadBehavior,
+        ) -> Self {
+            Self {
+                revision_response,
+                download_behavior,
+            }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl bbrpc::barter_backup_server_server::BarterBackupServer for StaticPeerService {
+        async fn health_check(
+            &self,
+            _request: Request<bbrpc::HealthCheckRequest>,
+        ) -> std::result::Result<Response<bbrpc::HealthCheckResponse>, Status> {
+            Ok(Response::new(bbrpc::HealthCheckResponse {
+                client_onion: String::new(),
+                server_onion: String::new(),
+            }))
+        }
+
+        async fn peer_exchange(
+            &self,
+            _request: Request<bbrpc::PeerExchangeRequest>,
+        ) -> std::result::Result<Response<bbrpc::PeerExchangeResponse>, Status> {
+            Err(Status::unimplemented(
+                "peer exchange is not used in this test",
+            ))
+        }
+
+        async fn get_content_revision(
+            &self,
+            _request: Request<bbrpc::GetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::GetContentRevisionResponse>, Status> {
+            Ok(Response::new(self.revision_response.clone()))
+        }
+
+        async fn set_content_revision(
+            &self,
+            _request: Request<bbrpc::SetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::SetContentRevisionResponse>, Status> {
+            Ok(Response::new(bbrpc::SetContentRevisionResponse {}))
+        }
+
+        async fn download(
+            &self,
+            _request: Request<bbrpc::DownloadRequest>,
+        ) -> std::result::Result<Response<bbrpc::DownloadResponse>, Status> {
+            match &self.download_behavior {
+                DownloadBehavior::Response(response) => Ok(Response::new(response.clone())),
+            }
+        }
+    }
+
+    /// PlainPeerConnector resolves peers to local h2c test servers.
+    #[derive(Debug, Default)]
+    struct PlainPeerConnector {
+        /// endpoints maps onion hostnames to plain HTTP endpoints.
+        endpoints: RwLock<BTreeMap<String, String>>,
+    }
+
+    impl PlainPeerConnector {
+        /// Create an empty plain connector.
+        fn new() -> Self {
+            Self::default()
+        }
+
+        /// Register one peer endpoint.
+        fn register_peer(&self, peer_onion: &str, endpoint: &str) {
+            self.endpoints
+                .write()
+                .unwrap()
+                .insert(peer_onion.to_string(), endpoint.to_string());
+        }
+    }
+
+    #[async_trait]
+    impl PeerConnector for PlainPeerConnector {
+        async fn connect(
+            &self,
+            peer_onion: &str,
+            _client_private_key: &ed25519_dalek::SecretKey,
+        ) -> anyhow::Result<transport::PeerClient> {
+            let endpoint = self
+                .endpoints
+                .read()
+                .unwrap()
+                .get(peer_onion)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("unknown peer onion: {peer_onion}"))?;
+            let channel = Endpoint::from_shared(endpoint)?.connect().await?;
+
+            Ok(transport::PeerClient::new(channel))
+        }
+    }
+
+    /// Spawn a plain h2c peer server for adversarial tests.
+    async fn spawn_plain_peer_server<S>(
+        service: S,
+    ) -> anyhow::Result<(
+        String,
+        tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    )>
+    where
+        S: bbrpc::barter_backup_server_server::BarterBackupServer + Send + Sync + 'static,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let handle = tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(BarterBackupServerServer::new(service))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+
+        Ok((format!("http://{address}"), handle))
+    }
+
     /// Spawn a p2p server and register its endpoint in the shared mock connector.
     async fn spawn_registered_p2p_server(
         node: Arc<Node>,
@@ -1402,6 +1564,16 @@ mod tests {
         })?;
 
         Ok(score)
+    }
+
+    /// Return the current content info and encrypted blob from a node.
+    fn current_content_snapshot(node: &Node) -> anyhow::Result<(bbrpc::ContentInfo, Vec<u8>)> {
+        let content_info = node
+            .responder_content()?
+            .ok_or_else(|| anyhow::anyhow!("node has no current content"))?;
+        let blob = node.with_store(|store| store.current_blob())?;
+
+        Ok((content_info, blob))
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1580,6 +1752,106 @@ mod tests {
         }
 
         server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn download_peer_blob_rejects_malformed_responses() -> anyhow::Result<()> {
+        struct Case {
+            /// name is the subtest label.
+            name: &'static str,
+            /// response is returned by the static peer.
+            response: bbrpc::DownloadResponse,
+            /// expected_code is the gRPC status mapped by the node.
+            expected_code: Code,
+        }
+
+        let cases = vec![
+            Case {
+                name: "negative length",
+                response: bbrpc::DownloadResponse {
+                    total_length: -1,
+                    sha256: vec![0u8; 32],
+                    section: Some(bbrpc::download_response::Section::RawBytes(
+                        bbrpc::RawBytes {
+                            value: b"blob".to_vec(),
+                        },
+                    )),
+                },
+                expected_code: Code::Internal,
+            },
+            Case {
+                name: "missing section",
+                response: bbrpc::DownloadResponse {
+                    total_length: 4,
+                    sha256: Sha256::digest(b"blob").to_vec(),
+                    section: None,
+                },
+                expected_code: Code::Internal,
+            },
+            Case {
+                name: "reference section",
+                response: bbrpc::DownloadResponse {
+                    total_length: 4,
+                    sha256: Sha256::digest(b"blob").to_vec(),
+                    section: Some(bbrpc::download_response::Section::Reference(
+                        bbrpc::Reference {
+                            offset_in_reference: 0,
+                            length: 4,
+                        },
+                    )),
+                },
+                expected_code: Code::Unimplemented,
+            },
+            Case {
+                name: "short blob",
+                response: bbrpc::DownloadResponse {
+                    total_length: 5,
+                    sha256: Sha256::digest(b"blob").to_vec(),
+                    section: Some(bbrpc::download_response::Section::RawBytes(
+                        bbrpc::RawBytes {
+                            value: b"blob".to_vec(),
+                        },
+                    )),
+                },
+                expected_code: Code::Internal,
+            },
+            Case {
+                name: "hash mismatch",
+                response: bbrpc::DownloadResponse {
+                    total_length: 4,
+                    sha256: vec![0u8; 32],
+                    section: Some(bbrpc::download_response::Section::RawBytes(
+                        bbrpc::RawBytes {
+                            value: b"blob".to_vec(),
+                        },
+                    )),
+                },
+                expected_code: Code::DataLoss,
+            },
+        ];
+
+        for case in cases {
+            let node = Arc::new(Node::new("download-client")?);
+            let peer_identity = Node::new(case.name)?;
+            let connector = Arc::new(PlainPeerConnector::new());
+            node.set_peer_connector(connector.clone());
+            let static_service = StaticPeerService::new(
+                bbrpc::GetContentRevisionResponse::default(),
+                DownloadBehavior::Response(case.response),
+            );
+            let (endpoint, server) = spawn_plain_peer_server(static_service).await?;
+            connector.register_peer(peer_identity.address(), &endpoint);
+
+            let error = node
+                .download_peer_blob(peer_identity.address(), b"content-id")
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), case.expected_code, "case {}", case.name);
+
+            server.abort();
+        }
+
         Ok(())
     }
 
@@ -1979,6 +2251,67 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn check_contract_rejects_wrong_total_length() -> anyhow::Result<()> {
+        let clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage_and_clock(
+            "contract-owner",
+            filesystem,
+            clock.clone(),
+        )?);
+        let peer_identity = Node::new("malicious-contract-peer")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        node.set_peer_connector(connector.clone());
+        node.add_known_peer(peer_identity.address())?;
+
+        // Create one local revision that the peer will claim to hold.
+        CliService::new(node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+        let (content_info, blob) = current_content_snapshot(node.as_ref())?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_identity.address())?;
+        node.with_store(|store| store.set_peer_score(peer_public_key.as_bytes(), 0, 10))?;
+
+        // Return the right sampled bytes and hash but lie about total_length.
+        let static_service = StaticPeerService::new(
+            bbrpc::GetContentRevisionResponse {
+                requester_content: Some(content_info.clone()),
+                requester_remaining_seconds: 0,
+                responder_content: None,
+            },
+            DownloadBehavior::Response(bbrpc::DownloadResponse {
+                total_length: i64::try_from(blob.len()).unwrap_or(i64::MAX) + 1,
+                sha256: Sha256::digest(&blob).to_vec(),
+                section: Some(bbrpc::download_response::Section::RawBytes(
+                    bbrpc::RawBytes {
+                        value: blob.clone(),
+                    },
+                )),
+            }),
+        );
+        let (endpoint, server) = spawn_plain_peer_server(static_service).await?;
+        connector.register_peer(peer_identity.address(), &endpoint);
+
+        let updates = node.check_contract_updates(peer_identity.address()).await?;
+        assert_eq!(
+            updates.last().map(|update| update.state),
+            Some(clirpc::ContractState::InvalidContentReturned as i32)
+        );
+        assert_eq!(
+            peer_score_seconds(node.as_ref(), peer_identity.address())?,
+            -90
+        );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn propose_contract_syncs_both_sides() -> anyhow::Result<()> {
         let left_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let left_node = Arc::new(Node::with_local_storage("left", left_filesystem)?);
@@ -2145,6 +2478,90 @@ mod tests {
         peer_b_server.abort();
         peer_a_server.abort();
         owner_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recover_content_tries_next_peer_after_bad_download() -> anyhow::Result<()> {
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner_node = Arc::new(Node::with_local_storage("recover-owner", owner_filesystem)?);
+        let recovered_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let recovered_node = Arc::new(Node::with_local_storage(
+            "recover-owner",
+            recovered_filesystem,
+        )?);
+        let bad_peer_identity = Node::new("recover-bad-peer")?;
+        let good_peer_identity = Node::new("recover-good-peer")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        recovered_node.set_peer_connector(connector.clone());
+        recovered_node
+            .known_peers
+            .lock()
+            .unwrap()
+            .insert(bad_peer_identity.address().to_string());
+        recovered_node
+            .known_peers
+            .lock()
+            .unwrap()
+            .insert(good_peer_identity.address().to_string());
+
+        // Create one recoverable revision on an owner node using the same seed.
+        CliService::new(owner_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"latest-body".to_vec(),
+                }),
+            }))
+            .await?;
+        let (content_info, blob) = current_content_snapshot(owner_node.as_ref())?;
+        let revision_response = bbrpc::GetContentRevisionResponse {
+            requester_content: Some(content_info.clone()),
+            requester_remaining_seconds: 0,
+            responder_content: None,
+        };
+
+        // The first peer advertises the right revision but serves a corrupt
+        // blob, while the second peer serves the same revision correctly.
+        let bad_service = StaticPeerService::new(
+            revision_response.clone(),
+            DownloadBehavior::Response(bbrpc::DownloadResponse {
+                total_length: i64::try_from(blob.len()).unwrap_or(i64::MAX),
+                sha256: vec![0u8; 32],
+                section: Some(bbrpc::download_response::Section::RawBytes(
+                    bbrpc::RawBytes {
+                        value: blob.clone(),
+                    },
+                )),
+            }),
+        );
+        let good_service = StaticPeerService::new(
+            revision_response,
+            DownloadBehavior::Response(bbrpc::DownloadResponse {
+                total_length: i64::try_from(blob.len()).unwrap_or(i64::MAX),
+                sha256: Sha256::digest(&blob).to_vec(),
+                section: Some(bbrpc::download_response::Section::RawBytes(
+                    bbrpc::RawBytes {
+                        value: blob.clone(),
+                    },
+                )),
+            }),
+        );
+        let (bad_endpoint, bad_server) = spawn_plain_peer_server(bad_service).await?;
+        let (good_endpoint, good_server) = spawn_plain_peer_server(good_service).await?;
+        connector.register_peer(bad_peer_identity.address(), &bad_endpoint);
+        connector.register_peer(good_peer_identity.address(), &good_endpoint);
+
+        let update = recovered_node.recover_content_update().await?;
+        assert!(update.recovered_most_recent_version);
+        assert_eq!(update.num_peers_with_most_recent_version, 2);
+        assert_eq!(
+            recovered_node.with_store(|store| store.get_file("alpha.txt"))?,
+            b"latest-body".to_vec()
+        );
+
+        bad_server.abort();
+        good_server.abort();
         Ok(())
     }
 
