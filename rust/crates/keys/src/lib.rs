@@ -6,9 +6,11 @@
 //! - DeriveEd25519FromMaster(master_priv, "tor/onion/v3") -> ed25519 keypair.
 
 use argon2::{Algorithm, Argon2, Params, Version};
+use data_encoding::BASE32_NOPAD;
 use ed25519_dalek::{Keypair, PublicKey, SecretKey, SignatureError};
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
+use sha3::Sha3_256;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -72,6 +74,31 @@ pub fn derive_ed25519_from_master(
     Ok((kp, pubk))
 }
 
+/// Derive a Tor v3 onion hostname from an Ed25519 public key.
+pub fn onion_hostname_from_public_key(public_key: &PublicKey) -> String {
+    const ONION_VERSION: u8 = 0x03;
+    const CHECKSUM_PREFIX: &[u8] = b".onion checksum";
+
+    // Tor v3 hostnames encode pubkey || checksum || version in base32.
+    let mut checksum_input = Vec::with_capacity(CHECKSUM_PREFIX.len() + 32 + 1);
+    checksum_input.extend_from_slice(CHECKSUM_PREFIX);
+    checksum_input.extend_from_slice(public_key.as_bytes());
+    checksum_input.push(ONION_VERSION);
+    let checksum = Sha3_256::digest(&checksum_input);
+
+    // Build the address body and lowercase it to match the canonical onion
+    // hostname representation used by Tor.
+    let mut address_bytes = Vec::with_capacity(35);
+    address_bytes.extend_from_slice(public_key.as_bytes());
+    address_bytes.extend_from_slice(&checksum[..2]);
+    address_bytes.push(ONION_VERSION);
+
+    format!(
+        "{}.onion",
+        BASE32_NOPAD.encode(&address_bytes).to_ascii_lowercase()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +151,16 @@ mod tests {
             "06ccbedc5b86851cd0ee8c648e4bfcc75347431a8c39d0dcb066a8497694d931"
         );
         assert_eq!(hx(kp2.to_bytes()), "f1b56590d316b35d65d1088325395f52359bf3f65c68c683e7d82b7eb8dcb52d06ccbedc5b86851cd0ee8c648e4bfcc75347431a8c39d0dcb066a8497694d931");
+    }
+
+    #[test]
+    fn test_onion_hostname_from_public_key_table() {
+        let master = derive_master_priv("test-seed");
+        let (_, pub1) = derive_ed25519_from_master(&master, "tor/onion/v3").unwrap();
+
+        assert_eq!(
+            onion_hostname_from_public_key(&pub1),
+            "qay7kgbb3iroqbexxqzyzi4mw6wcyzzzw4dnz73xnvhhdjrooesggeqd.onion"
+        );
     }
 }

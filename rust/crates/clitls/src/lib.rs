@@ -11,6 +11,7 @@
 use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::{Keypair, PublicKey, SecretKey, SignatureError};
 use hyper_util::rt::TokioIo;
+use keys::onion_hostname_from_public_key;
 use pem::Pem;
 // We manually encode a minimal PKCS#8 for the client key to match the Go files.
 // pkcs8 crate not used directly; we encode minimal PKCS#8 v1 manually.
@@ -34,11 +35,13 @@ use tokio_rustls::TlsConnector;
 use tonic::transport::{Channel, Endpoint};
 use tower::service_fn;
 
+/// Generate a fresh Ed25519 keypair.
 pub fn generate_ed25519() -> Result<(PublicKey, SecretKey)> {
     let kp = Keypair::generate(&mut rand::rngs::OsRng);
     Ok((kp.public, kp.secret))
 }
 
+/// Write the local CLI pinning files expected by `bbd` and `bbcli`.
 pub fn write_keys(
     dir: impl AsRef<Path>,
     server_pub: &PublicKey,
@@ -57,6 +60,7 @@ pub fn write_keys(
     Ok(())
 }
 
+/// Read the local CLI pinning files written by [`write_keys`].
 pub fn read_keys(dir: impl AsRef<Path>) -> Result<(PublicKey, SecretKey)> {
     let dir = dir.as_ref();
     let spki_pem = fs::read_to_string(dir.join("server.pub")).context("read server.pub")?;
@@ -75,74 +79,17 @@ pub fn read_keys(dir: impl AsRef<Path>) -> Result<(PublicKey, SecretKey)> {
     Ok((server_pub, client_priv))
 }
 
-/// Build a rustls ServerConfig that pins a specific client public key and serves with a self-signed Ed25519 cert.
+/// Build a rustls server config for the local CLI daemon.
 pub fn build_server_tls(
     expected_client_pub: &PublicKey,
     server_priv: &SecretKey,
 ) -> Result<ServerConfig> {
-    // PQ-only provider (X25519+ML-KEM-768).
-    let mut provider: CryptoProvider = rustls_post_quantum::provider();
-    provider.kx_groups = vec![rustls_post_quantum::X25519MLKEM768];
     let (server_cert, server_key) = self_signed_cert(server_priv, true)?;
-    // Custom client verifier: pin ed25519 pubkey
-    #[derive(Debug)]
-    struct PinClient {
-        expected: [u8; 32],
-        subjects: Vec<DistinguishedName>,
-    }
-    impl ClientCertVerifier for PinClient {
-        fn offer_client_auth(&self) -> bool {
-            true
-        }
-        fn client_auth_mandatory(&self) -> bool {
-            true
-        }
-        fn root_hint_subjects(&self) -> &[DistinguishedName] {
-            &self.subjects
-        }
-        fn verify_client_cert(
-            &self,
-            end_entity: &CertificateDer<'_>,
-            _intermediates: &[CertificateDer<'_>],
-            _now: UnixTime,
-        ) -> Result<ClientCertVerified, rustls::Error> {
-            let (_, parsed) = x509_parser::parse_x509_certificate(end_entity.as_ref())
-                .map_err(|_| rustls::Error::General("bad client cert".into()))?;
-            let spki = parsed.tbs_certificate.subject_pki;
-            // Sanity: require Ed25519 algorithm OID 1.3.101.112.
-            if spki.algorithm.algorithm.to_id_string() != "1.3.101.112" {
-                return Err(rustls::Error::General("client cert not ed25519".into()));
-            }
-            if spki.subject_public_key.data.as_ref() != self.expected {
-                return Err(rustls::Error::General("unauthorized client cert".into()));
-            }
-            Ok(ClientCertVerified::assertion())
-        }
-        fn verify_tls12_signature(
-            &self,
-            _message: &[u8],
-            _cert: &CertificateDer<'_>,
-            _dss: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, rustls::Error> {
-            Ok(HandshakeSignatureValid::assertion())
-        }
-        fn verify_tls13_signature(
-            &self,
-            _message: &[u8],
-            _cert: &CertificateDer<'_>,
-            _dss: &DigitallySignedStruct,
-        ) -> Result<HandshakeSignatureValid, rustls::Error> {
-            Ok(HandshakeSignatureValid::assertion())
-        }
-        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-            vec![SignatureScheme::ED25519]
-        }
-    }
-    let verifier = Arc::new(PinClient {
+    let verifier = Arc::new(PinClientPublicKeyVerifier {
         expected: expected_client_pub.to_bytes(),
         subjects: vec![],
     });
-    let mut cfg = rustls::ServerConfig::builder_with_provider(provider.into())
+    let mut cfg = rustls::ServerConfig::builder_with_provider(crypto_provider().into())
         .with_protocol_versions(&[&TLS13])?
         .with_client_cert_verifier(verifier)
         .with_single_cert(vec![server_cert], server_key)
@@ -151,21 +98,48 @@ pub fn build_server_tls(
     Ok(cfg)
 }
 
-/// Build a rustls ClientConfig that pins the server public key.
+/// Build a rustls server config for peer-to-peer traffic.
+pub fn build_peer_server_tls(server_priv: &SecretKey) -> Result<ServerConfig> {
+    let (server_cert, server_key) = self_signed_cert(server_priv, true)?;
+    let verifier = Arc::new(AcceptAnyEd25519ClientVerifier { subjects: vec![] });
+    let mut cfg = rustls::ServerConfig::builder_with_provider(crypto_provider().into())
+        .with_protocol_versions(&[&TLS13])?
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(vec![server_cert], server_key)
+        .map_err(|e| anyhow!("server cert: {e}"))?;
+    cfg.alpn_protocols = vec![b"h2".to_vec()];
+    Ok(cfg)
+}
+
+/// Build a rustls client config that pins the server public key.
 pub fn build_client_tls(
     expected_server_pub: &PublicKey,
     client_priv: &SecretKey,
 ) -> Result<ClientConfig> {
-    // PQ-only provider.
-    let mut provider: CryptoProvider = rustls_post_quantum::provider();
-    provider.kx_groups = vec![rustls_post_quantum::X25519MLKEM768];
-    // Client self-signed cert (for mTLS)
     let (client_cert, client_key) = self_signed_cert(client_priv, false)?;
-    let mut cfg = rustls::ClientConfig::builder_with_provider(provider.into())
+    let mut cfg = rustls::ClientConfig::builder_with_provider(crypto_provider().into())
         .with_protocol_versions(&[&TLS13])?
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(PinServer {
+        .with_custom_certificate_verifier(Arc::new(PinServerKeyVerifier {
             expected: expected_server_pub.to_bytes(),
+        }))
+        .with_client_auth_cert(vec![client_cert], client_key)
+        .map_err(|e| anyhow!("client cert: {e}"))?;
+    cfg.alpn_protocols = vec![b"h2".to_vec()];
+    Ok(cfg)
+}
+
+/// Build a rustls client config that pins a peer server by onion hostname.
+pub fn build_peer_client_tls(
+    expected_server_onion: &str,
+    client_priv: &SecretKey,
+) -> Result<ClientConfig> {
+    let (client_cert, client_key) = self_signed_cert(client_priv, false)?;
+    let mut cfg = rustls::ClientConfig::builder_with_provider(crypto_provider().into())
+        .with_protocol_versions(&[&TLS13])?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinServerOnionVerifier {
+            expected_onion: expected_server_onion.to_string(),
         }))
         .with_client_auth_cert(vec![client_cert], client_key)
         .map_err(|e| anyhow!("client cert: {e}"))?;
@@ -175,7 +149,13 @@ pub fn build_client_tls(
 
 /// Connect a tonic channel using the provided pinned rustls client config.
 pub async fn connect_channel(addr: &str, tls: ClientConfig) -> Result<Channel> {
-    let endpoint = Endpoint::from_shared(addr.to_string())?;
+    // Tonic's endpoint URI must stay `http://` because TLS is terminated by the
+    // custom connector below rather than by tonic's built-in client TLS stack.
+    let endpoint_addr = addr
+        .strip_prefix("https://")
+        .map(|rest| format!("http://{rest}"))
+        .unwrap_or_else(|| addr.to_string());
+    let endpoint = Endpoint::from_shared(endpoint_addr)?;
     let uri = endpoint.uri().clone();
     let host = uri
         .host()
@@ -217,8 +197,28 @@ pub async fn connect_pinned_channel(
     connect_channel(addr, tls).await
 }
 
+/// Parse an Ed25519 public key from an X.509 certificate.
+pub fn public_key_from_certificate_der(certificate_der: &[u8]) -> Result<PublicKey> {
+    let (_, parsed) = x509_parser::parse_x509_certificate(certificate_der)
+        .map_err(|_| anyhow!("bad certificate"))?;
+    let spki = parsed.tbs_certificate.subject_pki;
+    if spki.algorithm.algorithm.to_id_string() != "1.3.101.112" {
+        return Err(anyhow!("certificate key is not ed25519"));
+    }
+
+    PublicKey::from_bytes(spki.subject_public_key.data.as_ref())
+        .map_err(|err: SignatureError| anyhow!("{err}"))
+}
+
 /// OpenSSL contexts enforcing TLS 1.3 and hybrid X25519MLKEM768 groups.
 // No OpenSSL: we use rustls + rustls-post-quantum to enforce hybrid KEM.
+
+/// Build the rustls crypto provider used for all local and peer connections.
+fn crypto_provider() -> CryptoProvider {
+    let mut provider = rustls_post_quantum::provider();
+    provider.kx_groups = vec![rustls_post_quantum::X25519MLKEM768];
+    provider
+}
 
 /// Build a rustls server name from a hostname or IP literal.
 fn build_server_name(host: &str) -> Result<ServerName<'static>> {
@@ -230,8 +230,214 @@ fn build_server_name(host: &str) -> Result<ServerName<'static>> {
         .map_err(|err| anyhow!("invalid server name {host:?}: {err}"))
 }
 
+/// PinClientPublicKeyVerifier authorizes exactly one Ed25519 client key.
+#[derive(Debug)]
+struct PinClientPublicKeyVerifier {
+    expected: [u8; 32],
+    subjects: Vec<DistinguishedName>,
+}
+
+impl ClientCertVerifier for PinClientPublicKeyVerifier {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        true
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &self.subjects
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        let public_key = public_key_from_certificate_der(end_entity.as_ref())
+            .map_err(|err| rustls::Error::General(err.to_string()))?;
+        if public_key.to_bytes() != self.expected {
+            return Err(rustls::Error::General("unauthorized client cert".into()));
+        }
+
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![SignatureScheme::ED25519]
+    }
+}
+
+/// AcceptAnyEd25519ClientVerifier accepts any Ed25519 client certificate.
+#[derive(Debug)]
+struct AcceptAnyEd25519ClientVerifier {
+    subjects: Vec<DistinguishedName>,
+}
+
+impl ClientCertVerifier for AcceptAnyEd25519ClientVerifier {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        true
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &self.subjects
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        public_key_from_certificate_der(end_entity.as_ref())
+            .map_err(|err| rustls::Error::General(err.to_string()))?;
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![SignatureScheme::ED25519]
+    }
+}
+
+/// PinServerKeyVerifier pins a server certificate to an exact Ed25519 key.
+#[derive(Debug)]
+struct PinServerKeyVerifier {
+    expected: [u8; 32],
+}
+
+impl ServerCertVerifier for PinServerKeyVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        let public_key = public_key_from_certificate_der(end_entity.as_ref())
+            .map_err(|err| rustls::Error::General(err.to_string()))?;
+        if public_key.to_bytes() != self.expected {
+            return Err(rustls::Error::General("server public key mismatch".into()));
+        }
+
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![SignatureScheme::ED25519]
+    }
+}
+
+/// PinServerOnionVerifier pins a server certificate to a Tor onion hostname.
+#[derive(Debug)]
+struct PinServerOnionVerifier {
+    expected_onion: String,
+}
+
+impl ServerCertVerifier for PinServerOnionVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        let public_key = public_key_from_certificate_der(end_entity.as_ref())
+            .map_err(|err| rustls::Error::General(err.to_string()))?;
+        let onion = onion_hostname_from_public_key(&public_key);
+        if onion != self.expected_onion {
+            return Err(rustls::Error::General("server onion mismatch".into()));
+        }
+
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![SignatureScheme::ED25519]
+    }
+}
+
 fn self_signed_cert(
-    _privkey: &SecretKey,
+    private_key: &SecretKey,
     _server: bool,
 ) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
     let mut params = CertificateParams::new(vec!["localhost".into()]);
@@ -248,13 +454,13 @@ fn self_signed_cert(
     params.subject_alt_names = vec![SanType::DnsName("localhost".into())];
     // Reuse the supplied Ed25519 key so certificate pinning matches the
     // public/private key material written to disk.
-    let key_der = secret_to_pkcs8_der(_privkey);
+    let key_der = secret_to_pkcs8_der(private_key);
     let kp = KeyPair::from_der(&key_der).context("rcgen keypair from pkcs8")?;
     params.key_pair = Some(kp);
     let cert = Certificate::from_params(params).context("rcgen cert")?;
     let der = cert.serialize_der().context("rcgen serialize")?;
     let private_key_der =
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(secret_to_pkcs8_der(_privkey)));
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(secret_to_pkcs8_der(private_key)));
 
     Ok((CertificateDer::from(der), private_key_der))
 }
@@ -319,52 +525,6 @@ fn secret_from_pkcs8_der(der: &[u8]) -> Result<SecretKey> {
     let mut sk = [0u8; 32];
     sk.copy_from_slice(&der[16..48]);
     SecretKey::from_bytes(&sk).map_err(|e| anyhow!("{e}"))
-}
-
-#[derive(Debug)]
-struct PinServer {
-    expected: [u8; 32],
-}
-impl ServerCertVerifier for PinServer {
-    fn verify_server_cert(
-        &self,
-        end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
-        let (_, parsed) = x509_parser::parse_x509_certificate(end_entity.as_ref())
-            .map_err(|_| rustls::Error::General("bad server cert".into()))?;
-        let spki = parsed.tbs_certificate.subject_pki;
-        // Sanity: require Ed25519 algorithm OID 1.3.101.112.
-        if spki.algorithm.algorithm.to_id_string() != "1.3.101.112" {
-            return Err(rustls::Error::General("server cert not ed25519".into()));
-        }
-        if spki.subject_public_key.data.as_ref() != self.expected {
-            return Err(rustls::Error::General("server public key mismatch".into()));
-        }
-        Ok(ServerCertVerified::assertion())
-    }
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![SignatureScheme::ED25519]
-    }
 }
 
 // Integration test: spin a TLS server and connect with pinned client.

@@ -13,13 +13,14 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use storage::{Filesystem, StorageError, Store};
+use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tonic::{Code, Response, Status};
 
 /// Node represents a single BarterBackup instance.
 pub struct Node {
     /// ed25519_keypair is the deterministic node identity derived from the seed.
     ed25519_keypair: ed25519_dalek::Keypair,
-    /// onion_address is the stable placeholder onion hostname for the node.
+    /// onion_address is the stable Tor v3 hostname for the node identity key.
     onion_address: String,
     /// started_at tracks daemon uptime for local health checks.
     started_at: Mutex<Option<Instant>>,
@@ -61,7 +62,7 @@ impl Node {
     fn build(seed: &str, filesystem: Option<Arc<dyn Filesystem>>) -> Result<Self> {
         let master = keys::derive_master_priv(seed);
         let (keypair, public_key) = keys::derive_ed25519_from_master(&master, "tor/onion/v3")?;
-        let onion_address = format!("{}.onion", hex::encode(public_key.as_bytes()));
+        let onion_address = keys::onion_hostname_from_public_key(&public_key);
         let store = filesystem
             .map(|filesystem| Store::new(filesystem, &master))
             .transpose()?
@@ -107,6 +108,24 @@ impl Node {
                 content_length: i64::try_from(current.blob_len).unwrap_or(i64::MAX),
             }))
         })
+    }
+
+    /// Derive a peer onion hostname from the TLS client certificate on a request.
+    fn peer_onion_from_request<T>(&self, request: &tonic::Request<T>) -> Result<String, Status> {
+        let tls_info = request
+            .extensions()
+            .get::<TlsConnectInfo<TcpConnectInfo>>()
+            .ok_or_else(|| Status::unauthenticated("client certificate required"))?;
+        let peer_certificates = tls_info
+            .peer_certs()
+            .ok_or_else(|| Status::unauthenticated("client certificate required"))?;
+        let end_entity = peer_certificates
+            .first()
+            .ok_or_else(|| Status::unauthenticated("client certificate required"))?;
+        let public_key = clitls::public_key_from_certificate_der(end_entity.as_ref())
+            .map_err(|_| Status::unauthenticated("client certificate required"))?;
+
+        Ok(keys::onion_hostname_from_public_key(&public_key))
     }
 }
 
@@ -354,10 +373,11 @@ impl P2pService {
 impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
     async fn health_check(
         &self,
-        _request: tonic::Request<bbrpc::HealthCheckRequest>,
+        request: tonic::Request<bbrpc::HealthCheckRequest>,
     ) -> Result<tonic::Response<bbrpc::HealthCheckResponse>, tonic::Status> {
+        let client_onion = self.node.peer_onion_from_request(&request)?;
         Ok(Response::new(bbrpc::HealthCheckResponse {
-            client_onion: String::new(),
+            client_onion,
             server_onion: self.node.address().to_string(),
         }))
     }
@@ -452,7 +472,8 @@ fn map_storage_error(error: StorageError) -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protos::bbrpc::barter_backup_server_server::BarterBackupServer;
+    use protos::bbrpc::barter_backup_server_client::BarterBackupServerClient;
+    use protos::bbrpc::barter_backup_server_server::BarterBackupServerServer;
     use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
     use protos::clirpc::barter_backup_client_server::{
         BarterBackupClient, BarterBackupClientServer,
@@ -482,6 +503,23 @@ mod tests {
         Ok((BarterBackupClientClient::new(channel), handle))
     }
 
+    /// Spawn a TLS-protected p2p server for integration-style node tests.
+    async fn spawn_p2p_server(
+        node: Arc<Node>,
+    ) -> anyhow::Result<(
+        String,
+        tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    )> {
+        let service = P2pService::new(node.clone());
+        let listener = netmock::bind_peer_listener(&node.ed25519_keypair().secret).await?;
+        let endpoint = listener.endpoint().to_string();
+        let router =
+            tonic::transport::Server::builder().add_service(BarterBackupServerServer::new(service));
+        let handle = tokio::spawn(router.serve_with_incoming(listener.into_incoming()));
+
+        Ok((endpoint, handle))
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn local_healthcheck_reports_uptime_and_onion() -> anyhow::Result<()> {
         let node = Arc::new(Node::new("password")?);
@@ -500,6 +538,27 @@ mod tests {
             .await?
             .into_inner();
         assert!(second.uptime_seconds >= first.uptime_seconds);
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn p2p_healthcheck_reports_authenticated_onions() -> anyhow::Result<()> {
+        let server_node = Arc::new(Node::new("server-password")?);
+        let client_node = Arc::new(Node::new("client-password")?);
+        let (endpoint, server) = spawn_p2p_server(server_node.clone()).await?;
+        let client_secret = &client_node.ed25519_keypair().secret;
+        let channel =
+            netmock::connect_peer_channel(&endpoint, server_node.address(), client_secret).await?;
+        let mut client = BarterBackupServerClient::new(channel);
+
+        let response = client
+            .health_check(bbrpc::HealthCheckRequest {})
+            .await?
+            .into_inner();
+        assert_eq!(response.client_onion, client_node.address());
+        assert_eq!(response.server_onion, server_node.address());
 
         server.abort();
         Ok(())
@@ -578,10 +637,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn p2p_revision_and_download_reflect_current_blob() -> anyhow::Result<()> {
-        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
-        let node = Arc::new(Node::with_local_storage("password", filesystem)?);
-        let cli = CliService::new(node.clone());
-        let p2p = P2pService::new(node.clone());
+        let server_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let server_node = Arc::new(Node::with_local_storage("password", server_filesystem)?);
+        let client_node = Arc::new(Node::new("client-password")?);
+        let cli = CliService::new(server_node.clone());
 
         cli.set_file(tonic::Request::new(clirpc::SetFileRequest {
             file: Some(clirpc::File {
@@ -590,6 +649,12 @@ mod tests {
             }),
         }))
         .await?;
+
+        let (endpoint, server) = spawn_p2p_server(server_node.clone()).await?;
+        let client_secret = &client_node.ed25519_keypair().secret;
+        let channel =
+            netmock::connect_peer_channel(&endpoint, server_node.address(), client_secret).await?;
+        let mut p2p = BarterBackupServerClient::new(channel);
 
         let revision = p2p
             .get_content_revision(tonic::Request::new(bbrpc::GetContentRevisionRequest {}))
@@ -618,6 +683,7 @@ mod tests {
             }
         }
 
+        server.abort();
         Ok(())
     }
 }

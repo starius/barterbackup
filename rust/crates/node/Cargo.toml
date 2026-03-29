@@ -10,10 +10,11 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
-tonic = { version = "0.14.2", features = ["transport"] }
+tonic = { version = "0.14.2", features = ["transport", "tls-connect-info", "tls-ring"] }
 protos = { path = "../protos" }
 keys = { path = "../keys" }
 storage = { path = "../storage" }
+clitls = { path = "../clitls" }
 sha2 = "0.10"
 futures = "0.3"
 ed25519-dalek = "1"
@@ -25,3 +26,4 @@ protos = { path = "../protos" }
 anyhow = "1"
 content = { path = "../content" }
 tokio-stream = { version = "0.1", features = ["net"] }
+netmock = { path = "../netmock" }

@@ -23,6 +23,7 @@ tonic = { version = "0.14.2", features = ["transport", "tls-connect-info"] }
 tower = { version = "0.5", features = ["util"] }
 protos = { path = "../protos" }
 pkcs8 = { version = "0.10", features = ["std"] }
+keys = { path = "../keys" }
 
 [dev-dependencies]
 anyhow = "1"

@@ -831,6 +831,7 @@ dependencies = [
  "ed25519-dalek 1.0.1",
  "futures-util",
  "hyper-util",
+ "keys",
  "pem",
  "pkcs8",
  "protos",
@@ -2304,12 +2305,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argon2",
+ "data-encoding",
  "ed25519-dalek 1.0.1",
  "hex",
  "hkdf",
  "protos",
  "rand 0.8.5",
  "sha2 0.10.9",
+ "sha3",
  "thiserror 1.0.69",
  "tokio",
 ]
@@ -2495,7 +2498,12 @@ name = "netmock"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clitls",
+ "ed25519-dalek 1.0.1",
+ "futures-util",
  "tokio",
+ "tokio-rustls",
+ "tokio-stream",
  "tonic",
 ]
 
@@ -2519,11 +2527,13 @@ name = "node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clitls",
  "content",
  "ed25519-dalek 1.0.1",
  "futures",
  "hex",
  "keys",
+ "netmock",
  "protos",
  "sha2 0.10.9",
  "storage",
