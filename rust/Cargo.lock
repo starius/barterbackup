@@ -4112,6 +4112,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "storage"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm-siv",
+ "content",
+ "hex",
+ "keys",
+ "prost",
+ "protos",
+ "rand 0.8.5",
+ "tempfile",
+ "thiserror 2.0.16",
+]
+
+[[package]]
 name = "strsim"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
