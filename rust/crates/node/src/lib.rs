@@ -2106,4 +2106,196 @@ mod tests {
         owner_server.abort();
         Ok(())
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repeated_successful_checks_accumulate_long_term_score() -> anyhow::Result<()> {
+        let requester_clock = Arc::new(ManualClock::new(Timestamp::new(1_000, 0).unwrap()));
+        let responder_clock = Arc::new(ManualClock::new(Timestamp::new(1_000, 0).unwrap()));
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage_and_clock(
+            "requester-long-term",
+            requester_filesystem,
+            requester_clock.clone(),
+        )?);
+        let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let responder_node = Arc::new(Node::with_local_storage_and_clock(
+            "responder-long-term",
+            responder_filesystem,
+            responder_clock,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        responder_node.set_peer_connector(connector.clone());
+        requester_node.add_known_peer(responder_node.address())?;
+
+        let requester_cli = CliService::new(requester_node.clone());
+        requester_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let requester_server =
+            spawn_registered_p2p_server(requester_node.clone(), connector.as_ref()).await?;
+        let responder_server =
+            spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
+        requester_cli
+            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: responder_node.address().to_string(),
+                }),
+            }))
+            .await?
+            .into_inner()
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        for _ in 0..3 {
+            requester_cli
+                .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+                    peer: Some(clirpc::Peer {
+                        onion_service_id: responder_node.address().to_string(),
+                    }),
+                }))
+                .await?
+                .into_inner()
+                .try_collect::<Vec<_>>()
+                .await?;
+            requester_clock.advance(Duration::from_secs(30 * 24 * 60 * 60));
+        }
+
+        assert_eq!(
+            peer_score_seconds(&requester_node, responder_node.address())?,
+            60 * 24 * 60 * 60
+        );
+
+        requester_server.abort();
+        responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stale_peer_can_recover_and_rebuild_score() -> anyhow::Result<()> {
+        let requester_clock = Arc::new(ManualClock::new(Timestamp::new(2_000, 0).unwrap()));
+        let responder_clock = Arc::new(ManualClock::new(Timestamp::new(2_000, 0).unwrap()));
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage_and_clock(
+            "requester-stale",
+            requester_filesystem,
+            requester_clock.clone(),
+        )?);
+        let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let responder_node = Arc::new(Node::with_local_storage_and_clock(
+            "responder-stale",
+            responder_filesystem,
+            responder_clock,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        responder_node.set_peer_connector(connector.clone());
+        requester_node.add_known_peer(responder_node.address())?;
+
+        let requester_cli = CliService::new(requester_node.clone());
+        requester_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-v1".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let requester_server =
+            spawn_registered_p2p_server(requester_node.clone(), connector.as_ref()).await?;
+        let responder_server =
+            spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
+        requester_cli
+            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: responder_node.address().to_string(),
+                }),
+            }))
+            .await?
+            .into_inner()
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        requester_clock.advance(Duration::from_secs(3_600));
+        requester_cli
+            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: responder_node.address().to_string(),
+                }),
+            }))
+            .await?
+            .into_inner()
+            .try_collect::<Vec<_>>()
+            .await?;
+        assert_eq!(
+            peer_score_seconds(&requester_node, responder_node.address())?,
+            0
+        );
+
+        requester_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-v2".to_vec(),
+                }),
+            }))
+            .await?;
+        requester_clock.advance(Duration::from_secs(1_800));
+        let failed_updates = requester_cli
+            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: responder_node.address().to_string(),
+                }),
+            }))
+            .await?
+            .into_inner()
+            .try_collect::<Vec<_>>()
+            .await?;
+        assert_eq!(failed_updates.last().map(|update| update.success), Some(false));
+        assert_eq!(
+            peer_score_seconds(&requester_node, responder_node.address())?,
+            -1_800
+        );
+
+        requester_cli
+            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: responder_node.address().to_string(),
+                }),
+            }))
+            .await?
+            .into_inner()
+            .try_collect::<Vec<_>>()
+            .await?;
+        requester_clock.advance(Duration::from_secs(3_600));
+        let recovered_updates = requester_cli
+            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: responder_node.address().to_string(),
+                }),
+            }))
+            .await?
+            .into_inner()
+            .try_collect::<Vec<_>>()
+            .await?;
+        assert_eq!(
+            recovered_updates.last().map(|update| update.success),
+            Some(true)
+        );
+        assert_eq!(
+            peer_score_seconds(&requester_node, responder_node.address())?,
+            1_800
+        );
+
+        requester_server.abort();
+        responder_server.abort();
+        Ok(())
+    }
 }
