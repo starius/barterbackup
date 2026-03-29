@@ -515,6 +515,8 @@ dependencies = [
  "clap",
  "clitls",
  "dirs 5.0.1",
+ "futures-util",
+ "netmock",
  "node",
  "protos",
  "storage",

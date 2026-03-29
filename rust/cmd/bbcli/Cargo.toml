@@ -11,10 +11,12 @@ tonic = { version = "0.14.2", features = ["transport", "tls-aws-lc"] }
 protos = { path = "../../crates/protos" }
 clitls = { path = "../../crates/clitls" }
 dirs = "5"
+futures-util = "0.3"
 
 [dev-dependencies]
 anyhow = "1"
 node = { path = "../../crates/node" }
+netmock = { path = "../../crates/netmock" }
 storage = { path = "../../crates/storage" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
