@@ -14,15 +14,15 @@ use protos::clirpc::barter_backup_client_server::{
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use storage::OsFilesystem;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio_rustls::server::TlsStream;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
 use tonic::{Response, Status};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// Config configures the BarterBackup daemon process.
 #[derive(Clone, Debug, Parser)]
@@ -53,24 +53,24 @@ impl Config {
 #[async_trait]
 pub trait PeerRuntimeFactory: Send + Sync {
     /// Start the peer runtime for `node` and return the running handle.
-    async fn start(&self, node: Arc<Node>) -> Result<StartedPeerRuntime>;
+    async fn start(&self, node: Arc<Node>) -> Result<StartedTask>;
 }
 
-/// StartedPeerRuntime owns the running peer server task and its shutdown token.
-pub struct StartedPeerRuntime {
+/// StartedTask owns one cancellable runtime task and its shutdown token.
+pub struct StartedTask {
     /// shutdown requests a graceful stop of the peer server task.
     shutdown: CancellationToken,
     /// task runs the peer-facing tonic server until shutdown is requested.
     task: tokio::task::JoinHandle<Result<()>>,
 }
 
-impl StartedPeerRuntime {
-    /// Build a new running peer runtime from a shutdown token and task handle.
+impl StartedTask {
+    /// Build a new runtime task from a shutdown token and task handle.
     fn new(shutdown: CancellationToken, task: tokio::task::JoinHandle<Result<()>>) -> Self {
         Self { shutdown, task }
     }
 
-    /// Stop the peer runtime and wait for the task to finish.
+    /// Stop the task and wait for it to finish.
     async fn shutdown(self) -> Result<()> {
         self.shutdown.cancel();
 
@@ -78,6 +78,21 @@ impl StartedPeerRuntime {
             Ok(result) => result,
             Err(error) if error.is_cancelled() => Ok(()),
             Err(error) => Err(anyhow!(error)),
+        }
+    }
+}
+
+/// MaintenanceConfig configures the daemon's periodic background maintenance.
+#[derive(Clone, Debug)]
+pub struct MaintenanceConfig {
+    /// interval is the delay between maintenance passes.
+    interval: Duration,
+}
+
+impl Default for MaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(60),
         }
     }
 }
@@ -97,7 +112,7 @@ impl TorPeerRuntimeFactory {
 
 #[async_trait]
 impl PeerRuntimeFactory for TorPeerRuntimeFactory {
-    async fn start(&self, node: Arc<Node>) -> Result<StartedPeerRuntime> {
+    async fn start(&self, node: Arc<Node>) -> Result<StartedTask> {
         // Bootstrap one shared Tor client and use it for both inbound and
         // outbound peer traffic.
         let transport = Arc::new(nettor::TorTransport::new(&self.tor_state_dir).await?);
@@ -131,7 +146,7 @@ impl PeerRuntimeFactory for TorPeerRuntimeFactory {
         });
 
         info!(onion = %node.address(), "started Tor peer runtime");
-        Ok(StartedPeerRuntime::new(shutdown, task))
+        Ok(StartedTask::new(shutdown, task))
     }
 }
 
@@ -150,7 +165,9 @@ struct UnlockedNode {
     /// node is the in-memory BarterBackup node backing local RPCs.
     node: Arc<Node>,
     /// peer_runtime runs the public peer-to-peer gRPC server.
-    peer_runtime: StartedPeerRuntime,
+    peer_runtime: StartedTask,
+    /// maintenance_runtime runs periodic recovery and contract checks.
+    maintenance_runtime: StartedTask,
 }
 
 /// DaemonService implements the local CLI RPC surface and daemon lifecycle.
@@ -161,6 +178,10 @@ pub struct DaemonService {
     started_at: Instant,
     /// peer_runtime_factory starts the peer-facing runtime during unlock.
     peer_runtime_factory: Arc<dyn PeerRuntimeFactory>,
+    /// maintenance_config configures background maintenance cadence.
+    maintenance_config: MaintenanceConfig,
+    /// maintenance_wakeup wakes the maintenance loop after local mutations.
+    maintenance_wakeup: Arc<Notify>,
     /// node_state stores the current lock/unlock lifecycle state.
     node_state: Mutex<DaemonNodeState>,
 }
@@ -175,10 +196,25 @@ struct DaemonRpcService {
 impl DaemonService {
     /// Create a daemon service rooted at `data_dir`.
     pub fn new(data_dir: PathBuf, peer_runtime_factory: Arc<dyn PeerRuntimeFactory>) -> Self {
+        Self::with_maintenance_config(
+            data_dir,
+            peer_runtime_factory,
+            MaintenanceConfig::default(),
+        )
+    }
+
+    /// Create a daemon service with an explicit maintenance configuration.
+    pub fn with_maintenance_config(
+        data_dir: PathBuf,
+        peer_runtime_factory: Arc<dyn PeerRuntimeFactory>,
+        maintenance_config: MaintenanceConfig,
+    ) -> Self {
         Self {
             data_dir,
             started_at: Instant::now(),
             peer_runtime_factory,
+            maintenance_config,
+            maintenance_wakeup: Arc::new(Notify::new()),
             node_state: Mutex::new(DaemonNodeState::Locked),
         }
     }
@@ -228,11 +264,31 @@ impl DaemonService {
         let node = Arc::new(Node::with_local_storage(password, filesystem)?);
         node.mark_started();
 
-        // Start the peer runtime only after the node has been constructed.
+        // Start the peer runtime and the maintenance loop only after the node
+        // has been constructed.
         let peer_runtime = self.peer_runtime_factory.start(node.clone()).await?;
+        let maintenance_runtime = self.start_maintenance_runtime(node.clone());
         info!(onion = %node.address(), data_dir = %self.data_dir.display(), "node unlocked");
 
-        Ok(UnlockedNode { node, peer_runtime })
+        Ok(UnlockedNode {
+            node,
+            peer_runtime,
+            maintenance_runtime,
+        })
+    }
+
+    /// Start the background maintenance loop for an unlocked node.
+    fn start_maintenance_runtime(&self, node: Arc<Node>) -> StartedTask {
+        let shutdown = CancellationToken::new();
+        let shutdown_signal = shutdown.clone();
+        let maintenance_wakeup = self.maintenance_wakeup.clone();
+        let maintenance_config = self.maintenance_config.clone();
+        let task = tokio::spawn(async move {
+            run_maintenance_loop(node, maintenance_wakeup, shutdown_signal, maintenance_config)
+                .await
+        });
+
+        StartedTask::new(shutdown, task)
     }
 
     /// Shut down the peer runtime if the daemon is currently unlocked.
@@ -242,9 +298,17 @@ impl DaemonService {
             std::mem::replace(&mut *node_state, DaemonNodeState::Locked)
         };
         match previous_state {
-            DaemonNodeState::Unlocked(unlocked) => unlocked.peer_runtime.shutdown().await,
+            DaemonNodeState::Unlocked(unlocked) => {
+                unlocked.maintenance_runtime.shutdown().await?;
+                unlocked.peer_runtime.shutdown().await
+            }
             DaemonNodeState::Locked | DaemonNodeState::Unlocking => Ok(()),
         }
+    }
+
+    /// Wake the maintenance loop after a local mutation.
+    fn wake_maintenance(&self) {
+        self.maintenance_wakeup.notify_one();
     }
 }
 
@@ -331,9 +395,11 @@ impl BarterBackupClient for DaemonService {
         &self,
         request: tonic::Request<clirpc::ConnectPeerRequest>,
     ) -> Result<Response<clirpc::ConnectPeerResponse>, Status> {
-        CliService::new(self.unlocked_node().await?)
+        let response = CliService::new(self.unlocked_node().await?)
             .connect_peer(request)
-            .await
+            .await?;
+        self.wake_maintenance();
+        Ok(response)
     }
 
     async fn connected_peers(
@@ -349,18 +415,22 @@ impl BarterBackupClient for DaemonService {
         &self,
         request: tonic::Request<clirpc::SetFileRequest>,
     ) -> Result<Response<clirpc::SetFileResponse>, Status> {
-        CliService::new(self.unlocked_node().await?)
+        let response = CliService::new(self.unlocked_node().await?)
             .set_file(request)
-            .await
+            .await?;
+        self.wake_maintenance();
+        Ok(response)
     }
 
     async fn delete_file(
         &self,
         request: tonic::Request<clirpc::DeleteFileRequest>,
     ) -> Result<Response<clirpc::DeleteFileResponse>, Status> {
-        CliService::new(self.unlocked_node().await?)
+        let response = CliService::new(self.unlocked_node().await?)
             .delete_file(request)
-            .await
+            .await?;
+        self.wake_maintenance();
+        Ok(response)
     }
 
     async fn get_file(
@@ -385,9 +455,11 @@ impl BarterBackupClient for DaemonService {
         &self,
         request: tonic::Request<clirpc::SetStorageConfigRequest>,
     ) -> Result<Response<clirpc::SetStorageConfigResponse>, Status> {
-        CliService::new(self.unlocked_node().await?)
+        let response = CliService::new(self.unlocked_node().await?)
             .set_storage_config(request)
-            .await
+            .await?;
+        self.wake_maintenance();
+        Ok(response)
     }
 
     async fn get_storage_config(
@@ -635,6 +707,55 @@ fn cleanup_local_cli_tls(key_dir: &Path) -> Result<()> {
     }
 }
 
+/// Run one background maintenance pass for `node`.
+async fn run_maintenance_pass(node: &Node) {
+    // Attempt recovery first so the local node restores its newest revision
+    // before it starts proposing or checking contracts.
+    if let Err(error) = node.recover_content_update().await {
+        warn!(%error, "background recovery pass failed");
+    }
+
+    // Then refresh, propose, and check contracts for every known peer.
+    for peer_onion in node.known_peers() {
+        match node.propose_contract_updates(&peer_onion).await {
+            Ok(_) => {}
+            Err(error) => {
+                warn!(peer = %peer_onion, %error, "background contract proposal failed");
+                continue;
+            }
+        }
+
+        if let Err(error) = node.check_contract_updates(&peer_onion).await {
+            warn!(peer = %peer_onion, %error, "background contract check failed");
+        }
+    }
+}
+
+/// Run the daemon maintenance loop until shutdown is requested.
+async fn run_maintenance_loop(
+    node: Arc<Node>,
+    maintenance_wakeup: Arc<Notify>,
+    shutdown: CancellationToken,
+    maintenance_config: MaintenanceConfig,
+) -> Result<()> {
+    // Use one timer for both recovery and contract maintenance for now. The
+    // loop also wakes immediately after local mutations via `maintenance_wakeup`.
+    let mut interval = tokio::time::interval(maintenance_config.interval);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            _ = interval.tick() => {}
+            _ = maintenance_wakeup.notified() => {}
+        }
+
+        run_maintenance_pass(node.as_ref()).await;
+    }
+
+    Ok(())
+}
+
 /// Wait for the first local shutdown signal.
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
@@ -746,7 +867,7 @@ mod tests {
 
     #[async_trait]
     impl PeerRuntimeFactory for NoopPeerRuntimeFactory {
-        async fn start(&self, _node: Arc<Node>) -> Result<StartedPeerRuntime> {
+        async fn start(&self, _node: Arc<Node>) -> Result<StartedTask> {
             let shutdown = CancellationToken::new();
             let shutdown_signal = shutdown.clone();
             let task = tokio::spawn(async move {
@@ -754,16 +875,79 @@ mod tests {
                 Ok(())
             });
 
-            Ok(StartedPeerRuntime::new(shutdown, task))
+            Ok(StartedTask::new(shutdown, task))
         }
     }
 
     /// Build a daemon service rooted at a fresh temp directory.
     fn test_service(temp_dir: &TempDir) -> DaemonService {
-        DaemonService::new(
+        DaemonService::with_maintenance_config(
             temp_dir.path().to_path_buf(),
             Arc::new(NoopPeerRuntimeFactory),
+            MaintenanceConfig {
+                interval: Duration::from_secs(60),
+            },
         )
+    }
+
+    /// MockPeerRuntimeFactory starts peer servers over the TLS-backed mock
+    /// transport so daemon tests can exercise background maintenance.
+    struct MockPeerRuntimeFactory {
+        connector: Arc<netmock::MockPeerConnector>,
+    }
+
+    #[async_trait]
+    impl PeerRuntimeFactory for MockPeerRuntimeFactory {
+        async fn start(&self, node: Arc<Node>) -> Result<StartedTask> {
+            node.set_peer_connector(self.connector.clone());
+            let listener = netmock::bind_peer_listener(&node.ed25519_keypair().secret).await?;
+            let endpoint = listener.endpoint().to_string();
+            self.connector.register_peer(node.address(), &endpoint);
+
+            let shutdown = CancellationToken::new();
+            let shutdown_signal = shutdown.clone();
+            let task = tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(BarterBackupServerServer::new(P2pService::new(node)))
+                    .serve_with_incoming_shutdown(listener.into_incoming(), async move {
+                        shutdown_signal.cancelled().await;
+                    })
+                    .await
+                    .map_err(anyhow::Error::from)
+            });
+
+            Ok(StartedTask::new(shutdown, task))
+        }
+    }
+
+    /// Return the unlocked node owned by a daemon service.
+    async fn unlocked_node(service: &DaemonService) -> Arc<Node> {
+        let node_state = service.node_state.lock().await;
+        match &*node_state {
+            DaemonNodeState::Unlocked(unlocked) => unlocked.node.clone(),
+            DaemonNodeState::Locked | DaemonNodeState::Unlocking => {
+                panic!("daemon was not unlocked")
+            }
+        }
+    }
+
+    /// Poll an async condition until it becomes true or `timeout` elapses.
+    async fn wait_for_async<F, Fut>(timeout: Duration, mut condition: F) -> anyhow::Result<()>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<bool>>,
+    {
+        let start = Instant::now();
+        loop {
+            if condition().await? {
+                return Ok(());
+            }
+            if start.elapsed() >= timeout {
+                anyhow::bail!("timed out waiting for async condition");
+            }
+
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -853,6 +1037,159 @@ mod tests {
         assert_eq!(listed.name, vec!["alpha.txt".to_string()]);
 
         service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_maintenance_syncs_peer_content() -> Result<()> {
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        let maintenance_config = MaintenanceConfig {
+            interval: Duration::from_millis(50),
+        };
+        let local_dir = TempDir::new()?;
+        let remote_dir = TempDir::new()?;
+        let local_service = DaemonService::with_maintenance_config(
+            local_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            maintenance_config.clone(),
+        );
+        let remote_service = DaemonService::with_maintenance_config(
+            remote_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            maintenance_config,
+        );
+
+        local_service
+            .unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: "local-password".to_string(),
+            }))
+            .await?;
+        remote_service
+            .unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: "remote-password".to_string(),
+            }))
+            .await?;
+
+        let remote_onion = unlocked_node(&remote_service).await.address().to_string();
+        local_service
+            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: remote_onion.clone(),
+                }),
+            }))
+            .await?;
+        local_service
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        wait_for_async(Duration::from_secs(2), || {
+            let local_service = &local_service;
+            let remote_onion = remote_onion.clone();
+            async move {
+                let contracts = local_service
+                    .get_contracts(tonic::Request::new(clirpc::GetContractsRequest {}))
+                    .await?
+                    .into_inner()
+                    .contracts;
+                Ok(contracts.into_iter().any(|contract| {
+                    contract
+                        .peer
+                        .as_ref()
+                        .is_some_and(|peer| peer.onion_service_id == remote_onion)
+                        && contract.online
+                        && contract.our_content_synced
+                }))
+            }
+        })
+        .await?;
+
+        local_service.shutdown().await?;
+        remote_service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_maintenance_increases_peer_score() -> Result<()> {
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        let maintenance_config = MaintenanceConfig {
+            interval: Duration::from_millis(200),
+        };
+        let local_dir = TempDir::new()?;
+        let remote_dir = TempDir::new()?;
+        let local_service = DaemonService::with_maintenance_config(
+            local_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            maintenance_config.clone(),
+        );
+        let remote_service = DaemonService::with_maintenance_config(
+            remote_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            maintenance_config,
+        );
+
+        local_service
+            .unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: "local-score".to_string(),
+            }))
+            .await?;
+        remote_service
+            .unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: "remote-score".to_string(),
+            }))
+            .await?;
+
+        let remote_onion = unlocked_node(&remote_service).await.address().to_string();
+        local_service
+            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: remote_onion.clone(),
+                }),
+            }))
+            .await?;
+        local_service
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        wait_for_async(Duration::from_secs(4), || {
+            let local_service = &local_service;
+            let remote_onion = remote_onion.clone();
+            async move {
+                let contracts = local_service
+                    .get_contracts(tonic::Request::new(clirpc::GetContractsRequest {}))
+                    .await?
+                    .into_inner()
+                    .contracts;
+                Ok(contracts.into_iter().any(|contract| {
+                    contract
+                        .peer
+                        .as_ref()
+                        .is_some_and(|peer| peer.onion_service_id == remote_onion)
+                        && contract.their_remaining_seconds > 0
+                }))
+            }
+        })
+        .await?;
+
+        local_service.shutdown().await?;
+        remote_service.shutdown().await?;
         Ok(())
     }
 }
