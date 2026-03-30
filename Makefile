@@ -48,10 +48,13 @@ ifndef STATIC_TARGET
 	$(error build-static requires an x86_64-linux or aarch64-linux host)
 endif
 	# Work around a current nightly rustc ICE in MIR jump-threading for musl.
+	# Keep static builds in a per-target cargo dir and disable pipelining to
+	# avoid stale or missing rmeta artifacts on reused local build trees.
 	env -u CC -u CXX -u AR \
 		$(STATIC_CC_ENV) \
+		CARGO_BUILD_PIPELINING=false \
 		RUSTFLAGS="-Zmir-opt-level=0" \
-		CARGO_TARGET_DIR=$(STATIC_TARGET_DIR) \
+		CARGO_TARGET_DIR=$(STATIC_TARGET_DIR)/$(STATIC_TARGET) \
 		$(CARGO) build --release --target $(STATIC_TARGET) -p bbd -p bbcli
 
 build-windows:
