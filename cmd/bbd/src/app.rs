@@ -265,6 +265,8 @@ pub struct DaemonService {
     maintenance_wakeup: Arc<Notify>,
     /// node_state stores the current lock/unlock lifecycle state.
     node_state: Mutex<DaemonNodeState>,
+    /// shutdown_request cancels the local RPC server for graceful daemon stop.
+    shutdown_request: CancellationToken,
 }
 
 /// DaemonRpcService is a clonable tonic service wrapper around `DaemonService`.
@@ -293,6 +295,7 @@ impl DaemonService {
             maintenance_config,
             maintenance_wakeup: Arc::new(Notify::new()),
             node_state: Mutex::new(DaemonNodeState::Locked),
+            shutdown_request: CancellationToken::new(),
         }
     }
 
@@ -396,6 +399,11 @@ impl DaemonService {
     fn wake_maintenance(&self) {
         self.maintenance_wakeup.notify_one();
     }
+
+    /// Return the cancellation token used to stop the local daemon runtime.
+    fn shutdown_request(&self) -> CancellationToken {
+        self.shutdown_request.clone()
+    }
 }
 
 #[tonic::async_trait]
@@ -475,6 +483,18 @@ impl BarterBackupClient for DaemonService {
                 Err(status)
             }
         }
+    }
+
+    async fn stop(
+        &self,
+        _request: tonic::Request<clirpc::StopRequest>,
+    ) -> Result<Response<clirpc::StopResponse>, Status> {
+        let shutdown_request = self.shutdown_request.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            shutdown_request.cancel();
+        });
+        Ok(Response::new(clirpc::StopResponse {}))
     }
 
     async fn connect_peer(
@@ -617,6 +637,13 @@ impl BarterBackupClient for DaemonRpcService {
         request: tonic::Request<clirpc::UnlockRequest>,
     ) -> Result<Response<clirpc::UnlockResponse>, Status> {
         self.daemon.unlock(request).await
+    }
+
+    async fn stop(
+        &self,
+        request: tonic::Request<clirpc::StopRequest>,
+    ) -> Result<Response<clirpc::StopResponse>, Status> {
+        self.daemon.stop(request).await
     }
 
     async fn connect_peer(
@@ -936,6 +963,7 @@ where
     // Prepare local CLI auth material before we accept any local connections.
     let local_cli_tls = prepare_local_cli_tls(&data_dir)?;
     let service = Arc::new(DaemonService::new(data_dir.clone(), peer_runtime_factory));
+    let shutdown = service.shutdown_request();
     let listener = tokio::net::TcpListener::bind(&config.cli_addr).await?;
     let local_addr = listener.local_addr()?;
     let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(local_cli_tls.server_tls));
@@ -964,7 +992,6 @@ where
         }
     });
 
-    let shutdown = CancellationToken::new();
     let server_shutdown = shutdown.clone();
     let rpc_service = service.clone();
     let mut server_task = tokio::spawn(async move {
@@ -1029,7 +1056,7 @@ mod tests {
     use super::*;
     use bbcli::{
         connect_client_with_keys_dir, get_file_with_client, list_files_with_client,
-        set_file_with_client, unlock_with_keys_dir,
+        set_file_with_client, stop_with_client, unlock_with_keys_dir,
     };
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -1318,6 +1345,39 @@ mod tests {
 
         shutdown.cancel();
         daemon_task.await??;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bbcli_stop_gracefully_shuts_down_and_cleans_keys() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let cli_addr = reserve_loopback_addr()?;
+        let daemon_addr = format!("https://{cli_addr}");
+        let config = Config {
+            cli_addr,
+            data_dir: Some(temp_dir.path().to_path_buf()),
+        };
+        let daemon_task = tokio::spawn(async move {
+            run_with_peer_runtime_until(config, Arc::new(NoopPeerRuntimeFactory), async move {
+                std::future::pending::<()>().await;
+            })
+            .await
+        });
+        let keys_dir = temp_dir.path().join("cli-keys");
+
+        unlock_with_keys_dir(
+            &daemon_addr,
+            "correct horse battery staple",
+            &keys_dir,
+            Duration::from_secs(5),
+        )
+        .await?;
+
+        let mut client = connect_client_with_keys_dir(&daemon_addr, &keys_dir).await?;
+        stop_with_client(&mut client).await?;
+        let _ = tokio::time::timeout(Duration::from_secs(5), daemon_task).await??;
+
+        assert!(!keys_dir.exists());
         Ok(())
     }
 

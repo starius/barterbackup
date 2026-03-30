@@ -1579,6 +1579,15 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         Ok(Response::new(clirpc::UnlockResponse {}))
     }
 
+    async fn stop(
+        &self,
+        _request: tonic::Request<clirpc::StopRequest>,
+    ) -> Result<tonic::Response<clirpc::StopResponse>, tonic::Status> {
+        Err(Status::failed_precondition(
+            "graceful stop is only supported by the daemon",
+        ))
+    }
+
     async fn connect_peer(
         &self,
         request: tonic::Request<clirpc::ConnectPeerRequest>,

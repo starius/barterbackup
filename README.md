@@ -124,9 +124,15 @@ CLI:
 Important current behavior:
 
 - the daemon generates local admin mTLS keys under `<data-dir>/cli-keys`
-- those keys are currently regenerated on each daemon start
+- those keys are regenerated on each daemon start and are valid only for that
+  daemon session
+- graceful daemon shutdown removes `<data-dir>/cli-keys` because those session
+  keys are no longer valid after exit
 - if you use a custom `BBD_DATA_DIR`, point `BBCLI_CLI_KEYS_DIR` at the same
   directory's `cli-keys` subdirectory
+- if `bbd` runs over SSH, you can copy that session `cli-keys` directory to
+  your local machine and run `bbcli` locally against the forwarded daemon
+  address with `BBCLI_CLI_KEYS_DIR` pointing at the copied keys
 - on operating systems that support owner-only modes, `BBD_DATA_DIR`,
   `<data-dir>/cli-keys`, and the files written under them are tightened to
   owner-only permissions
@@ -182,6 +188,7 @@ bbcli get-contracts
 bbcli propose-contract <peer-onion-id>
 bbcli check-contract <peer-onion-id>
 bbcli recover-content
+bbcli stop
 ```
 
 ## Security model
@@ -201,5 +208,7 @@ bbcli recover-content
 - `bbd` starts locked and only serves local admin RPC until `Unlock`
 - `bbcli unlock` waits for the daemon to become ready instead of failing on
   early startup races
+- `bbcli` waits briefly for `bbd` to create the session `cli-keys` instead of
+  creating that directory on its own
 - protobufs are compiled at build time; there are no checked-in generated Rust
   stubs to refresh manually

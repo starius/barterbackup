@@ -14,6 +14,9 @@ service BarterBackupClient {
     // for encryption, onion service private key, and for authentication.
     rpc Unlock(UnlockRequest) returns (UnlockResponse);
 
+    // Stop asks the daemon to shut down gracefully.
+    rpc Stop(StopRequest) returns (StopResponse);
+
     // ConnectPeer adds the peer to the list of known peers. The daemon will
     // try to connect to it.
     rpc ConnectPeer(ConnectPeerRequest) returns (ConnectPeerResponse);
@@ -92,6 +95,10 @@ message UnlockRequest {
 }
 
 message UnlockResponse {}
+
+message StopRequest {}
+
+message StopResponse {}
 
 message Peer {
     // onion_service_id is the Tor onion service identifier of the peer.

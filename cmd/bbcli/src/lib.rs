@@ -18,7 +18,7 @@ use protos::clirpc::{
     CheckContractRequest, ConnectPeerRequest, DeleteFileRequest, File, GetContractsRequest,
     GetFileRequest, GetStorageConfigRequest, HealthCheckRequest, ListFilesRequest,
     ProposeContractRequest, RecoverContentRequest, SetFileRequest, SetStorageConfigRequest,
-    StorageConfig, UnlockRequest,
+    StopRequest, StorageConfig, UnlockRequest,
 };
 use tokio::time::sleep;
 use tonic::transport::Channel;
@@ -29,6 +29,9 @@ pub const DEFAULT_DAEMON_ADDR: &str = "https://127.0.0.1:9911";
 
 /// DEFAULT_UNLOCK_WAIT_SECS is the default unlock readiness timeout.
 const DEFAULT_UNLOCK_WAIT_SECS: u64 = 30;
+
+/// DEFAULT_KEYS_WAIT_SECS is the default wait for daemon-created session keys.
+const DEFAULT_KEYS_WAIT_SECS: u64 = 5;
 
 /// UNLOCK_RETRY_INTERVAL is the delay between unlock readiness probes.
 const UNLOCK_RETRY_INTERVAL: Duration = Duration::from_millis(250);
@@ -64,6 +67,9 @@ enum Command {
         /// password is the inline main password or seed string.
         password: Option<String>,
     },
+
+    /// Ask the daemon to shut down gracefully.
+    Stop,
 
     /// Print the names of all files in the latest encrypted content blob.
     ListFiles,
@@ -181,6 +187,7 @@ async fn run_parsed(args: Args) -> Result<()> {
             )
             .await?
         }
+        Command::Stop => stop(&args.daemon_addr).await?,
         Command::ListFiles => list_files(&args.daemon_addr).await?,
         Command::SetFile { name, path } => set_file(&args.daemon_addr, &name, &path).await?,
         Command::GetFile { name, out } => get_file(&args.daemon_addr, &name, &out).await?,
@@ -305,6 +312,12 @@ async fn healthcheck(addr: &str) -> Result<()> {
 async fn unlock(addr: &str, password: &str, wait_timeout: Duration) -> Result<()> {
     let keys_dir = default_keys_dir();
     unlock_with_keys_dir(addr, password, &keys_dir, wait_timeout).await
+}
+
+/// Ask the daemon to stop gracefully.
+async fn stop(addr: &str) -> Result<()> {
+    let mut client = connect_client(addr).await?;
+    stop_with_client(&mut client).await
 }
 
 /// Print the stored file names.
@@ -467,6 +480,8 @@ async fn recover_content(addr: &str) -> Result<()> {
 /// Connect to the daemon using the default local key directory.
 async fn connect_client(addr: &str) -> Result<BarterBackupClientClient<Channel>> {
     let keys_dir = default_keys_dir();
+    let deadline = Instant::now() + Duration::from_secs(DEFAULT_KEYS_WAIT_SECS);
+    wait_for_cli_keys_until(&keys_dir, deadline).await?;
     connect_client_with_keys_dir(addr, &keys_dir).await
 }
 
@@ -488,6 +503,7 @@ pub async fn unlock_with_keys_dir(
     wait_timeout: Duration,
 ) -> Result<()> {
     let deadline = Instant::now() + wait_timeout;
+    wait_for_cli_keys_until(keys_dir, deadline).await?;
     let mut last_error = anyhow!("daemon is not ready");
 
     loop {
@@ -520,6 +536,36 @@ pub async fn unlock_with_keys_dir(
     }
 }
 
+/// Wait until the daemon publishes the local CLI session keys in `keys_dir`.
+async fn wait_for_cli_keys_until(keys_dir: &Path, deadline: Instant) -> Result<()> {
+    let server_pub = keys_dir.join("server.pub");
+    let client_key = keys_dir.join("client.key");
+    if server_pub.is_file() && client_key.is_file() {
+        return Ok(());
+    }
+
+    eprintln!(
+        "waiting for bbd to create cli keys in directory {}",
+        keys_dir.display()
+    );
+
+    loop {
+        if server_pub.is_file() && client_key.is_file() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "daemon did not create local cli keys in {} (expected {} and {})",
+                keys_dir.display(),
+                server_pub.display(),
+                client_key.display()
+            );
+        }
+
+        sleep(UNLOCK_RETRY_INTERVAL).await;
+    }
+}
+
 /// Report whether an unlock failure should be retried while the daemon starts.
 fn is_retryable_unlock_error(error: &anyhow::Error) -> bool {
     error
@@ -537,6 +583,12 @@ pub async fn unlock_with_client(
             main_password: password.to_string(),
         })
         .await?;
+    Ok(())
+}
+
+/// Send one graceful-stop request through an already connected client.
+pub async fn stop_with_client(client: &mut BarterBackupClientClient<Channel>) -> Result<()> {
+    client.stop(StopRequest {}).await?;
     Ok(())
 }
 
@@ -783,6 +835,43 @@ mod tests {
         let mut cursor = Cursor::new(b"\n".to_vec());
 
         assert!(read_password_from_reader(&mut cursor).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wait_for_cli_keys_does_not_create_missing_directory() {
+        let temp_dir = tempdir().unwrap();
+        let keys_dir = temp_dir.path().join("cli-keys");
+
+        let error = wait_for_cli_keys_until(&keys_dir, Instant::now() + Duration::from_millis(50))
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("did not create local cli keys"));
+        assert!(!keys_dir.exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn wait_for_cli_keys_accepts_files_created_later() {
+        let temp_dir = tempdir().unwrap();
+        let keys_dir = temp_dir.path().join("cli-keys");
+        let server_pub = keys_dir.join("server.pub");
+        let client_key = keys_dir.join("client.key");
+
+        tokio::spawn({
+            let keys_dir = keys_dir.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                fs::create_dir_all(&keys_dir).unwrap();
+                fs::write(server_pub, b"public").unwrap();
+                fs::write(client_key, b"private").unwrap();
+            }
+        });
+
+        wait_for_cli_keys_until(&keys_dir, Instant::now() + Duration::from_secs(1))
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

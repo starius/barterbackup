@@ -18,7 +18,7 @@
 //! - Peer clients pin the expected server onion hostname by validating the
 //!   presented Ed25519 certificate against that hostname.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use ed25519_dalek::{Keypair, PublicKey, SecretKey, SignatureError};
 use hyper_util::rt::TokioIo;
 use keys::onion_hostname_from_public_key;
@@ -77,17 +77,36 @@ pub fn write_keys(
 /// Read the local CLI pinning files written by [`write_keys`].
 pub fn read_keys(dir: impl AsRef<Path>) -> Result<(PublicKey, SecretKey)> {
     let dir = dir.as_ref();
-    ensure_owner_only_dir(dir).context("tighten cli-keys dir")?;
-    restrict_owner_only_file(&dir.join("server.pub")).context("tighten server.pub")?;
-    restrict_owner_only_file(&dir.join("client.key")).context("tighten client.key")?;
-    let spki_pem = fs::read_to_string(dir.join("server.pub")).context("read server.pub")?;
+    if !dir.is_dir() {
+        bail!("local CLI key directory {} does not exist", dir.display());
+    }
+
+    let server_pub_path = dir.join("server.pub");
+    if !server_pub_path.is_file() {
+        bail!(
+            "expected local CLI server key file at {}",
+            server_pub_path.display()
+        );
+    }
+
+    let client_key_path = dir.join("client.key");
+    if !client_key_path.is_file() {
+        bail!(
+            "expected local CLI client key file at {}",
+            client_key_path.display()
+        );
+    }
+
+    restrict_owner_only_file(&server_pub_path).context("tighten server.pub")?;
+    restrict_owner_only_file(&client_key_path).context("tighten client.key")?;
+    let spki_pem = fs::read_to_string(&server_pub_path).context("read server.pub")?;
     let spki = pem::parse(spki_pem).context("parse server.pub pem")?;
     if spki.tag() != "PUBLIC KEY" {
         return Err(anyhow!("invalid server.pub tag"));
     }
     let server_pub = spki_der_to_public_key(spki.contents())?;
 
-    let client_pem = fs::read_to_string(dir.join("client.key")).context("read client.key")?;
+    let client_pem = fs::read_to_string(&client_key_path).context("read client.key")?;
     let pem = pem::parse(client_pem).context("parse client.key pem")?;
     if pem.tag() != "PRIVATE KEY" {
         return Err(anyhow!("invalid client.key tag"));
@@ -645,6 +664,12 @@ mod tests {
         ) -> std::result::Result<tonic::Response<protos::clirpc::UnlockResponse>, Status> {
             Err(Status::unimplemented(""))
         }
+        async fn stop(
+            &self,
+            _: Request<protos::clirpc::StopRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::StopResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
         async fn connect_peer(
             &self,
             _: Request<protos::clirpc::ConnectPeerRequest>,
@@ -758,6 +783,18 @@ mod tests {
             assert_eq!(client_mode, 0o600);
         }
         Ok(())
+    }
+
+    #[test]
+    fn read_keys_requires_existing_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let missing = temp_dir.path().join("missing-cli-keys");
+
+        let error = read_keys(&missing).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("local CLI key directory"));
+        assert!(!missing.exists());
     }
 
     // Helper: start a PQ-only TLS clirpc server on localhost and return address.
