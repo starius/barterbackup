@@ -53,6 +53,65 @@ fn max_peer_content_bytes_i64() -> i64 {
     i64::try_from(transport::MAX_PEER_CONTENT_BYTES).unwrap_or(i64::MAX)
 }
 
+/// DEFAULT_ALLOCATED_STORAGE_FOR_PEERS is the default peer-cache budget.
+const DEFAULT_ALLOCATED_STORAGE_FOR_PEERS: i64 = 64 * 1024 * 1024;
+
+/// StorageClass splits mirrored peer blobs into reserved and best-effort sets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StorageClass {
+    /// Reserved blobs belong to peers whose score is currently above zero.
+    Reserved,
+    /// BestEffort blobs belong only to peers whose score is zero or negative.
+    BestEffort,
+}
+
+/// PeerBlobReference is one peer's reference to one mirrored blob.
+#[derive(Clone, Debug)]
+struct PeerBlobReference {
+    /// peer_public_key identifies the peer that references the blob.
+    peer_public_key: Vec<u8>,
+    /// score_seconds is the peer's persisted score from our perspective.
+    score_seconds: i64,
+    /// score_measured_at is when `score_seconds` was last updated.
+    score_measured_at: i64,
+}
+
+/// MirroredBlobUsage groups all peer references to one locally cached blob.
+#[derive(Clone, Debug)]
+struct MirroredBlobUsage {
+    /// content_id identifies the mirrored blob.
+    content_id: Vec<u8>,
+    /// blob_len is the locally stored encrypted blob length.
+    blob_len: i64,
+    /// references are the peers that currently point at this blob.
+    references: Vec<PeerBlobReference>,
+}
+
+/// StorageAdmission describes whether a new mirrored blob can be kept locally.
+enum StorageAdmission {
+    /// Store keeps the new blob and evicts the listed best-effort blobs first.
+    Store { evict_content_ids: Vec<Vec<u8>> },
+    /// TrackOnly remembers the peer's latest content id without caching bytes.
+    TrackOnly,
+}
+
+/// Build the default local storage policy.
+fn default_storage_config() -> clirpc::StorageConfig {
+    clirpc::StorageConfig {
+        allocated_storage_for_peers: DEFAULT_ALLOCATED_STORAGE_FOR_PEERS,
+        min_replicas: 0,
+    }
+}
+
+/// Classify one peer score into reserved or best-effort storage.
+fn storage_class(score_seconds: i64) -> StorageClass {
+    if score_seconds > 0 {
+        StorageClass::Reserved
+    } else {
+        StorageClass::BestEffort
+    }
+}
+
 /// Validate one peer-visible content identifier.
 fn validate_peer_content_id(content_id: &[u8]) -> Result<(), Status> {
     if content_id.len() != CONTENT_ID_LEN {
@@ -162,7 +221,7 @@ impl Node {
             started_at: Mutex::new(None),
             store,
             known_peers: Mutex::new(known_peers),
-            storage_config: Mutex::new(clirpc::StorageConfig::default()),
+            storage_config: Mutex::new(default_storage_config()),
             peer_connector: Mutex::new(None),
         })
     }
@@ -465,6 +524,203 @@ impl Node {
         })
     }
 
+    /// Return the configured peer-storage budget in bytes.
+    fn storage_budget_bytes(&self) -> i64 {
+        self.storage_config
+            .lock()
+            .unwrap()
+            .allocated_storage_for_peers
+            .max(0)
+    }
+
+    /// Group all currently cached mirrored blobs with the peers that reference them.
+    fn mirrored_blob_usage(&self) -> Result<Vec<MirroredBlobUsage>, Status> {
+        self.with_store(|store| {
+            let mut lengths = BTreeMap::<Vec<u8>, i64>::new();
+            let mut usage = BTreeMap::<Vec<u8>, MirroredBlobUsage>::new();
+
+            // Reuse one decrypted length per content id so shared mirrored blobs
+            // are accounted only once while still tracking all peer references.
+            for peer in store.peers() {
+                if peer.content_id.is_empty() {
+                    continue;
+                }
+
+                let blob_len = if let Some(blob_len) = lengths.get(&peer.content_id) {
+                    *blob_len
+                } else {
+                    let blob_len = match store.read_mirrored_blob(&peer.content_id) {
+                        Ok(blob) => i64::try_from(blob.len()).unwrap_or(i64::MAX),
+                        Err(StorageError::FileNotFound)
+                        | Err(StorageError::RecoveryRequired(_)) => 0,
+                        Err(error) => return Err(error),
+                    };
+                    lengths.insert(peer.content_id.clone(), blob_len);
+                    blob_len
+                };
+                if blob_len == 0 {
+                    continue;
+                }
+
+                usage
+                    .entry(peer.content_id.clone())
+                    .or_insert_with(|| MirroredBlobUsage {
+                        content_id: peer.content_id.clone(),
+                        blob_len,
+                        references: Vec::new(),
+                    });
+                usage
+                    .get_mut(&peer.content_id)
+                    .expect("usage entry was just inserted")
+                    .references
+                    .push(PeerBlobReference {
+                        peer_public_key: peer.onion_pubkey,
+                        score_seconds: peer.score_seconds,
+                        score_measured_at: peer.score_measured_at,
+                    });
+            }
+
+            Ok(usage.into_values().collect())
+        })
+    }
+
+    /// Compute the largest peer blob we can still accept under the storage policy.
+    fn maximum_peer_content_accepted_bytes(&self) -> Result<i64, Status> {
+        let budget = self.storage_budget_bytes();
+        let protected_used = self
+            .mirrored_blob_usage()?
+            .into_iter()
+            .filter(|usage| {
+                usage.references.iter().any(|reference| {
+                    storage_class(reference.score_seconds) == StorageClass::Reserved
+                })
+            })
+            .fold(0i64, |used, usage| used.saturating_add(usage.blob_len));
+
+        Ok((budget.saturating_sub(protected_used))
+            .max(0)
+            .min(max_peer_content_bytes_i64()))
+    }
+
+    /// Plan whether a new mirrored blob can be stored and which blobs to evict first.
+    fn plan_mirrored_blob_storage(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+        previous_content_id: Option<&[u8]>,
+        new_content_id: &[u8],
+        new_content_length: i64,
+    ) -> Result<StorageAdmission, Status> {
+        let budget = self.storage_budget_bytes();
+        if new_content_length <= 0 {
+            return Err(Status::invalid_argument(
+                "peer content length must be positive",
+            ));
+        }
+        if new_content_length > max_peer_content_bytes_i64() {
+            return Err(Status::resource_exhausted("peer content is too large"));
+        }
+
+        let current_score = self.peer_score_state(peer_public_key)?.0;
+        let incoming_class = storage_class(current_score);
+        let peer_key = peer_public_key.as_bytes();
+        let mut total_used = 0i64;
+        let mut protected_used = 0i64;
+        let mut evictable = Vec::<(Vec<u8>, i64, i64, i64)>::new();
+
+        // Model the storage set after the peer metadata is updated so we can
+        // replace one peer's old revision with its new one in a single step.
+        for usage in self.mirrored_blob_usage()? {
+            if usage.content_id == new_content_id {
+                return Ok(StorageAdmission::Store {
+                    evict_content_ids: Vec::new(),
+                });
+            }
+
+            let remaining_references = usage
+                .references
+                .into_iter()
+                .filter(|reference| {
+                    !(reference.peer_public_key.as_slice() == peer_key
+                        && previous_content_id
+                            .is_some_and(|previous| previous == usage.content_id.as_slice()))
+                })
+                .collect::<Vec<_>>();
+            if remaining_references.is_empty() {
+                continue;
+            }
+
+            total_used = total_used.saturating_add(usage.blob_len);
+            if remaining_references
+                .iter()
+                .any(|reference| storage_class(reference.score_seconds) == StorageClass::Reserved)
+            {
+                protected_used = protected_used.saturating_add(usage.blob_len);
+            } else {
+                let best_score = remaining_references
+                    .iter()
+                    .map(|reference| reference.score_seconds)
+                    .max()
+                    .unwrap_or_default();
+                let newest_measurement = remaining_references
+                    .iter()
+                    .map(|reference| reference.score_measured_at)
+                    .max()
+                    .unwrap_or_default();
+                evictable.push((
+                    usage.content_id,
+                    usage.blob_len,
+                    best_score,
+                    newest_measurement,
+                ));
+            }
+        }
+
+        // Positive-score peers reserve storage first; if reserved content alone
+        // would exceed the budget, we can only track the latest revision.
+        if incoming_class == StorageClass::Reserved
+            && protected_used.saturating_add(new_content_length) > budget
+        {
+            return Ok(StorageAdmission::TrackOnly);
+        }
+
+        // Evict the worst best-effort blobs first until the new blob fits.
+        evictable.sort_by(|left, right| {
+            left.2
+                .cmp(&right.2)
+                .then(left.3.cmp(&right.3))
+                .then(left.1.cmp(&right.1))
+                .then(left.0.cmp(&right.0))
+        });
+
+        let mut evict_content_ids = Vec::new();
+        for (content_id, blob_len, _, _) in evictable {
+            if total_used.saturating_add(new_content_length) <= budget {
+                break;
+            }
+            total_used = total_used.saturating_sub(blob_len);
+            evict_content_ids.push(content_id);
+        }
+
+        if total_used.saturating_add(new_content_length) > budget {
+            return Ok(StorageAdmission::TrackOnly);
+        }
+
+        Ok(StorageAdmission::Store { evict_content_ids })
+    }
+
+    /// Remove mirrored blobs that were selected as evictable best-effort cache entries.
+    fn evict_mirrored_blobs(&self, content_ids: &[Vec<u8>]) -> Result<(), Status> {
+        self.with_store(|store| {
+            for content_id in content_ids {
+                match store.remove_mirrored_blob(content_id) {
+                    Ok(()) | Err(StorageError::FileNotFound) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// Mirror or clear the latest advertised content for a peer.
     async fn sync_peer_content_info(
         &self,
@@ -486,6 +742,7 @@ impl Node {
                 validate_peer_content_info(content_info)?;
                 let content_id = content_id_hex(&content_info.content_id);
                 let mirrored_state = self.mirrored_blob_state(&content_info.content_id)?;
+                let mut storage_error = None;
 
                 // Refresh the mirrored blob whenever it is missing or locally
                 // corrupted so the peer cache never depends on stale bytes.
@@ -500,23 +757,53 @@ impl Node {
                             "discarded corrupt mirrored peer blob before refresh"
                         );
                     }
-                    let blob = self
-                        .download_peer_blob(
-                            peer_onion,
-                            &content_info.content_id,
-                            content_info.content_length,
-                        )
-                        .await?;
-                    self.with_store(|store| {
-                        store.write_mirrored_blob(&content_info.content_id, &blob)
-                    })?;
-                    info!(
-                        peer = %peer_onion,
-                        content_id = %content_id,
-                        content_length = content_info.content_length,
-                        downloaded_bytes = blob.len(),
-                        "refreshed mirrored peer blob"
-                    );
+                    match self.plan_mirrored_blob_storage(
+                        peer_public_key,
+                        previous_content_id.as_deref(),
+                        &content_info.content_id,
+                        content_info.content_length,
+                    )? {
+                        StorageAdmission::Store { evict_content_ids } => {
+                            if !evict_content_ids.is_empty() {
+                                self.evict_mirrored_blobs(&evict_content_ids)?;
+                                info!(
+                                    peer = %peer_onion,
+                                    evicted_blob_count = evict_content_ids.len(),
+                                    "evicted best-effort mirrored peer blobs to make room"
+                                );
+                            }
+                            let blob = self
+                                .download_peer_blob(
+                                    peer_onion,
+                                    &content_info.content_id,
+                                    content_info.content_length,
+                                )
+                                .await?;
+                            self.with_store(|store| {
+                                store.write_mirrored_blob(&content_info.content_id, &blob)
+                            })?;
+                            info!(
+                                peer = %peer_onion,
+                                content_id = %content_id,
+                                content_length = content_info.content_length,
+                                downloaded_bytes = blob.len(),
+                                "refreshed mirrored peer blob"
+                            );
+                        }
+                        StorageAdmission::TrackOnly => {
+                            warn!(
+                                peer = %peer_onion,
+                                content_id = %content_id,
+                                content_length = content_info.content_length,
+                                allocated_storage_for_peers = self.storage_budget_bytes(),
+                                maximum_peer_content_accepted_bytes = self.maximum_peer_content_accepted_bytes()?,
+                                "tracked peer revision without caching the blob because the storage budget was exhausted"
+                            );
+                            storage_error = Some(Status::resource_exhausted(
+                                "peer storage budget was exhausted",
+                            ));
+                        }
+                    }
                 }
                 self.with_store(|store| {
                     store.set_peer_content_id(peer_public_key.as_bytes(), &content_info.content_id)
@@ -525,6 +812,9 @@ impl Node {
                     if previous_content_id != content_info.content_id {
                         self.remove_unused_foreign_blob(&previous_content_id)?;
                     }
+                }
+                if let Some(error) = storage_error {
+                    return Err(error);
                 }
             }
             None => {
@@ -768,6 +1058,44 @@ impl Node {
         }
 
         Ok(clirpc::GetContractsResponse { contracts })
+    }
+
+    /// Build the derived storage view shown by the local CLI.
+    pub async fn storage_info(&self) -> Result<clirpc::StorageInfo, Status> {
+        let contracts = self.get_contracts_response().await?;
+        let mut online_obligations = 0i64;
+        let mut offline_obligations = 0i64;
+        let mut expired_offline_obligations = 0i64;
+
+        // Split mirrored-peer usage by live reachability and by whether the
+        // peer has expired into best-effort storage from our perspective.
+        for contract in contracts.contracts {
+            let content_bytes = contract.their_content_length.max(0);
+            if contract.online && contract.our_content_synced {
+                online_obligations = online_obligations.saturating_add(content_bytes);
+            } else {
+                offline_obligations = offline_obligations.saturating_add(content_bytes);
+                if contract.their_remaining_seconds < 0 {
+                    expired_offline_obligations =
+                        expired_offline_obligations.saturating_add(content_bytes);
+                }
+            }
+        }
+
+        let our_content_bytes = self.with_store(|store| {
+            Ok(store
+                .current_content()
+                .map(|current| i64::try_from(current.blob_len).unwrap_or(i64::MAX))
+                .unwrap_or(0))
+        })?;
+
+        Ok(clirpc::StorageInfo {
+            online_peers_storage_obligations_bytes: online_obligations,
+            offline_peers_storage_obligations_bytes: offline_obligations,
+            expired_offline_peers_storage_obligations_bytes: expired_offline_obligations,
+            our_content_bytes,
+            maximum_peer_content_accepted_bytes: self.maximum_peer_content_accepted_bytes()?,
+        })
     }
 
     /// Propose or renew a contract with one peer and report the progress
@@ -1341,6 +1669,16 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         let config = request
             .config
             .ok_or_else(|| Status::invalid_argument("config is required"))?;
+        if config.allocated_storage_for_peers < 0 {
+            return Err(Status::invalid_argument(
+                "allocated_storage_for_peers must be non-negative",
+            ));
+        }
+        if config.min_replicas < 0 {
+            return Err(Status::invalid_argument(
+                "min_replicas must be non-negative",
+            ));
+        }
         *self.node.storage_config.lock().unwrap() = config;
         Ok(Response::new(clirpc::SetStorageConfigResponse {}))
     }
@@ -1349,26 +1687,11 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         &self,
         _request: tonic::Request<clirpc::GetStorageConfigRequest>,
     ) -> Result<tonic::Response<clirpc::GetStorageConfigResponse>, tonic::Status> {
-        let config = self.node.storage_config.lock().unwrap().clone();
-        let our_content_bytes = self
-            .node
-            .with_store(|store| {
-                Ok(store
-                    .current_content()
-                    .map(|current| i64::try_from(current.blob_len).unwrap_or(i64::MAX))
-                    .unwrap_or(0))
-            })
-            .unwrap_or(0);
+        let config = *self.node.storage_config.lock().unwrap();
 
         Ok(Response::new(clirpc::GetStorageConfigResponse {
             config: Some(config),
-            info: Some(clirpc::StorageInfo {
-                online_peers_storage_obligations_bytes: 0,
-                offline_peers_storage_obligations_bytes: 0,
-                expired_offline_peers_storage_obligations_bytes: 0,
-                our_content_bytes,
-                maximum_peer_content_accepted_bytes: 0,
-            }),
+            info: Some(self.node.storage_info().await?),
         }))
     }
 
@@ -1844,6 +2167,11 @@ mod tests {
         Ok(score)
     }
 
+    /// Report whether one mirrored peer blob is currently cached locally.
+    fn cached_peer_blob(node: &Node, content_id: &[u8]) -> anyhow::Result<bool> {
+        Ok(node.with_store(|store| store.has_mirrored_blob(content_id))?)
+    }
+
     /// Return the current content info and encrypted blob from a node.
     fn current_content_snapshot(node: &Node) -> anyhow::Result<(bbrpc::ContentInfo, Vec<u8>)> {
         let content_info = node
@@ -2280,9 +2608,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn corrupted_mirrored_blob_is_redownloaded_on_next_sync() -> anyhow::Result<()> {
         let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
-        let requester_node = Arc::new(Node::with_local_storage("requester-refresh", requester_filesystem)?);
+        let requester_node = Arc::new(Node::with_local_storage(
+            "requester-refresh",
+            requester_filesystem,
+        )?);
         let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
-        let responder_node = Arc::new(Node::with_local_storage("responder-refresh", responder_filesystem.clone())?);
+        let responder_node = Arc::new(Node::with_local_storage(
+            "responder-refresh",
+            responder_filesystem.clone(),
+        )?);
         let connector = Arc::new(netmock::MockPeerConnector::new());
         requester_node.set_peer_connector(connector.clone());
         responder_node.set_peer_connector(connector.clone());
@@ -2590,6 +2924,144 @@ mod tests {
 
         requester_server.abort();
         responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn positive_score_peer_can_evict_best_effort_cache() -> anyhow::Result<()> {
+        let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let local_node = Arc::new(Node::with_local_storage("local-budget", local_filesystem)?);
+        let best_effort_filesystem: Arc<dyn Filesystem> =
+            Arc::new(storage::MemoryFilesystem::new());
+        let best_effort_node = Arc::new(Node::with_local_storage(
+            "best-effort-peer",
+            best_effort_filesystem,
+        )?);
+        let reserved_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let reserved_node = Arc::new(Node::with_local_storage(
+            "reserved-peer",
+            reserved_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        local_node.set_peer_connector(connector.clone());
+        best_effort_node.set_peer_connector(connector.clone());
+        reserved_node.set_peer_connector(connector.clone());
+        local_node.add_known_peer(best_effort_node.address())?;
+        local_node.add_known_peer(reserved_node.address())?;
+
+        let best_effort_cli = CliService::new(best_effort_node.clone());
+        best_effort_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+        let reserved_cli = CliService::new(reserved_node.clone());
+        reserved_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: b"bravo-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let best_effort_server =
+            spawn_registered_p2p_server(best_effort_node.clone(), connector.as_ref()).await?;
+        let reserved_server =
+            spawn_registered_p2p_server(reserved_node.clone(), connector.as_ref()).await?;
+
+        local_node
+            .propose_contract_updates(best_effort_node.address())
+            .await?;
+        let best_effort_content = best_effort_node.current_content_info()?.unwrap();
+        assert!(cached_peer_blob(
+            local_node.as_ref(),
+            &best_effort_content.content_id
+        )?);
+
+        *local_node.storage_config.lock().unwrap() = clirpc::StorageConfig {
+            allocated_storage_for_peers: best_effort_content.content_length,
+            min_replicas: 0,
+        };
+        let reserved_public_key = keys::public_key_from_onion_hostname(reserved_node.address())?;
+        local_node
+            .with_store(|store| store.set_peer_score(reserved_public_key.as_bytes(), 10, 100))?;
+
+        local_node
+            .propose_contract_updates(reserved_node.address())
+            .await?;
+        let reserved_content = reserved_node.current_content_info()?.unwrap();
+        assert!(!cached_peer_blob(
+            local_node.as_ref(),
+            &best_effort_content.content_id
+        )?);
+        assert!(cached_peer_blob(
+            local_node.as_ref(),
+            &reserved_content.content_id
+        )?);
+        assert_eq!(
+            local_node.mirrored_peer_content_id(best_effort_node.address())?,
+            Some(best_effort_content.content_id.clone())
+        );
+
+        best_effort_server.abort();
+        reserved_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn over_budget_peer_is_tracked_without_cached_blob() -> anyhow::Result<()> {
+        let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let local_node = Arc::new(Node::with_local_storage(
+            "local-track-only",
+            local_filesystem,
+        )?);
+        let remote_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let remote_node = Arc::new(Node::with_local_storage(
+            "remote-track-only",
+            remote_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        local_node.set_peer_connector(connector.clone());
+        remote_node.set_peer_connector(connector.clone());
+        local_node.add_known_peer(remote_node.address())?;
+        *local_node.storage_config.lock().unwrap() = clirpc::StorageConfig {
+            allocated_storage_for_peers: 1,
+            min_replicas: 0,
+        };
+
+        let remote_cli = CliService::new(remote_node.clone());
+        remote_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: b"this blob is too large for one byte".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let remote_server =
+            spawn_registered_p2p_server(remote_node.clone(), connector.as_ref()).await?;
+        let error = local_node
+            .propose_contract_updates(remote_node.address())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+
+        let remote_content = remote_node.current_content_info()?.unwrap();
+        assert_eq!(
+            local_node.mirrored_peer_content_id(remote_node.address())?,
+            Some(remote_content.content_id.clone())
+        );
+        assert!(!cached_peer_blob(
+            local_node.as_ref(),
+            &remote_content.content_id
+        )?);
+
+        remote_server.abort();
         Ok(())
     }
 
