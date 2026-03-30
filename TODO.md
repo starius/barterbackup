@@ -13,12 +13,6 @@ These are the product and hardening items that are still unresolved.
   on whether to keep that behavior or persist and reuse the local admin keys,
   and if we persist them, whether the client key lives on the host or stays on
   the operator machine.
-- Rewrap mirrored peer blobs before storing them on local disk. The current
-  store encrypts peer metadata in the sidecar, but it writes downloaded peer
-  content blobs to disk as raw remote-provided bytes after hash verification.
-  We should authenticate and encrypt those mirrored blobs again under locally
-  derived storage keys before writing them, so untrusted peers never control
-  literal on-disk bytes outside our own AEAD-wrapped format.
 - Surface divergent sibling timelines during recovery. Recovery currently picks
   the newest revision by decrypted timestamp, but the daemon and CLI still need
   RPCs and UX to show conflicting branches, warn about later-discovered
@@ -29,15 +23,11 @@ These are the product and hardening items that are still unresolved.
   block Tor still needs a product decision and implementation path, including
   whether to support external Tor, pluggable transports, or operator-managed
   hidden-service keys.
-- Finish production hardening around observability, resource bounds, and
-  hostile-input handling. The daemon still needs a clearer operator-facing
-  story for structured logs and per-peer summaries, plus explicit limits and
-  policies for connection counts, task cancellation, chunk or metadata sizes,
-  repeated partial downloads, and other malicious or malformed peer behavior.
+- Finish the remaining operator-facing hardening around observability and
+  resource controls. Structured peer logs, peer I/O bounds, timeout handling,
+  and dedicated fuzz targets are now in place, but the daemon still needs
+  clearer per-peer summaries and a product decision on the remaining resource
+  ceilings such as connection-count policy and any future chunking limits.
 - Flesh out storage accounting and contract policy beyond the current scoring
   and sync model. Storage quotas, expiration policy, and operator-facing
   visibility are still basic.
-- Add deeper long-running fuzz and soak coverage. Property tests and multi-node
-  scenarios now cover the main parser and maintenance paths, but the project
-  still lacks dedicated `cargo-fuzz` targets and longer chaos-style network
-  campaigns.
