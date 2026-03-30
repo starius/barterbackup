@@ -23,6 +23,9 @@ use thiserror::Error;
 const PEER_STATE_FILE: &str = ".peer-state.v1";
 const PEER_STATE_NONCE_LEN: usize = 12;
 const PEER_STATE_TAG_LEN: usize = 16;
+const MIRRORED_BLOB_VERSION: u8 = 1;
+const MIRRORED_BLOB_NONCE_LEN: usize = 12;
+const MIRRORED_BLOB_TAG_LEN: usize = 16;
 
 /// StorageError reports persistence, recovery, and validation failures.
 #[derive(Debug, Error)]
@@ -226,6 +229,8 @@ pub struct Store {
     time_source: Arc<dyn Clock>,
     codec: ContentCodec,
     peer_cipher: Aes256GcmSiv,
+    mirrored_blob_cipher: Aes256GcmSiv,
+    mirrored_name_key: Vec<u8>,
     files: BTreeMap<String, Vec<u8>>,
     peers: Vec<storedpb::Peer>,
     current: Option<CurrentContent>,
@@ -256,9 +261,15 @@ impl Store {
             .map_err(|err| StorageError::Message(err.to_string()))?;
         let peer_state_key = keys::derive_key(master, "bb/storage/peer-state", 32)
             .map_err(|err| StorageError::Message(err.to_string()))?;
+        let mirrored_blob_key = keys::derive_key(master, "bb/storage/mirrored-blob", 32)
+            .map_err(|err| StorageError::Message(err.to_string()))?;
+        let mirrored_name_key = keys::derive_key(master, "bb/storage/mirrored-name", 32)
+            .map_err(|err| StorageError::Message(err.to_string()))?;
 
         let codec = ContentCodec::new(&revision_key, &metadata_key, &file_key)?;
         let peer_cipher = Aes256GcmSiv::new_from_slice(&peer_state_key)
+            .map_err(|err| StorageError::Message(err.to_string()))?;
+        let mirrored_blob_cipher = Aes256GcmSiv::new_from_slice(&mirrored_blob_key)
             .map_err(|err| StorageError::Message(err.to_string()))?;
 
         let mut store = Self {
@@ -266,6 +277,8 @@ impl Store {
             time_source,
             codec,
             peer_cipher,
+            mirrored_blob_cipher,
+            mirrored_name_key,
             files: BTreeMap::new(),
             peers: Vec::new(),
             current: None,
@@ -443,7 +456,7 @@ impl Store {
         self.fs.read(&current.file_name)
     }
 
-    /// Read any stored content blob by content id.
+    /// Read a raw local content blob by content id.
     pub fn read_blob_by_id(&self, content_id: &[u8]) -> Result<Vec<u8>, StorageError> {
         self.fs.read(&content_file_name(content_id))
     }
@@ -453,19 +466,33 @@ impl Store {
         self.codec.parse_content_id(content_id).map_err(Into::into)
     }
 
-    /// Report whether a content blob exists for the supplied content id.
-    pub fn has_content_blob(&self, content_id: &[u8]) -> bool {
-        self.read_blob_by_id(content_id).is_ok()
+    /// Read a mirrored peer blob after unwrapping the local storage envelope.
+    pub fn read_mirrored_blob(&self, content_id: &[u8]) -> Result<Vec<u8>, StorageError> {
+        let file_name = self.mirrored_blob_file_name(content_id)?;
+        let wrapped = self.fs.read(&file_name)?;
+        decrypt_mirrored_blob(&self.mirrored_blob_cipher, content_id, &wrapped)
     }
 
-    /// Atomically write an arbitrary content blob under its content id.
-    pub fn write_content_blob(&self, content_id: &[u8], blob: &[u8]) -> Result<(), StorageError> {
-        self.fs.write_atomic(&content_file_name(content_id), blob)
+    /// Report whether a valid mirrored peer blob exists for the supplied content id.
+    pub fn has_mirrored_blob(&self, content_id: &[u8]) -> Result<bool, StorageError> {
+        match self.read_mirrored_blob(content_id) {
+            Ok(_) => Ok(true),
+            Err(StorageError::FileNotFound) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
-    /// Remove a stored content blob if it exists.
-    pub fn remove_content_blob(&self, content_id: &[u8]) -> Result<(), StorageError> {
-        self.fs.remove(&content_file_name(content_id))
+    /// Atomically wrap and write a mirrored peer blob under a local filename.
+    pub fn write_mirrored_blob(&self, content_id: &[u8], blob: &[u8]) -> Result<(), StorageError> {
+        let file_name = self.mirrored_blob_file_name(content_id)?;
+        let wrapped = encrypt_mirrored_blob(&self.mirrored_blob_cipher, content_id, blob);
+        self.fs.write_atomic(&file_name, &wrapped)
+    }
+
+    /// Remove a mirrored peer blob if it exists.
+    pub fn remove_mirrored_blob(&self, content_id: &[u8]) -> Result<(), StorageError> {
+        let file_name = self.mirrored_blob_file_name(content_id)?;
+        self.fs.remove(&file_name)
     }
 
     /// Restore an encrypted blob as the active local content revision.
@@ -499,8 +526,8 @@ impl Store {
     pub fn cleanup_foreign(&self, valid_content_ids: &[Vec<u8>]) -> Result<(), StorageError> {
         let mut keep = valid_content_ids
             .iter()
-            .map(|content_id| content_file_name(content_id))
-            .collect::<Vec<_>>();
+            .map(|content_id| self.mirrored_blob_file_name(content_id))
+            .collect::<Result<Vec<_>, _>>()?;
         keep.sort();
 
         for name in self.fs.list()? {
@@ -528,7 +555,8 @@ impl Store {
     /// Load the encrypted content blobs and sidecar state from disk.
     fn load(&mut self) -> Result<(), StorageError> {
         self.load_peer_state()?;
-        let foreign_files = self.foreign_content_files();
+        let foreign_files = self.foreign_content_files()?;
+        let legacy_foreign_content_ids = self.legacy_foreign_content_ids();
 
         let mut valid = Vec::new();
         let mut invalid = Vec::new();
@@ -552,8 +580,20 @@ impl Store {
                     blob_len: blob.len(),
                     decoded,
                 }),
-                Ok(_) => invalid.push("content id does not match file name".to_string()),
-                Err(err) => invalid.push(err.to_string()),
+                Ok(_) => {
+                    if legacy_foreign_content_ids.contains(&content_id) {
+                        let _ = self.fs.remove(&name);
+                        continue;
+                    }
+                    invalid.push("content id does not match file name".to_string());
+                }
+                Err(err) => {
+                    if legacy_foreign_content_ids.contains(&content_id) {
+                        let _ = self.fs.remove(&name);
+                        continue;
+                    }
+                    invalid.push(err.to_string());
+                }
             }
         }
 
@@ -599,11 +639,20 @@ impl Store {
     }
 
     /// Return the tracked foreign blob file names referenced by peers.
-    fn foreign_content_files(&self) -> BTreeSet<String> {
+    fn foreign_content_files(&self) -> Result<BTreeSet<String>, StorageError> {
         self.peers
             .iter()
             .filter(|peer| !peer.content_id.is_empty())
-            .map(|peer| content_file_name(&peer.content_id))
+            .map(|peer| self.mirrored_blob_file_name(&peer.content_id))
+            .collect()
+    }
+
+    /// Return the tracked legacy foreign content ids used before local wrapping.
+    fn legacy_foreign_content_ids(&self) -> BTreeSet<Vec<u8>> {
+        self.peers
+            .iter()
+            .filter(|peer| !peer.content_id.is_empty())
+            .map(|peer| peer.content_id.clone())
             .collect()
     }
 
@@ -682,6 +731,18 @@ impl Store {
         self.peers = metadata.peers;
         Ok(())
     }
+
+    /// Derive the opaque local filename for a mirrored peer blob.
+    fn mirrored_blob_file_name(&self, content_id: &[u8]) -> Result<String, StorageError> {
+        if content_id.is_empty() {
+            return Err(StorageError::InvalidFileName);
+        }
+
+        let purpose = format!("bb/storage/mirrored-name/v1/{}", hex::encode(content_id));
+        let name_bytes = keys::derive_key(&self.mirrored_name_key, &purpose, 32)
+            .map_err(|err| StorageError::Message(err.to_string()))?;
+        Ok(hex::encode(name_bytes))
+    }
 }
 
 /// Candidate is a decoded on-disk content blob found during startup.
@@ -707,6 +768,65 @@ fn content_file_name(content_id: &[u8]) -> String {
 /// Parse an on-disk content blob file name back into the content id bytes.
 fn decode_content_file_name(name: &str) -> Result<Vec<u8>, StorageError> {
     hex::decode(name).map_err(|_| StorageError::Message("invalid content name".to_string()))
+}
+
+/// Build the AAD for locally wrapped mirrored peer blobs.
+fn mirrored_blob_aad(content_id: &[u8]) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(1 + content_id.len());
+    aad.push(MIRRORED_BLOB_VERSION);
+    aad.extend_from_slice(content_id);
+    aad
+}
+
+/// Encrypt a mirrored peer blob with an inline nonce and authenticated content id.
+fn encrypt_mirrored_blob(cipher: &Aes256GcmSiv, content_id: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    let mut nonce_bytes = [0u8; MIRRORED_BLOB_NONCE_LEN];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let aad = mirrored_blob_aad(content_id);
+    let ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce_bytes),
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
+        .expect("mirrored blob encryption should not fail");
+
+    let mut output = Vec::with_capacity(1 + MIRRORED_BLOB_NONCE_LEN + ciphertext.len());
+    output.push(MIRRORED_BLOB_VERSION);
+    output.extend_from_slice(&nonce_bytes);
+    output.extend_from_slice(&ciphertext);
+    output
+}
+
+/// Decrypt a mirrored peer blob and validate its local wrapper metadata.
+fn decrypt_mirrored_blob(
+    cipher: &Aes256GcmSiv,
+    content_id: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, StorageError> {
+    if ciphertext.len() < 1 + MIRRORED_BLOB_NONCE_LEN + MIRRORED_BLOB_TAG_LEN {
+        return Err(StorageError::RecoveryRequired(
+            "mirrored peer blob is truncated".to_string(),
+        ));
+    }
+    if ciphertext[0] != MIRRORED_BLOB_VERSION {
+        return Err(StorageError::RecoveryRequired(
+            "mirrored peer blob version is invalid".to_string(),
+        ));
+    }
+
+    let aad = mirrored_blob_aad(content_id);
+    cipher
+        .decrypt(
+            Nonce::from_slice(&ciphertext[1..1 + MIRRORED_BLOB_NONCE_LEN]),
+            Payload {
+                msg: &ciphertext[1 + MIRRORED_BLOB_NONCE_LEN..],
+                aad: &aad,
+            },
+        )
+        .map_err(|_| StorageError::RecoveryRequired("mirrored peer blob is invalid".to_string()))
 }
 
 /// Encrypt the peer sidecar with an inline random nonce.
@@ -905,7 +1025,64 @@ mod tests {
     }
 
     #[test]
-    fn load_ignores_tracked_foreign_blobs() {
+    fn mirrored_peer_blob_round_trips_inside_local_wrapper() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+        let content_id = b"peer-content-id";
+        let remote_blob = b"remote-ciphertext".to_vec();
+
+        store.write_mirrored_blob(content_id, &remote_blob).unwrap();
+
+        let file_name = store.mirrored_blob_file_name(content_id).unwrap();
+        let wrapped = fs.read(&file_name).unwrap();
+        assert_ne!(wrapped, remote_blob);
+        assert_eq!(store.read_mirrored_blob(content_id).unwrap(), remote_blob);
+    }
+
+    #[test]
+    fn mirrored_peer_blob_detects_tampering() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+        let content_id = b"peer-content-id";
+
+        store
+            .write_mirrored_blob(content_id, b"remote-ciphertext")
+            .unwrap();
+
+        let file_name = store.mirrored_blob_file_name(content_id).unwrap();
+        let mut wrapped = fs.read(&file_name).unwrap();
+        let last_index = wrapped.len() - 1;
+        wrapped[last_index] ^= 0x01;
+        fs.write_atomic(&file_name, &wrapped).unwrap();
+
+        assert!(matches!(
+            store.read_mirrored_blob(content_id),
+            Err(StorageError::RecoveryRequired(_))
+        ));
+    }
+
+    #[test]
+    fn mirrored_peer_blob_rejects_wrong_content_id() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+        let correct_id = b"peer-content-id";
+        let wrong_id = b"other-peer-content-id";
+
+        store
+            .write_mirrored_blob(correct_id, b"remote-ciphertext")
+            .unwrap();
+
+        let wrapped = fs
+            .read(&store.mirrored_blob_file_name(correct_id).unwrap())
+            .unwrap();
+        assert!(matches!(
+            decrypt_mirrored_blob(&store.mirrored_blob_cipher, wrong_id, &wrapped),
+            Err(StorageError::RecoveryRequired(_))
+        ));
+    }
+
+    #[test]
+    fn load_ignores_tracked_wrapped_foreign_blobs() {
         let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
         let mut local = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
         local.set_file("alpha.txt", b"local".to_vec()).unwrap();
@@ -922,7 +1099,8 @@ mod tests {
         let foreign_id = foreign.current_content().unwrap().content_id.clone();
 
         local.set_peer_content_id(b"peer-a", &foreign_id).unwrap();
-        fs.write_atomic(&content_file_name(&foreign_id), &foreign_blob)
+        local
+            .write_mirrored_blob(&foreign_id, &foreign_blob)
             .unwrap();
 
         let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
@@ -932,7 +1110,7 @@ mod tests {
     }
 
     #[test]
-    fn load_allows_only_tracked_foreign_blobs() {
+    fn load_allows_only_tracked_wrapped_foreign_blobs() {
         let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
         let mut local = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
 
@@ -947,7 +1125,8 @@ mod tests {
         let foreign_id = foreign.current_content().unwrap().content_id.clone();
 
         local.set_peer_content_id(b"peer-a", &foreign_id).unwrap();
-        fs.write_atomic(&content_file_name(&foreign_id), &foreign_blob)
+        local
+            .write_mirrored_blob(&foreign_id, &foreign_blob)
             .unwrap();
 
         let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
@@ -978,16 +1157,43 @@ mod tests {
 
         fs.write_atomic("foreign", b"data").unwrap();
         let other_id = vec![0x44; content::CONTENT_ID_LEN];
-        fs.write_atomic(&content_file_name(&other_id), b"peer-blob")
-            .unwrap();
+        store.write_mirrored_blob(&other_id, b"peer-blob").unwrap();
 
         store
             .cleanup_foreign(std::slice::from_ref(&other_id))
             .unwrap();
 
         assert!(fs.read("foreign").is_ok());
-        assert!(fs.read(&content_file_name(&other_id)).is_ok());
+        assert!(fs
+            .read(&store.mirrored_blob_file_name(&other_id).unwrap())
+            .is_ok());
         assert!(fs.read(&content_file_name(&current_id)).is_ok());
+    }
+
+    #[test]
+    fn load_drops_legacy_raw_foreign_blobs() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut local = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+
+        let foreign_master = keys::derive_master_priv("legacy-foreign-master");
+        let foreign_fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut foreign =
+            Store::new_with_time_source(foreign_fs, &foreign_master, time_source()).unwrap();
+        foreign.set_file("peer.txt", b"peer".to_vec()).unwrap();
+        let foreign_blob = foreign.current_blob().unwrap();
+        let foreign_id = foreign.current_content().unwrap().content_id.clone();
+
+        local.set_peer_content_id(b"peer-a", &foreign_id).unwrap();
+        fs.write_atomic(&content_file_name(&foreign_id), &foreign_blob)
+            .unwrap();
+
+        let reloaded = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+        assert!(reloaded.current_content().is_none());
+        assert_eq!(reloaded.peers()[0].content_id, foreign_id);
+        assert!(matches!(
+            fs.read(&content_file_name(&foreign_id)),
+            Err(StorageError::FileNotFound)
+        ));
     }
 
     #[test]

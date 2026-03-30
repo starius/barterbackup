@@ -250,7 +250,7 @@ impl Node {
                 return Ok(None);
             }
 
-            match store.read_blob_by_id(&peer.content_id) {
+            match store.read_mirrored_blob(&peer.content_id) {
                 Ok(blob) => Ok(Some(bbrpc::ContentInfo {
                     content_id: peer.content_id,
                     content_length: i64::try_from(blob.len()).unwrap_or(i64::MAX),
@@ -334,16 +334,28 @@ impl Node {
                 return Ok(());
             }
 
-            match store.remove_content_blob(content_id) {
+            match store.remove_mirrored_blob(content_id) {
                 Ok(()) | Err(StorageError::FileNotFound) => Ok(()),
                 Err(error) => Err(error),
             }
         })
     }
 
-    /// Report whether a peer-visible content id is already stored locally.
-    fn has_content_blob(&self, content_id: &[u8]) -> Result<bool, Status> {
-        self.with_store(|store| Ok(store.has_content_blob(content_id)))
+    /// Report whether a valid mirrored peer blob is already stored locally.
+    fn has_mirrored_blob(&self, content_id: &[u8]) -> Result<bool, Status> {
+        self.with_store(|store| store.has_mirrored_blob(content_id))
+    }
+
+    /// Decide whether a mirrored peer blob needs a fresh download.
+    fn needs_mirrored_blob_download(&self, content_id: &[u8]) -> Result<bool, Status> {
+        self.with_store(|store| match store.has_mirrored_blob(content_id) {
+            Ok(present) => Ok(!present),
+            Err(StorageError::RecoveryRequired(_)) => {
+                let _ = store.remove_mirrored_blob(content_id);
+                Ok(true)
+            }
+            Err(error) => Err(error),
+        })
     }
 
     /// Mirror or clear the latest advertised content for a peer.
@@ -364,12 +376,12 @@ impl Node {
 
         match content_info {
             Some(content_info) => {
-                if !self.has_content_blob(&content_info.content_id)? {
+                if self.needs_mirrored_blob_download(&content_info.content_id)? {
                     let blob = self
                         .download_peer_blob(peer_onion, &content_info.content_id)
                         .await?;
                     self.with_store(|store| {
-                        store.write_content_blob(&content_info.content_id, &blob)
+                        store.write_mirrored_blob(&content_info.content_id, &blob)
                     })?;
                 }
                 self.with_store(|store| {
@@ -501,7 +513,7 @@ impl Node {
                 return Ok(0);
             }
 
-            match store.read_blob_by_id(&peer.content_id) {
+            match store.read_mirrored_blob(&peer.content_id) {
                 Ok(blob) => Ok(i64::try_from(blob.len()).unwrap_or(i64::MAX)),
                 Err(StorageError::FileNotFound) => Ok(0),
                 Err(error) => Err(error),
@@ -639,7 +651,7 @@ impl Node {
             .responder_content
             .as_ref()
             .filter(|content_info| {
-                self.has_content_blob(&content_info.content_id)
+                self.has_mirrored_blob(&content_info.content_id)
                     .map(|present| !present)
                     .unwrap_or(false)
             })
@@ -1320,9 +1332,15 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
             return Err(Status::not_found("content not found"));
         }
 
-        let blob = self
-            .node
-            .with_store(|store| store.read_blob_by_id(&request.content_id))?;
+        let blob = if current_content_id
+            .as_ref()
+            .is_some_and(|content_id| content_id.as_slice() == request.content_id.as_slice())
+        {
+            self.node.with_store(|store| store.current_blob())?
+        } else {
+            self.node
+                .with_store(|store| store.read_mirrored_blob(&request.content_id))?
+        };
         if offset > blob.len() {
             return Err(Status::out_of_range("offset is past the end of the blob"));
         }
@@ -1961,7 +1979,7 @@ mod tests {
 
         let requester_blob = requester_node.with_store(|store| store.current_blob())?;
         let mirrored_blob = responder_node
-            .with_store(|store| store.read_blob_by_id(&requester_content.content_id))?;
+            .with_store(|store| store.read_mirrored_blob(&requester_content.content_id))?;
         assert_eq!(mirrored_blob, requester_blob);
 
         requester_server.abort();
@@ -2383,7 +2401,7 @@ mod tests {
 
         let right_content = right_node.responder_content()?.unwrap();
         let mirrored_right_blob =
-            left_node.with_store(|store| store.read_blob_by_id(&right_content.content_id))?;
+            left_node.with_store(|store| store.read_mirrored_blob(&right_content.content_id))?;
         assert_eq!(
             mirrored_right_blob,
             right_node.with_store(|store| store.current_blob())?
