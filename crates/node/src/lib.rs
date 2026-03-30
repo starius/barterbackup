@@ -10,7 +10,7 @@ use anyhow::Result;
 use clock::{Clock, SystemClock, Timestamp};
 use content::CONTENT_ID_LEN;
 use futures::{stream, Stream};
-use protos::{bbrpc, clirpc};
+use protos::{bbrpc, clirpc, storedpb};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -178,6 +178,27 @@ fn render_built_in_peer_source(peers: &[String]) -> String {
     source
 }
 
+/// Return one persisted peer origin as a storedpb enum value.
+fn peer_origin_code(built_in: bool, manual: bool) -> i32 {
+    if manual {
+        storedpb::PeerOrigin::Manual as i32
+    } else if built_in {
+        storedpb::PeerOrigin::BuiltIn as i32
+    } else {
+        storedpb::PeerOrigin::Discovered as i32
+    }
+}
+
+/// Return the newest locally cached peer content summary, including legacy fallback.
+fn peer_latest_cached_content(peer: &storedpb::Peer) -> Option<storedpb::PeerContent> {
+    peer.latest_cached_content.clone().or_else(|| {
+        (!peer.content_id.is_empty()).then(|| storedpb::PeerContent {
+            content_id: peer.content_id.clone(),
+            content_length: 0,
+        })
+    })
+}
+
 /// MirroredBlobState reports whether a cached peer blob is present or needs refresh.
 enum MirroredBlobState {
     /// Present means the cached mirrored blob is valid and usable.
@@ -236,6 +257,17 @@ impl Node {
             .map(|filesystem| Store::new_with_time_source(filesystem, &master, clock.clone()))
             .transpose()?
             .map(Mutex::new);
+        let built_in_peer_list = built_in_peers();
+        if let Some(store) = store.as_ref() {
+            let mut store = store.lock().unwrap();
+            for peer_onion in &built_in_peer_list {
+                let public_key = keys::public_key_from_onion_hostname(peer_onion)?;
+                store.ensure_peer_with_origin(
+                    public_key.as_bytes(),
+                    peer_origin_code(true, false),
+                )?;
+            }
+        }
         let known_peers: BTreeSet<String> = store
             .as_ref()
             .map(|store| {
@@ -253,7 +285,7 @@ impl Node {
             })
             .unwrap_or_default();
         let mut known_peers = known_peers;
-        known_peers.extend(built_in_peers());
+        known_peers.extend(built_in_peer_list);
 
         Ok(Self {
             ed25519_keypair: keypair,
@@ -317,9 +349,14 @@ impl Node {
 
     /// Add a peer onion hostname to the configured peer set.
     pub fn add_known_peer(&self, peer_onion: &str) -> Result<(), Status> {
+        self.add_known_peer_with_origin(peer_onion, peer_origin_code(false, true))
+    }
+
+    /// Add a peer onion hostname to the configured peer set with an explicit origin.
+    fn add_known_peer_with_origin(&self, peer_onion: &str, origin: i32) -> Result<(), Status> {
         let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
             .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
-        self.with_store(|store| store.ensure_peer(peer_public_key.as_bytes()))
+        self.with_store(|store| store.ensure_peer_with_origin(peer_public_key.as_bytes(), origin))
             .or_else(|error| {
                 if error.code() == Code::FailedPrecondition {
                     Ok(())
@@ -366,8 +403,8 @@ impl Node {
                 .peers()
                 .into_iter()
                 .find(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes())
-                .map(|peer| peer.content_id)
-                .filter(|content_id| !content_id.is_empty()))
+                .and_then(|peer| peer_latest_cached_content(&peer))
+                .map(|content| content.content_id))
         })
     }
 
@@ -412,13 +449,13 @@ impl Node {
             let Some(peer) = peer else {
                 return Ok(None);
             };
-            if peer.content_id.is_empty() {
+            let Some(cached_content) = peer_latest_cached_content(&peer) else {
                 return Ok(None);
-            }
+            };
 
-            match store.read_mirrored_blob(&peer.content_id) {
+            match store.read_mirrored_blob(&cached_content.content_id) {
                 Ok(blob) => Ok(Some(bbrpc::ContentInfo {
-                    content_id: peer.content_id,
+                    content_id: cached_content.content_id,
                     content_length: i64::try_from(blob.len()).unwrap_or(i64::MAX),
                 })),
                 Err(StorageError::FileNotFound) => Ok(None),
@@ -595,20 +632,20 @@ impl Node {
             // Reuse one decrypted length per content id so shared mirrored blobs
             // are accounted only once while still tracking all peer references.
             for peer in store.peers() {
-                if peer.content_id.is_empty() {
+                let Some(cached_content) = peer_latest_cached_content(&peer) else {
                     continue;
-                }
+                };
 
-                let blob_len = if let Some(blob_len) = lengths.get(&peer.content_id) {
+                let blob_len = if let Some(blob_len) = lengths.get(&cached_content.content_id) {
                     *blob_len
                 } else {
-                    let blob_len = match store.read_mirrored_blob(&peer.content_id) {
+                    let blob_len = match store.read_mirrored_blob(&cached_content.content_id) {
                         Ok(blob) => i64::try_from(blob.len()).unwrap_or(i64::MAX),
                         Err(StorageError::FileNotFound)
                         | Err(StorageError::RecoveryRequired(_)) => 0,
                         Err(error) => return Err(error),
                     };
-                    lengths.insert(peer.content_id.clone(), blob_len);
+                    lengths.insert(cached_content.content_id.clone(), blob_len);
                     blob_len
                 };
                 if blob_len == 0 {
@@ -616,14 +653,14 @@ impl Node {
                 }
 
                 usage
-                    .entry(peer.content_id.clone())
+                    .entry(cached_content.content_id.clone())
                     .or_insert_with(|| MirroredBlobUsage {
-                        content_id: peer.content_id.clone(),
+                        content_id: cached_content.content_id.clone(),
                         blob_len,
                         references: Vec::new(),
                     });
                 usage
-                    .get_mut(&peer.content_id)
+                    .get_mut(&cached_content.content_id)
                     .expect("usage entry was just inserted")
                     .references
                     .push(PeerBlobReference {
@@ -995,11 +1032,11 @@ impl Node {
             let Some(peer) = peer else {
                 return Ok(0);
             };
-            if peer.content_id.is_empty() {
+            let Some(cached_content) = peer_latest_cached_content(&peer) else {
                 return Ok(0);
-            }
+            };
 
-            match store.read_mirrored_blob(&peer.content_id) {
+            match store.read_mirrored_blob(&cached_content.content_id) {
                 Ok(blob) => Ok(i64::try_from(blob.len()).unwrap_or(i64::MAX)),
                 Err(StorageError::FileNotFound) => Ok(0),
                 Err(error) => Err(error),
@@ -1863,7 +1900,10 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
                 Err(_) => continue,
             };
             self.node
-                .add_known_peer(&keys::onion_hostname_from_public_key(&public_key))?;
+                .add_known_peer_with_origin(
+                    &keys::onion_hostname_from_public_key(&public_key),
+                    peer_origin_code(false, false),
+                )?;
         }
 
         let peers = self
@@ -2377,6 +2417,19 @@ mod tests {
 
         let reloaded = Node::with_local_storage("owner", filesystem)?;
         assert_eq!(reloaded.known_peers(), vec![peer.address().to_string()]);
+        let peer_public_key = keys::public_key_from_onion_hostname(peer.address())?;
+        let persisted_peer = reloaded.with_store(|store| {
+            Ok(store
+                .peers()
+                .into_iter()
+                .find(|stored_peer| {
+                    stored_peer.onion_pubkey.as_slice() == peer_public_key.as_bytes()
+                }))
+        })?;
+        assert_eq!(
+            persisted_peer.map(|peer| peer.origin),
+            Some(storedpb::PeerOrigin::Manual as i32)
+        );
         Ok(())
     }
 

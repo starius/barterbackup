@@ -35,6 +35,39 @@ message FileHeader {
 }
 
 // Peer is data about the peer that should survive a node reset.
+enum PeerOrigin {
+    // PEER_ORIGIN_DISCOVERED means the peer was learned from another peer.
+    PEER_ORIGIN_DISCOVERED = 0;
+
+    // PEER_ORIGIN_BUILT_IN means the peer came from the compiled seed list.
+    PEER_ORIGIN_BUILT_IN = 1;
+
+    // PEER_ORIGIN_MANUAL means the operator added the peer explicitly.
+    PEER_ORIGIN_MANUAL = 2;
+}
+
+// FirstContactDirection records which side connected to the other first.
+enum FirstContactDirection {
+    // FIRST_CONTACT_DIRECTION_UNKNOWN means the direction was not recorded.
+    FIRST_CONTACT_DIRECTION_UNKNOWN = 0;
+
+    // FIRST_CONTACT_DIRECTION_OUTBOUND means we dialed the peer first.
+    FIRST_CONTACT_DIRECTION_OUTBOUND = 1;
+
+    // FIRST_CONTACT_DIRECTION_INBOUND means the peer dialed us first.
+    FIRST_CONTACT_DIRECTION_INBOUND = 2;
+}
+
+// PeerContent describes one peer-visible mirrored revision.
+message PeerContent {
+    // content_id is the peer's encrypted revision identifier.
+    bytes content_id = 1;
+
+    // content_length is the encrypted blob length in bytes.
+    int64 content_length = 2;
+}
+
+// Peer is data about the peer that should survive a node reset.
 message Peer {
     // onion_pubkey is the peer's onion service public key.
     bytes onion_pubkey = 1;
@@ -46,8 +79,23 @@ message Peer {
     // score_measured_at is a Unix timestamp (seconds) when score was measured.
     int64 score_measured_at = 3;
 
-    // content_id is the latest content identifier we know for this peer.
+    // content_id is the legacy latest content identifier written by older
+    // versions. Newer code keeps it in sync with latest_known_content for
+    // migration compatibility.
     bytes content_id = 4;
+
+    // latest_known_content is the newest peer revision we know exists.
+    PeerContent latest_known_content = 5;
+
+    // latest_cached_content is the newest peer revision we currently keep in
+    // our local cache and can serve or inspect later.
+    PeerContent latest_cached_content = 6;
+
+    // origin is the highest-priority origin class recorded for this peer.
+    PeerOrigin origin = 7;
+
+    // first_contact_direction records who connected first, if known.
+    FirstContactDirection first_contact_direction = 8;
 }
 
 // Metadata is short data that is stored together with the main content on

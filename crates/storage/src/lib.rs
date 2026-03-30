@@ -242,6 +242,45 @@ pub struct Store {
     current: Option<CurrentContent>,
 }
 
+/// Return the higher-priority peer origin.
+fn merge_peer_origin(current: i32, incoming: i32) -> i32 {
+    current.max(incoming)
+}
+
+/// Build one persisted peer-content summary.
+fn peer_content_summary(content_id: &[u8], content_length: i64) -> storedpb::PeerContent {
+    storedpb::PeerContent {
+        content_id: content_id.to_vec(),
+        content_length,
+    }
+}
+
+/// Convert one optional peer-content summary into an owned content id.
+fn peer_content_id(content: Option<&storedpb::PeerContent>) -> Option<Vec<u8>> {
+    content
+        .filter(|content| !content.content_id.is_empty())
+        .map(|content| content.content_id.clone())
+}
+
+/// Migrate one older peer record into the richer current representation.
+fn migrate_peer(peer: &mut storedpb::Peer) {
+    if peer.latest_known_content.is_none() && !peer.content_id.is_empty() {
+        peer.latest_known_content = Some(peer_content_summary(&peer.content_id, 0));
+    }
+    if peer.latest_cached_content.is_none() && !peer.content_id.is_empty() {
+        peer.latest_cached_content = Some(peer_content_summary(&peer.content_id, 0));
+    }
+    if peer_content_id(peer.latest_known_content.as_ref()).is_none() {
+        peer.content_id.clear();
+    } else if peer.content_id.is_empty() {
+        peer.content_id = peer
+            .latest_known_content
+            .as_ref()
+            .map(|content| content.content_id.clone())
+            .unwrap_or_default();
+    }
+}
+
 impl Store {
     /// Create a store backed by the system clock.
     pub fn new(fs: Arc<dyn Filesystem>, master: &[u8]) -> Result<Self, StorageError> {
@@ -348,24 +387,52 @@ impl Store {
 
     /// Ensure a peer exists in the encrypted sidecar even before any sync.
     pub fn ensure_peer(&mut self, onion_pubkey: &[u8]) -> Result<(), StorageError> {
+        self.ensure_peer_with_origin(
+            onion_pubkey,
+            storedpb::PeerOrigin::Discovered as i32,
+        )
+    }
+
+    /// Ensure a peer exists and record its highest-priority origin.
+    pub fn ensure_peer_with_origin(
+        &mut self,
+        onion_pubkey: &[u8],
+        origin: i32,
+    ) -> Result<(), StorageError> {
         if onion_pubkey.is_empty() {
             return Err(StorageError::InvalidFileName);
         }
 
-        if self
+        if let Some(peer) = self
             .peers
             .iter()
-            .any(|peer| peer.onion_pubkey.as_slice() == onion_pubkey)
+            .find(|peer| peer.onion_pubkey.as_slice() == onion_pubkey)
         {
-            return Ok(());
+            let merged_origin = merge_peer_origin(peer.origin, origin);
+            if merged_origin == peer.origin {
+                return Ok(());
+            }
         }
 
-        self.peers.push(storedpb::Peer {
-            onion_pubkey: onion_pubkey.to_vec(),
-            score_seconds: 0,
-            score_measured_at: 0,
-            content_id: Vec::new(),
-        });
+        if let Some(peer) = self
+            .peers
+            .iter_mut()
+            .find(|peer| peer.onion_pubkey.as_slice() == onion_pubkey)
+        {
+            peer.origin = merge_peer_origin(peer.origin, origin);
+        } else {
+            self.peers.push(storedpb::Peer {
+                onion_pubkey: onion_pubkey.to_vec(),
+                score_seconds: 0,
+                score_measured_at: 0,
+                content_id: Vec::new(),
+                latest_known_content: None,
+                latest_cached_content: None,
+                origin,
+                first_contact_direction:
+                    storedpb::FirstContactDirection::Unknown as i32,
+            });
+        }
         self.persist_peer_state()
     }
 
@@ -375,24 +442,57 @@ impl Store {
         onion_pubkey: &[u8],
         content_id: &[u8],
     ) -> Result<(), StorageError> {
-        if onion_pubkey.is_empty() || content_id.is_empty() {
+        self.set_peer_content_state(
+            onion_pubkey,
+            Some(content_id),
+            Some(0),
+            Some(content_id),
+            Some(0),
+        )
+    }
+
+    /// Set the latest known and cached peer revisions in one update.
+    pub fn set_peer_content_state(
+        &mut self,
+        onion_pubkey: &[u8],
+        latest_known_content_id: Option<&[u8]>,
+        latest_known_content_length: Option<i64>,
+        latest_cached_content_id: Option<&[u8]>,
+        latest_cached_content_length: Option<i64>,
+    ) -> Result<(), StorageError> {
+        if onion_pubkey.is_empty() {
+            return Err(StorageError::InvalidFileName);
+        }
+        if latest_known_content_id.is_some_and(|content_id| content_id.is_empty()) {
+            return Err(StorageError::InvalidFileName);
+        }
+        if latest_cached_content_id.is_some_and(|content_id| content_id.is_empty()) {
+            return Err(StorageError::InvalidFileName);
+        }
+        if latest_known_content_id.is_some() && latest_known_content_length.is_none() {
+            return Err(StorageError::InvalidFileName);
+        }
+        if latest_cached_content_id.is_some() && latest_cached_content_length.is_none() {
             return Err(StorageError::InvalidFileName);
         }
 
-        if let Some(peer) = self
+        self.ensure_peer(onion_pubkey)?;
+        let peer = self
             .peers
             .iter_mut()
             .find(|peer| peer.onion_pubkey == onion_pubkey)
-        {
-            peer.content_id = content_id.to_vec();
-        } else {
-            self.peers.push(storedpb::Peer {
-                onion_pubkey: onion_pubkey.to_vec(),
-                score_seconds: 0,
-                score_measured_at: 0,
-                content_id: content_id.to_vec(),
+            .expect("peer entry must exist after ensure_peer");
+        peer.latest_known_content =
+            latest_known_content_id.map(|content_id| {
+                peer_content_summary(content_id, latest_known_content_length.unwrap_or(0))
             });
-        }
+        peer.latest_cached_content =
+            latest_cached_content_id.map(|content_id| {
+                peer_content_summary(content_id, latest_cached_content_length.unwrap_or(0))
+            });
+        peer.content_id = latest_known_content_id
+            .map(|content_id| content_id.to_vec())
+            .unwrap_or_default();
 
         self.persist_peer_state()
     }
@@ -421,9 +521,39 @@ impl Store {
                 score_seconds,
                 score_measured_at,
                 content_id: Vec::new(),
+                latest_known_content: None,
+                latest_cached_content: None,
+                origin: storedpb::PeerOrigin::Discovered as i32,
+                first_contact_direction:
+                    storedpb::FirstContactDirection::Unknown as i32,
             });
         }
 
+        self.persist_peer_state()
+    }
+
+    /// Record the first contact direction if it was still unknown.
+    pub fn set_peer_first_contact_direction(
+        &mut self,
+        onion_pubkey: &[u8],
+        first_contact_direction: i32,
+    ) -> Result<(), StorageError> {
+        if onion_pubkey.is_empty() {
+            return Err(StorageError::InvalidFileName);
+        }
+
+        self.ensure_peer(onion_pubkey)?;
+        let peer = self
+            .peers
+            .iter_mut()
+            .find(|peer| peer.onion_pubkey == onion_pubkey)
+            .expect("peer entry must exist after ensure_peer");
+        if peer.first_contact_direction
+            != storedpb::FirstContactDirection::Unknown as i32
+        {
+            return Ok(());
+        }
+        peer.first_contact_direction = first_contact_direction;
         self.persist_peer_state()
     }
 
@@ -439,6 +569,8 @@ impl Store {
             .find(|peer| peer.onion_pubkey == onion_pubkey)
         {
             peer.content_id.clear();
+            peer.latest_known_content = None;
+            peer.latest_cached_content = None;
             self.persist_peer_state()?;
         }
 
@@ -648,8 +780,8 @@ impl Store {
     fn foreign_content_files(&self) -> Result<BTreeSet<String>, StorageError> {
         self.peers
             .iter()
-            .filter(|peer| !peer.content_id.is_empty())
-            .map(|peer| self.mirrored_blob_file_name(&peer.content_id))
+            .filter_map(|peer| peer_content_id(peer.latest_cached_content.as_ref()))
+            .map(|content_id| self.mirrored_blob_file_name(&content_id))
             .collect()
     }
 
@@ -734,7 +866,14 @@ impl Store {
         };
         let plaintext = decrypt_sidecar(&self.peer_cipher, &ciphertext)?;
         let metadata = storedpb::Metadata::decode(plaintext.as_slice())?;
-        self.peers = metadata.peers;
+        self.peers = metadata
+            .peers
+            .into_iter()
+            .map(|mut peer| {
+                migrate_peer(&mut peer);
+                peer
+            })
+            .collect();
         Ok(())
     }
 
@@ -1152,6 +1291,79 @@ mod tests {
         assert_eq!(reloaded.peers().len(), 1);
         assert_eq!(reloaded.peers()[0].onion_pubkey, b"peer-a".to_vec());
         assert!(reloaded.peers()[0].content_id.is_empty());
+    }
+
+    #[test]
+    fn peer_origin_upgrades_but_never_downgrades() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+
+        store
+            .ensure_peer_with_origin(
+                b"peer-a",
+                storedpb::PeerOrigin::BuiltIn as i32,
+            )
+            .unwrap();
+        store
+            .ensure_peer_with_origin(
+                b"peer-a",
+                storedpb::PeerOrigin::Manual as i32,
+            )
+            .unwrap();
+        store
+            .ensure_peer_with_origin(
+                b"peer-a",
+                storedpb::PeerOrigin::Discovered as i32,
+            )
+            .unwrap();
+
+        let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        assert_eq!(
+            reloaded.peers()[0].origin,
+            storedpb::PeerOrigin::Manual as i32
+        );
+    }
+
+    #[test]
+    fn load_migrates_legacy_peer_content_id_into_known_and_cached_state() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let metadata = storedpb::Metadata {
+            files: Vec::new(),
+            peers: vec![storedpb::Peer {
+                onion_pubkey: b"peer-a".to_vec(),
+                score_seconds: 7,
+                score_measured_at: 11,
+                content_id: b"legacy-content".to_vec(),
+                latest_known_content: None,
+                latest_cached_content: None,
+                origin: storedpb::PeerOrigin::Discovered as i32,
+                first_contact_direction:
+                    storedpb::FirstContactDirection::Unknown as i32,
+            }],
+        };
+        let peer_state_key = keys::derive_key(&master(), "bb/storage/peer-state", 32).unwrap();
+        let peer_cipher = Aes256GcmSiv::new_from_slice(&peer_state_key).unwrap();
+        fs.write_atomic(
+            PEER_STATE_FILE,
+            &encrypt_sidecar(&peer_cipher, &metadata.encode_to_vec()),
+        )
+        .unwrap();
+
+        let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        let peer = &reloaded.peers()[0];
+        assert_eq!(peer.content_id, b"legacy-content".to_vec());
+        assert_eq!(
+            peer.latest_known_content
+                .as_ref()
+                .map(|content| content.content_id.clone()),
+            Some(b"legacy-content".to_vec())
+        );
+        assert_eq!(
+            peer.latest_cached_content
+                .as_ref()
+                .map(|content| content.content_id.clone()),
+            Some(b"legacy-content".to_vec())
+        );
     }
 
     #[test]
