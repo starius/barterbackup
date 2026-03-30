@@ -691,6 +691,27 @@ mod tests {
         {
             Err(Status::unimplemented(""))
         }
+        async fn list_conflicts(
+            &self,
+            _: Request<protos::clirpc::ListConflictsRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::ListConflictsResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
+        async fn checkout_revision(
+            &self,
+            _: Request<protos::clirpc::CheckoutRevisionRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::CheckoutRevisionResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
+        async fn resolve_conflict(
+            &self,
+            _: Request<protos::clirpc::ResolveConflictRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::ResolveConflictResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
         async fn set_file(
             &self,
             _: Request<protos::clirpc::SetFileRequest>,
@@ -798,9 +819,7 @@ mod tests {
         let missing = temp_dir.path().join("missing-cli-keys");
 
         let error = read_keys(&missing).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("local CLI key directory"));
+        assert!(error.to_string().contains("local CLI key directory"));
         assert!(!missing.exists());
     }
 

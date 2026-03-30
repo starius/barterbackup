@@ -239,6 +239,8 @@ pub struct Store {
     mirrored_name_key: Vec<u8>,
     files: BTreeMap<String, Vec<u8>>,
     peers: Vec<storedpb::Peer>,
+    active_conflict: Option<storedpb::ActiveConflict>,
+    archived_conflicts: Vec<storedpb::ConflictRevision>,
     current: Option<CurrentContent>,
 }
 
@@ -326,6 +328,8 @@ impl Store {
             mirrored_name_key,
             files: BTreeMap::new(),
             peers: Vec::new(),
+            active_conflict: None,
+            archived_conflicts: Vec::new(),
             current: None,
         };
         store.load()?;
@@ -385,12 +389,19 @@ impl Store {
         self.peers.clone()
     }
 
+    /// Return the unresolved active conflict, if any.
+    pub fn active_conflict(&self) -> Option<storedpb::ActiveConflict> {
+        self.active_conflict.clone()
+    }
+
+    /// Return the archived conflict revisions.
+    pub fn archived_conflicts(&self) -> Vec<storedpb::ConflictRevision> {
+        self.archived_conflicts.clone()
+    }
+
     /// Ensure a peer exists in the encrypted sidecar even before any sync.
     pub fn ensure_peer(&mut self, onion_pubkey: &[u8]) -> Result<(), StorageError> {
-        self.ensure_peer_with_origin(
-            onion_pubkey,
-            storedpb::PeerOrigin::Discovered as i32,
-        )
+        self.ensure_peer_with_origin(onion_pubkey, storedpb::PeerOrigin::Discovered as i32)
     }
 
     /// Ensure a peer exists and record its highest-priority origin.
@@ -429,8 +440,7 @@ impl Store {
                 latest_known_content: None,
                 latest_cached_content: None,
                 origin,
-                first_contact_direction:
-                    storedpb::FirstContactDirection::Unknown as i32,
+                first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
             });
         }
         self.persist_peer_state()
@@ -482,14 +492,12 @@ impl Store {
             .iter_mut()
             .find(|peer| peer.onion_pubkey == onion_pubkey)
             .expect("peer entry must exist after ensure_peer");
-        peer.latest_known_content =
-            latest_known_content_id.map(|content_id| {
-                peer_content_summary(content_id, latest_known_content_length.unwrap_or(0))
-            });
-        peer.latest_cached_content =
-            latest_cached_content_id.map(|content_id| {
-                peer_content_summary(content_id, latest_cached_content_length.unwrap_or(0))
-            });
+        peer.latest_known_content = latest_known_content_id.map(|content_id| {
+            peer_content_summary(content_id, latest_known_content_length.unwrap_or(0))
+        });
+        peer.latest_cached_content = latest_cached_content_id.map(|content_id| {
+            peer_content_summary(content_id, latest_cached_content_length.unwrap_or(0))
+        });
         peer.content_id = latest_known_content_id
             .map(|content_id| content_id.to_vec())
             .unwrap_or_default();
@@ -524,8 +532,7 @@ impl Store {
                 latest_known_content: None,
                 latest_cached_content: None,
                 origin: storedpb::PeerOrigin::Discovered as i32,
-                first_contact_direction:
-                    storedpb::FirstContactDirection::Unknown as i32,
+                first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
             });
         }
 
@@ -548,9 +555,7 @@ impl Store {
             .iter_mut()
             .find(|peer| peer.onion_pubkey == onion_pubkey)
             .expect("peer entry must exist after ensure_peer");
-        if peer.first_contact_direction
-            != storedpb::FirstContactDirection::Unknown as i32
-        {
+        if peer.first_contact_direction != storedpb::FirstContactDirection::Unknown as i32 {
             return Ok(());
         }
         peer.first_contact_direction = first_contact_direction;
@@ -586,6 +591,102 @@ impl Store {
             self.persist_peer_state()?;
         }
         Ok(())
+    }
+
+    /// Read one locally stored revision blob, whether it is current or archived.
+    pub fn read_revision_blob(&self, content_id: &[u8]) -> Result<Vec<u8>, StorageError> {
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|current| current.content_id.as_slice() == content_id)
+        {
+            self.current_blob()
+        } else {
+            self.read_mirrored_blob(content_id)
+        }
+    }
+
+    /// Decode one locally stored revision into plaintext files.
+    pub fn read_revision_files(&self, content_id: &[u8]) -> Result<Vec<PlainFile>, StorageError> {
+        let blob = self.read_revision_blob(content_id)?;
+        self.decode_revision_files(&blob)
+    }
+
+    /// Decode one revision blob into plaintext files without reading from disk.
+    pub fn decode_revision_files(&self, blob: &[u8]) -> Result<Vec<PlainFile>, StorageError> {
+        let decoded = self.codec.decode(&blob)?;
+        Ok(decoded
+            .files
+            .into_iter()
+            .map(|(name, data)| PlainFile { name, data })
+            .collect())
+    }
+
+    /// Add one revision to the active conflict set if it is not already tracked.
+    pub fn ensure_active_conflict_revision(
+        &mut self,
+        revision: storedpb::ConflictRevision,
+    ) -> Result<(), StorageError> {
+        let active_conflict =
+            self.active_conflict
+                .get_or_insert_with(|| storedpb::ActiveConflict {
+                    revisions: Vec::new(),
+                });
+        if active_conflict
+            .revisions
+            .iter()
+            .any(|tracked| tracked.content_id == revision.content_id)
+        {
+            return Ok(());
+        }
+        active_conflict.revisions.push(revision);
+        active_conflict
+            .revisions
+            .sort_by(|left, right| left.content_id.cmp(&right.content_id));
+        self.persist_peer_state()
+    }
+
+    /// Resolve the active conflict by archiving every non-selected revision.
+    pub fn resolve_active_conflict(
+        &mut self,
+        selected_content_id: &[u8],
+        resolved_at_secs: i64,
+        resolved_at_nanos: i64,
+    ) -> Result<Vec<storedpb::ConflictRevision>, StorageError> {
+        let Some(active_conflict) = self.active_conflict.take() else {
+            return Err(StorageError::FileNotFound);
+        };
+        if !active_conflict
+            .revisions
+            .iter()
+            .any(|revision| revision.content_id.as_slice() == selected_content_id)
+        {
+            self.active_conflict = Some(active_conflict);
+            return Err(StorageError::FileNotFound);
+        }
+
+        let mut archived = Vec::new();
+        for mut revision in active_conflict.revisions {
+            if revision.content_id.as_slice() == selected_content_id {
+                continue;
+            }
+            revision.resolved_at = resolved_at_secs;
+            revision.resolved_at_ns = resolved_at_nanos;
+            if self
+                .archived_conflicts
+                .iter()
+                .any(|archived_revision| archived_revision.content_id == revision.content_id)
+            {
+                continue;
+            }
+            self.archived_conflicts.push(revision.clone());
+            archived.push(revision);
+        }
+
+        self.archived_conflicts
+            .sort_by(|left, right| left.content_id.cmp(&right.content_id));
+        self.persist_peer_state()?;
+        Ok(archived)
     }
 
     /// Read the raw encrypted content blob for the active revision.
@@ -851,6 +952,8 @@ impl Store {
         let metadata = storedpb::Metadata {
             files: Vec::new(),
             peers: self.peers.clone(),
+            active_conflict: self.active_conflict.clone(),
+            archived_conflicts: self.archived_conflicts.clone(),
         };
         let plaintext = metadata.encode_to_vec();
         let ciphertext = encrypt_sidecar(&self.peer_cipher, &plaintext);
@@ -874,6 +977,8 @@ impl Store {
                 peer
             })
             .collect();
+        self.active_conflict = metadata.active_conflict;
+        self.archived_conflicts = metadata.archived_conflicts;
         Ok(())
     }
 
@@ -1299,22 +1404,13 @@ mod tests {
         let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
 
         store
-            .ensure_peer_with_origin(
-                b"peer-a",
-                storedpb::PeerOrigin::BuiltIn as i32,
-            )
+            .ensure_peer_with_origin(b"peer-a", storedpb::PeerOrigin::BuiltIn as i32)
             .unwrap();
         store
-            .ensure_peer_with_origin(
-                b"peer-a",
-                storedpb::PeerOrigin::Manual as i32,
-            )
+            .ensure_peer_with_origin(b"peer-a", storedpb::PeerOrigin::Manual as i32)
             .unwrap();
         store
-            .ensure_peer_with_origin(
-                b"peer-a",
-                storedpb::PeerOrigin::Discovered as i32,
-            )
+            .ensure_peer_with_origin(b"peer-a", storedpb::PeerOrigin::Discovered as i32)
             .unwrap();
 
         let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
@@ -1337,9 +1433,10 @@ mod tests {
                 latest_known_content: None,
                 latest_cached_content: None,
                 origin: storedpb::PeerOrigin::Discovered as i32,
-                first_contact_direction:
-                    storedpb::FirstContactDirection::Unknown as i32,
+                first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
             }],
+            active_conflict: None,
+            archived_conflicts: Vec::new(),
         };
         let peer_state_key = keys::derive_key(&master(), "bb/storage/peer-state", 32).unwrap();
         let peer_cipher = Aes256GcmSiv::new_from_slice(&peer_state_key).unwrap();
@@ -1364,6 +1461,53 @@ mod tests {
                 .map(|content| content.content_id.clone()),
             Some(b"legacy-content".to_vec())
         );
+    }
+
+    #[test]
+    fn active_and_archived_conflicts_round_trip() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+
+        store
+            .ensure_active_conflict_revision(storedpb::ConflictRevision {
+                content_id: b"conflict-a".to_vec(),
+                created_at: 10,
+                created_at_ns: 20,
+                content_length: 30,
+                file_count: 1,
+                source_peer_onion: "peer-a.onion".to_string(),
+                source_is_local: false,
+                resolved_at: 0,
+                resolved_at_ns: 0,
+            })
+            .unwrap();
+        store
+            .ensure_active_conflict_revision(storedpb::ConflictRevision {
+                content_id: b"conflict-b".to_vec(),
+                created_at: 11,
+                created_at_ns: 21,
+                content_length: 31,
+                file_count: 1,
+                source_peer_onion: String::new(),
+                source_is_local: true,
+                resolved_at: 0,
+                resolved_at_ns: 0,
+            })
+            .unwrap();
+        let archived = store
+            .resolve_active_conflict(b"conflict-b", 50, 60)
+            .unwrap();
+        assert_eq!(archived.len(), 1);
+
+        let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        assert!(reloaded.active_conflict().is_none());
+        assert_eq!(reloaded.archived_conflicts().len(), 1);
+        assert_eq!(
+            reloaded.archived_conflicts()[0].content_id,
+            b"conflict-a".to_vec()
+        );
+        assert_eq!(reloaded.archived_conflicts()[0].resolved_at, 50);
+        assert_eq!(reloaded.archived_conflicts()[0].resolved_at_ns, 60);
     }
 
     #[test]

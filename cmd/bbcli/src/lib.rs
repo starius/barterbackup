@@ -3,23 +3,24 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
-use tlsutil::{connect_pinned_channel, read_keys};
 use crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use dirs::home_dir;
 use futures_util::TryStreamExt;
 use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
 use protos::clirpc::{
-    CheckContractRequest, ConnectPeerRequest, DeleteFileRequest, ExportBuiltInPeersRequest, File,
-    GetContractsRequest, GetFileRequest, GetStorageConfigRequest, HealthCheckRequest,
-    ListFilesRequest, ProposeContractRequest, RecoverContentRequest, SetFileRequest,
-    SetStorageConfigRequest, StopRequest, StorageConfig, UnlockRequest,
+    CheckContractRequest, CheckoutRevisionRequest, ConnectPeerRequest, DeleteFileRequest,
+    ExportBuiltInPeersRequest, File, GetContractsRequest, GetFileRequest, GetStorageConfigRequest,
+    HealthCheckRequest, ListConflictsRequest, ListFilesRequest, ProposeContractRequest,
+    RecoverContentRequest, ResolveConflictRequest, SetFileRequest, SetStorageConfigRequest,
+    StopRequest, StorageConfig, UnlockRequest,
 };
+use tlsutil::{connect_pinned_channel, read_keys};
 use tokio::time::sleep;
 use tonic::transport::Channel;
 use tonic::Code;
@@ -111,6 +112,24 @@ enum Command {
     #[command(hide = true)]
     ExportBuiltInPeers,
 
+    /// List unresolved and archived conflicting revisions.
+    ListConflicts,
+
+    /// Write one conflicting or archived revision to a local directory.
+    CheckoutRevision {
+        /// content_id is the hex-encoded revision identifier.
+        content_id: String,
+
+        /// out_dir is the local directory that receives the plaintext files.
+        out_dir: PathBuf,
+    },
+
+    /// Choose the conflicting revision that should stay active.
+    ResolveConflict {
+        /// content_id is the hex-encoded revision identifier to keep active.
+        content_id: String,
+    },
+
     /// Update local storage policy values.
     SetStorageConfig {
         /// allocated_storage_for_peers is the total bytes allocated to peers.
@@ -201,6 +220,14 @@ async fn run_parsed(args: Args) -> Result<()> {
         }
         Command::ConnectedPeers => connected_peers(&args.daemon_addr).await?,
         Command::ExportBuiltInPeers => export_built_in_peers(&args.daemon_addr).await?,
+        Command::ListConflicts => list_conflicts(&args.daemon_addr).await?,
+        Command::CheckoutRevision {
+            content_id,
+            out_dir,
+        } => checkout_revision(&args.daemon_addr, &content_id, &out_dir).await?,
+        Command::ResolveConflict { content_id } => {
+            resolve_conflict(&args.daemon_addr, &content_id).await?
+        }
         Command::SetStorageConfig {
             allocated_storage_for_peers,
             min_replicas,
@@ -256,6 +283,11 @@ fn read_password_from_reader(reader: &mut impl Read) -> Result<String> {
         .read_to_string(&mut password)
         .context("read password")?;
     normalize_main_password(password)
+}
+
+/// Decode one hex-encoded revision identifier.
+fn decode_content_id_hex(content_id: &str) -> Result<Vec<u8>> {
+    hex::decode(content_id).context("decode hex content id")
 }
 
 /// Prompt for a password on a real terminal while masking input with `*`.
@@ -376,6 +408,60 @@ async fn export_built_in_peers(addr: &str) -> Result<()> {
     let source = export_built_in_peers_with_client(&mut client).await?;
     print!("{source}");
     Ok(())
+}
+
+/// Print the unresolved and archived conflict revisions.
+async fn list_conflicts(addr: &str) -> Result<()> {
+    let mut client = connect_client(addr).await?;
+    let response = list_conflicts_with_client(&mut client).await?;
+    for revision in response.revisions {
+        println!(
+            "content_id={} unresolved={} created_at={}.{:09} content_length={} file_count={} source_peer={} source_is_local={} resolved_at={}.{:09}",
+            hex::encode(revision.content_id),
+            revision.unresolved,
+            revision.created_at,
+            revision.created_at_ns,
+            revision.content_length,
+            revision.file_count,
+            revision.source_peer_onion,
+            revision.source_is_local,
+            revision.resolved_at,
+            revision.resolved_at_ns
+        );
+    }
+    Ok(())
+}
+
+/// Write one conflicted or archived revision to a local directory.
+async fn checkout_revision(addr: &str, content_id: &str, out_dir: &Path) -> Result<()> {
+    let content_id = decode_content_id_hex(content_id)?;
+    let mut client = connect_client(addr).await?;
+    let response = checkout_revision_with_client(&mut client, &content_id).await?;
+    fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
+    for file in response.file {
+        let target = checked_checkout_target(out_dir, &file.name)?;
+        fs::write(&target, &file.data).with_context(|| format!("write {}", target.display()))?;
+    }
+    Ok(())
+}
+
+/// Build one safe local checkout path for a revision file.
+fn checked_checkout_target(out_dir: &Path, file_name: &str) -> Result<PathBuf> {
+    let path = Path::new(file_name);
+    if path.components().count() != 1
+        || !matches!(path.components().next(), Some(Component::Normal(_)))
+    {
+        bail!("refusing to write unsafe revision file name `{file_name}`");
+    }
+
+    Ok(out_dir.join(path))
+}
+
+/// Resolve the active conflict and keep one revision active.
+async fn resolve_conflict(addr: &str, content_id: &str) -> Result<()> {
+    let content_id = decode_content_id_hex(content_id)?;
+    let mut client = connect_client(addr).await?;
+    resolve_conflict_with_client(&mut client, &content_id).await
 }
 
 /// Update the storage policy.
@@ -706,6 +792,42 @@ pub async fn export_built_in_peers_with_client(
         .rust_source)
 }
 
+/// List unresolved and archived conflicting revisions.
+pub async fn list_conflicts_with_client(
+    client: &mut BarterBackupClientClient<Channel>,
+) -> Result<protos::clirpc::ListConflictsResponse> {
+    Ok(client
+        .list_conflicts(ListConflictsRequest {})
+        .await?
+        .into_inner())
+}
+
+/// Fetch one conflicting or archived revision through an existing client.
+pub async fn checkout_revision_with_client(
+    client: &mut BarterBackupClientClient<Channel>,
+    content_id: &[u8],
+) -> Result<protos::clirpc::CheckoutRevisionResponse> {
+    Ok(client
+        .checkout_revision(CheckoutRevisionRequest {
+            content_id: content_id.to_vec(),
+        })
+        .await?
+        .into_inner())
+}
+
+/// Resolve the active conflict through an existing client.
+pub async fn resolve_conflict_with_client(
+    client: &mut BarterBackupClientClient<Channel>,
+    content_id: &[u8],
+) -> Result<()> {
+    client
+        .resolve_conflict(ResolveConflictRequest {
+            content_id: content_id.to_vec(),
+        })
+        .await?;
+    Ok(())
+}
+
 /// Update storage policy through an already connected client.
 pub async fn set_storage_config_with_client(
     client: &mut BarterBackupClientClient<Channel>,
@@ -868,6 +990,16 @@ mod tests {
         assert!(read_password_from_reader(&mut cursor).is_err());
     }
 
+    #[test]
+    fn checked_checkout_target_rejects_path_components() {
+        let out_dir = Path::new("/tmp/out");
+
+        assert!(checked_checkout_target(out_dir, "alpha.txt").is_ok());
+        assert!(checked_checkout_target(out_dir, "nested/alpha.txt").is_err());
+        assert!(checked_checkout_target(out_dir, "../alpha.txt").is_err());
+        assert!(checked_checkout_target(out_dir, "/tmp/alpha.txt").is_err());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn wait_for_cli_keys_does_not_create_missing_directory() {
         let temp_dir = tempdir().unwrap();
@@ -877,9 +1009,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("did not create local cli keys"));
+        assert!(error.to_string().contains("did not create local cli keys"));
         assert!(!keys_dir.exists());
     }
 

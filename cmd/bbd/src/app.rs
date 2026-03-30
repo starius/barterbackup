@@ -1,7 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use clap::Parser;
-use tlsutil::{build_server_tls, generate_ed25519, write_keys};
 use dirs::home_dir;
 use fs2::FileExt;
 use futures_util::StreamExt;
@@ -16,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use storage::OsFilesystem;
+use tlsutil::{build_server_tls, generate_ed25519, write_keys};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify};
 use tokio_rustls::server::TlsStream;
@@ -526,6 +526,33 @@ impl BarterBackupClient for DaemonService {
             .await
     }
 
+    async fn list_conflicts(
+        &self,
+        request: tonic::Request<clirpc::ListConflictsRequest>,
+    ) -> Result<Response<clirpc::ListConflictsResponse>, Status> {
+        CliService::new(self.unlocked_node().await?)
+            .list_conflicts(request)
+            .await
+    }
+
+    async fn checkout_revision(
+        &self,
+        request: tonic::Request<clirpc::CheckoutRevisionRequest>,
+    ) -> Result<Response<clirpc::CheckoutRevisionResponse>, Status> {
+        CliService::new(self.unlocked_node().await?)
+            .checkout_revision(request)
+            .await
+    }
+
+    async fn resolve_conflict(
+        &self,
+        request: tonic::Request<clirpc::ResolveConflictRequest>,
+    ) -> Result<Response<clirpc::ResolveConflictResponse>, Status> {
+        CliService::new(self.unlocked_node().await?)
+            .resolve_conflict(request)
+            .await
+    }
+
     async fn set_file(
         &self,
         request: tonic::Request<clirpc::SetFileRequest>,
@@ -674,6 +701,27 @@ impl BarterBackupClient for DaemonRpcService {
         request: tonic::Request<clirpc::ExportBuiltInPeersRequest>,
     ) -> Result<Response<clirpc::ExportBuiltInPeersResponse>, Status> {
         self.daemon.export_built_in_peers(request).await
+    }
+
+    async fn list_conflicts(
+        &self,
+        request: tonic::Request<clirpc::ListConflictsRequest>,
+    ) -> Result<Response<clirpc::ListConflictsResponse>, Status> {
+        self.daemon.list_conflicts(request).await
+    }
+
+    async fn checkout_revision(
+        &self,
+        request: tonic::Request<clirpc::CheckoutRevisionRequest>,
+    ) -> Result<Response<clirpc::CheckoutRevisionResponse>, Status> {
+        self.daemon.checkout_revision(request).await
+    }
+
+    async fn resolve_conflict(
+        &self,
+        request: tonic::Request<clirpc::ResolveConflictRequest>,
+    ) -> Result<Response<clirpc::ResolveConflictResponse>, Status> {
+        self.daemon.resolve_conflict(request).await
     }
 
     async fn set_file(

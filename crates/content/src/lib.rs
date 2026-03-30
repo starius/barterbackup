@@ -466,6 +466,8 @@ fn build_metadata(files: &[PlainFile], peers: &[storedpb::Peer]) -> storedpb::Me
     storedpb::Metadata {
         files: file_headers,
         peers: peers.to_vec(),
+        active_conflict: None,
+        archived_conflicts: Vec::new(),
     }
 }
 
