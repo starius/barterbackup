@@ -58,6 +58,9 @@ fn max_peer_content_bytes_i64() -> i64 {
 /// DEFAULT_ALLOCATED_STORAGE_FOR_PEERS is the default peer-cache budget.
 const DEFAULT_ALLOCATED_STORAGE_FOR_PEERS: i64 = 1024 * 1024 * 1024;
 
+/// MAX_TRACKED_PEERS is the maximum number of peers kept in metadata.
+const MAX_TRACKED_PEERS: usize = 1024;
+
 /// StorageClass splits mirrored peer blobs into reserved and best-effort sets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StorageClass {
@@ -97,11 +100,99 @@ enum StorageAdmission {
     TrackOnly,
 }
 
+/// PeerAdmissionPlan describes how peer-capacity enforcement handles a peer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PeerAdmissionPlan {
+    /// Admit keeps the candidate peer and optionally evicts one existing peer.
+    Admit { evicted_public_key: Option<Vec<u8>> },
+    /// Reject leaves the current peer set unchanged.
+    Reject,
+}
+
 /// Build the default local storage policy.
 fn default_storage_config() -> clirpc::StorageConfig {
     clirpc::StorageConfig {
         allocated_storage_for_peers: DEFAULT_ALLOCATED_STORAGE_FOR_PEERS,
         min_replicas: 0,
+    }
+}
+
+/// Return the effective peer priority from persisted origin, score, and direction.
+fn peer_priority(origin: i32, score_seconds: i64, first_contact_direction: i32) -> u8 {
+    if origin == storedpb::PeerOrigin::Manual as i32 {
+        5
+    } else if score_seconds > 0 {
+        4
+    } else if origin == storedpb::PeerOrigin::BuiltIn as i32 {
+        3
+    } else if first_contact_direction == storedpb::FirstContactDirection::Outbound as i32 {
+        2
+    } else if first_contact_direction == storedpb::FirstContactDirection::Inbound as i32 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Return the deterministic eviction order for one tracked peer.
+fn peer_eviction_order_key(peer: &storedpb::Peer) -> (u8, i64, i64, Vec<u8>) {
+    (
+        peer_priority(
+            peer.origin,
+            peer.score_seconds,
+            peer.first_contact_direction,
+        ),
+        peer.score_seconds,
+        peer.score_measured_at,
+        peer.onion_pubkey.clone(),
+    )
+}
+
+/// Plan whether one candidate peer may join the tracked peer set.
+fn plan_peer_admission(
+    existing_peers: &[storedpb::Peer],
+    candidate_public_key: &[u8],
+    candidate_origin: i32,
+    candidate_score_seconds: i64,
+    candidate_first_contact_direction: i32,
+    capacity: usize,
+) -> PeerAdmissionPlan {
+    if existing_peers
+        .iter()
+        .any(|peer| peer.onion_pubkey.as_slice() == candidate_public_key)
+    {
+        return PeerAdmissionPlan::Admit {
+            evicted_public_key: None,
+        };
+    }
+    if existing_peers.len() < capacity {
+        return PeerAdmissionPlan::Admit {
+            evicted_public_key: None,
+        };
+    }
+
+    let candidate_priority = peer_priority(
+        candidate_origin,
+        candidate_score_seconds,
+        candidate_first_contact_direction,
+    );
+    let Some(worst_peer) = existing_peers
+        .iter()
+        .min_by_key(|peer| peer_eviction_order_key(peer))
+    else {
+        return PeerAdmissionPlan::Reject;
+    };
+    let worst_priority = peer_priority(
+        worst_peer.origin,
+        worst_peer.score_seconds,
+        worst_peer.first_contact_direction,
+    );
+    if candidate_priority <= worst_priority {
+        return PeerAdmissionPlan::Reject;
+    }
+
+    PeerAdmissionPlan::Admit {
+        evicted_public_key: Some(worst_peer.onion_pubkey.clone()),
     }
 }
 
@@ -310,45 +401,33 @@ impl Node {
             .transpose()?
             .map(Mutex::new);
         let built_in_peer_list = built_in_peers();
-        if let Some(store) = store.as_ref() {
-            let mut store = store.lock().unwrap();
-            for peer_onion in &built_in_peer_list {
-                let public_key = keys::public_key_from_onion_hostname(peer_onion)?;
-                store.ensure_peer_with_origin(
-                    public_key.as_bytes(),
-                    peer_origin_code(true, false),
-                )?;
-            }
-        }
-        let known_peers: BTreeSet<String> = store
-            .as_ref()
-            .map(|store| {
-                store
-                    .lock()
-                    .unwrap()
-                    .peers()
-                    .into_iter()
-                    .filter_map(|peer| {
-                        ed25519_dalek::PublicKey::from_bytes(&peer.onion_pubkey)
-                            .ok()
-                            .map(|public_key| keys::onion_hostname_from_public_key(&public_key))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut known_peers = known_peers;
-        known_peers.extend(built_in_peer_list);
-
-        Ok(Self {
+        let node = Self {
             ed25519_keypair: keypair,
             onion_address,
             clock,
             started_at: Mutex::new(None),
             store,
-            known_peers: Mutex::new(known_peers),
+            known_peers: Mutex::new(BTreeSet::new()),
             storage_config: Mutex::new(default_storage_config()),
             peer_connector: Mutex::new(None),
-        })
+        };
+
+        if node.store.is_some() {
+            node.trim_tracked_peers_to_capacity()?;
+            node.refresh_known_peers_from_store()?;
+            for peer_onion in built_in_peer_list {
+                if let Err(error) =
+                    node.add_known_peer_with_origin(&peer_onion, peer_origin_code(true, false))
+                {
+                    warn!(peer = %peer_onion, %error, "failed to admit built-in peer");
+                }
+            }
+        } else {
+            let mut known_peers = node.known_peers.lock().unwrap();
+            known_peers.extend(built_in_peer_list);
+        }
+
+        Ok(node)
     }
 
     /// Return node uptime in whole seconds.
@@ -371,6 +450,164 @@ impl Node {
             .ok_or_else(|| Status::failed_precondition("local store is not configured"))?;
         let mut store = store.lock().unwrap();
         operation(&mut store).map_err(map_storage_error)
+    }
+
+    /// Convert one public key byte slice into an onion hostname.
+    fn onion_from_public_key_bytes(&self, public_key: &[u8]) -> Result<String, Status> {
+        let public_key = ed25519_dalek::PublicKey::from_bytes(public_key)
+            .map_err(|_| Status::invalid_argument("peer public key is invalid"))?;
+        Ok(keys::onion_hostname_from_public_key(&public_key))
+    }
+
+    /// Return the tracked peer metadata currently persisted in the store.
+    fn tracked_peers(&self) -> Result<Vec<storedpb::Peer>, Status> {
+        self.with_store(|store| Ok(store.peers()))
+    }
+
+    /// Report whether one peer is already tracked in persisted metadata.
+    fn is_tracked_peer(&self, peer_public_key: &ed25519_dalek::PublicKey) -> Result<bool, Status> {
+        Ok(self
+            .tracked_peers()?
+            .into_iter()
+            .any(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes()))
+    }
+
+    /// Replace the cached known-peer list with what is currently persisted.
+    fn refresh_known_peers_from_store(&self) -> Result<(), Status> {
+        let tracked_peers = self.tracked_peers()?;
+        let known_peers = tracked_peers
+            .into_iter()
+            .filter_map(|peer| self.onion_from_public_key_bytes(&peer.onion_pubkey).ok())
+            .collect::<BTreeSet<_>>();
+        *self.known_peers.lock().unwrap() = known_peers;
+        Ok(())
+    }
+
+    /// Trim any overflow from old peer metadata down to the configured capacity.
+    fn trim_tracked_peers_to_capacity(&self) -> Result<(), Status> {
+        self.trim_tracked_peers_to_capacity_with_limit(MAX_TRACKED_PEERS)
+    }
+
+    /// Trim any overflow from old peer metadata down to the provided capacity.
+    fn trim_tracked_peers_to_capacity_with_limit(&self, capacity: usize) -> Result<(), Status> {
+        let Some(store_mutex) = self.store.as_ref() else {
+            return Ok(());
+        };
+        let mut evicted_cached_content_ids = Vec::<Vec<u8>>::new();
+        {
+            let mut store = store_mutex.lock().unwrap();
+            let mut peers = store.peers();
+            if peers.len() <= capacity {
+                return Ok(());
+            }
+
+            peers.sort_by_key(peer_eviction_order_key);
+            let overflow = peers.len().saturating_sub(capacity);
+            for peer in peers.into_iter().take(overflow) {
+                if let Some(cached_content) = peer_latest_cached_content(&peer) {
+                    evicted_cached_content_ids.push(cached_content.content_id);
+                }
+                store
+                    .remove_peer(&peer.onion_pubkey)
+                    .map_err(map_storage_error)?;
+            }
+        }
+
+        for content_id in evicted_cached_content_ids {
+            self.remove_unused_foreign_blob(&content_id)?;
+        }
+
+        Ok(())
+    }
+
+    /// Admit or upgrade one tracked peer under the priority-based capacity policy.
+    fn track_peer_identity(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+        origin: i32,
+        first_contact_direction: i32,
+    ) -> Result<(), Status> {
+        self.track_peer_identity_with_capacity(
+            peer_public_key,
+            origin,
+            first_contact_direction,
+            MAX_TRACKED_PEERS,
+        )
+    }
+
+    /// Admit or upgrade one tracked peer under the provided capacity limit.
+    fn track_peer_identity_with_capacity(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+        origin: i32,
+        first_contact_direction: i32,
+        capacity: usize,
+    ) -> Result<(), Status> {
+        let peer_onion = keys::onion_hostname_from_public_key(peer_public_key);
+        let Some(store_mutex) = self.store.as_ref() else {
+            self.known_peers.lock().unwrap().insert(peer_onion);
+            return Ok(());
+        };
+
+        let mut evicted_onion = None;
+        let mut evicted_cached_content_id = None;
+        {
+            let mut store = store_mutex.lock().unwrap();
+            let peers = store.peers();
+            match plan_peer_admission(
+                &peers,
+                peer_public_key.as_bytes(),
+                origin,
+                0,
+                first_contact_direction,
+                capacity,
+            ) {
+                PeerAdmissionPlan::Reject => {
+                    return Err(Status::resource_exhausted(format!(
+                        "peer capacity reached; refusing to track {peer_onion}"
+                    )));
+                }
+                PeerAdmissionPlan::Admit { evicted_public_key } => {
+                    if let Some(evicted_public_key) = evicted_public_key {
+                        let evicted_peer = peers
+                            .into_iter()
+                            .find(|peer| peer.onion_pubkey == evicted_public_key)
+                            .ok_or_else(|| Status::internal("missing peer chosen for eviction"))?;
+                        evicted_onion =
+                            Some(self.onion_from_public_key_bytes(&evicted_public_key)?);
+                        evicted_cached_content_id = peer_latest_cached_content(&evicted_peer)
+                            .map(|content| content.content_id);
+                        store
+                            .remove_peer(&evicted_public_key)
+                            .map_err(map_storage_error)?;
+                    }
+                    store
+                        .ensure_peer_with_origin(peer_public_key.as_bytes(), origin)
+                        .map_err(map_storage_error)?;
+                    if first_contact_direction != storedpb::FirstContactDirection::Unknown as i32 {
+                        store
+                            .set_peer_first_contact_direction(
+                                peer_public_key.as_bytes(),
+                                first_contact_direction,
+                            )
+                            .map_err(map_storage_error)?;
+                    }
+                }
+            }
+        }
+
+        let mut known_peers = self.known_peers.lock().unwrap();
+        if let Some(evicted_onion) = evicted_onion {
+            known_peers.remove(&evicted_onion);
+        }
+        known_peers.insert(peer_onion);
+        drop(known_peers);
+
+        if let Some(evicted_cached_content_id) = evicted_cached_content_id {
+            self.remove_unused_foreign_blob(&evicted_cached_content_id)?;
+        }
+
+        Ok(())
     }
 
     /// Build the responder content summary for bbrpc.
@@ -408,19 +645,11 @@ impl Node {
     fn add_known_peer_with_origin(&self, peer_onion: &str, origin: i32) -> Result<(), Status> {
         let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
             .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
-        self.with_store(|store| store.ensure_peer_with_origin(peer_public_key.as_bytes(), origin))
-            .or_else(|error| {
-                if error.code() == Code::FailedPrecondition {
-                    Ok(())
-                } else {
-                    Err(error)
-                }
-            })?;
-        self.known_peers
-            .lock()
-            .unwrap()
-            .insert(peer_onion.to_string());
-        Ok(())
+        self.track_peer_identity(
+            &peer_public_key,
+            origin,
+            storedpb::FirstContactDirection::Unknown as i32,
+        )
     }
 
     /// Return the configured peer onion hostnames in deterministic order.
@@ -570,6 +799,13 @@ impl Node {
         .await
         .map_err(|_| Status::deadline_exceeded("connect peer timed out"))?
         .map_err(|error| Status::unavailable(format!("connect peer: {error}")))?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
+            .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+        self.track_peer_identity(
+            &peer_public_key,
+            peer_origin_code(false, false),
+            storedpb::FirstContactDirection::Outbound as i32,
+        )?;
 
         Ok(transport::configure_peer_client(client))
     }
@@ -908,6 +1144,11 @@ impl Node {
         peer_public_key: &ed25519_dalek::PublicKey,
         content_info: Option<&bbrpc::ContentInfo>,
     ) -> Result<(), Status> {
+        if !self.is_tracked_peer(peer_public_key)? {
+            return Err(Status::resource_exhausted(format!(
+                "peer capacity reached; refusing to mirror {peer_onion}"
+            )));
+        }
         let (_, previous_cached_content) = self.mirrored_peer_revision_state(peer_public_key)?;
         let previous_cached_content_id = previous_cached_content
             .as_ref()
@@ -1064,6 +1305,9 @@ impl Node {
         peer_public_key: &ed25519_dalek::PublicKey,
         passed: bool,
     ) -> Result<i64, Status> {
+        if !self.is_tracked_peer(peer_public_key)? {
+            return Err(Status::failed_precondition("peer is not tracked"));
+        }
         let (score_seconds, measured_at) = self.peer_score_state(peer_public_key)?;
         let now_secs = i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX);
         let elapsed = if measured_at > 0 {
@@ -2372,16 +2616,25 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         &self,
         request: tonic::Request<bbrpc::PeerExchangeRequest>,
     ) -> Result<tonic::Response<bbrpc::PeerExchangeResponse>, tonic::Status> {
+        let peer_identity = self.node.peer_identity_from_request(&request)?;
+        self.node.track_peer_identity(
+            &peer_identity.public_key,
+            peer_origin_code(false, false),
+            storedpb::FirstContactDirection::Inbound as i32,
+        )?;
         let request = request.into_inner();
         for peer in request.peers {
             let public_key = match ed25519_dalek::PublicKey::from_bytes(&peer.onion_pubkey) {
                 Ok(public_key) => public_key,
                 Err(_) => continue,
             };
-            self.node.add_known_peer_with_origin(
-                &keys::onion_hostname_from_public_key(&public_key),
-                peer_origin_code(false, false),
-            )?;
+            let peer_onion = keys::onion_hostname_from_public_key(&public_key);
+            if let Err(error) = self
+                .node
+                .add_known_peer_with_origin(&peer_onion, peer_origin_code(false, false))
+            {
+                warn!(peer = %peer_onion, %error, "skipped discovered peer during peer exchange");
+            }
         }
 
         let peers = self
@@ -2405,6 +2658,13 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         request: tonic::Request<bbrpc::GetContentRevisionRequest>,
     ) -> Result<tonic::Response<bbrpc::GetContentRevisionResponse>, tonic::Status> {
         let peer_identity = self.node.peer_identity_from_request(&request).ok();
+        if let Some(peer_identity) = peer_identity.as_ref() {
+            self.node.track_peer_identity(
+                &peer_identity.public_key,
+                peer_origin_code(false, false),
+                storedpb::FirstContactDirection::Inbound as i32,
+            )?;
+        }
         let requester_content = peer_identity
             .as_ref()
             .map(|peer_identity| self.node.requester_content(&peer_identity.public_key))
@@ -2431,6 +2691,11 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         request: tonic::Request<bbrpc::SetContentRevisionRequest>,
     ) -> Result<tonic::Response<bbrpc::SetContentRevisionResponse>, tonic::Status> {
         let peer_identity = self.node.peer_identity_from_request(&request)?;
+        self.node.track_peer_identity(
+            &peer_identity.public_key,
+            peer_origin_code(false, false),
+            storedpb::FirstContactDirection::Inbound as i32,
+        )?;
         let requester_content = request.into_inner().requester_content;
         if let Some(content_info) = requester_content.as_ref() {
             validate_peer_content_info(content_info)?;
@@ -2452,6 +2717,13 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         request: tonic::Request<bbrpc::DownloadRequest>,
     ) -> Result<tonic::Response<bbrpc::DownloadResponse>, tonic::Status> {
         let peer_identity = self.node.peer_identity_from_request(&request).ok();
+        if let Some(peer_identity) = peer_identity.as_ref() {
+            self.node.track_peer_identity(
+                &peer_identity.public_key,
+                peer_origin_code(false, false),
+                storedpb::FirstContactDirection::Inbound as i32,
+            )?;
+        }
         let request = request.into_inner();
         validate_peer_content_id(&request.content_id)?;
         if request.offset < 0 {
@@ -2946,6 +3218,267 @@ mod tests {
         assert!(source.contains("pub const BUILTIN_PEERS"));
         assert!(source.contains("\"alpha.onion\""));
         assert!(source.contains("\"beta.onion\""));
+    }
+
+    /// Build one stored peer entry for priority-policy tests.
+    fn test_peer(
+        seed: &str,
+        origin: i32,
+        score_seconds: i64,
+        first_contact_direction: i32,
+    ) -> storedpb::Peer {
+        let identity = Node::new(seed).unwrap();
+
+        storedpb::Peer {
+            onion_pubkey: identity.ed25519_keypair().public.to_bytes().to_vec(),
+            score_seconds,
+            score_measured_at: 0,
+            content_id: Vec::new(),
+            latest_known_content: None,
+            latest_cached_content: None,
+            origin,
+            first_contact_direction,
+        }
+    }
+
+    #[test]
+    fn peer_priority_follows_product_order() {
+        assert!(
+            peer_priority(
+                storedpb::PeerOrigin::Manual as i32,
+                0,
+                storedpb::FirstContactDirection::Unknown as i32,
+            ) > peer_priority(
+                storedpb::PeerOrigin::Discovered as i32,
+                1,
+                storedpb::FirstContactDirection::Unknown as i32,
+            )
+        );
+        assert!(
+            peer_priority(
+                storedpb::PeerOrigin::Discovered as i32,
+                1,
+                storedpb::FirstContactDirection::Unknown as i32,
+            ) > peer_priority(
+                storedpb::PeerOrigin::BuiltIn as i32,
+                0,
+                storedpb::FirstContactDirection::Unknown as i32,
+            )
+        );
+        assert!(
+            peer_priority(
+                storedpb::PeerOrigin::BuiltIn as i32,
+                0,
+                storedpb::FirstContactDirection::Unknown as i32,
+            ) > peer_priority(
+                storedpb::PeerOrigin::Discovered as i32,
+                0,
+                storedpb::FirstContactDirection::Outbound as i32,
+            )
+        );
+        assert!(
+            peer_priority(
+                storedpb::PeerOrigin::Discovered as i32,
+                0,
+                storedpb::FirstContactDirection::Outbound as i32,
+            ) > peer_priority(
+                storedpb::PeerOrigin::Discovered as i32,
+                0,
+                storedpb::FirstContactDirection::Inbound as i32,
+            )
+        );
+        assert!(
+            peer_priority(
+                storedpb::PeerOrigin::Discovered as i32,
+                0,
+                storedpb::FirstContactDirection::Inbound as i32,
+            ) > peer_priority(
+                storedpb::PeerOrigin::Discovered as i32,
+                0,
+                storedpb::FirstContactDirection::Unknown as i32,
+            )
+        );
+    }
+
+    #[test]
+    fn plan_peer_admission_only_evicts_strictly_lower_priority_peers() {
+        let inbound_peer = test_peer(
+            "priority-inbound",
+            storedpb::PeerOrigin::Discovered as i32,
+            0,
+            storedpb::FirstContactDirection::Inbound as i32,
+        );
+        let reserved_peer = test_peer(
+            "priority-reserved",
+            storedpb::PeerOrigin::Discovered as i32,
+            10,
+            storedpb::FirstContactDirection::Unknown as i32,
+        );
+        let outbound_candidate = test_peer(
+            "priority-outbound",
+            storedpb::PeerOrigin::Discovered as i32,
+            0,
+            storedpb::FirstContactDirection::Outbound as i32,
+        );
+        let equal_inbound_candidate = test_peer(
+            "priority-inbound-equal",
+            storedpb::PeerOrigin::Discovered as i32,
+            0,
+            storedpb::FirstContactDirection::Inbound as i32,
+        );
+        let built_in_candidate = test_peer(
+            "priority-built-in",
+            storedpb::PeerOrigin::BuiltIn as i32,
+            0,
+            storedpb::FirstContactDirection::Unknown as i32,
+        );
+
+        assert_eq!(
+            plan_peer_admission(
+                std::slice::from_ref(&inbound_peer),
+                &outbound_candidate.onion_pubkey,
+                outbound_candidate.origin,
+                outbound_candidate.score_seconds,
+                outbound_candidate.first_contact_direction,
+                1,
+            ),
+            PeerAdmissionPlan::Admit {
+                evicted_public_key: Some(inbound_peer.onion_pubkey.clone()),
+            }
+        );
+        assert_eq!(
+            plan_peer_admission(
+                std::slice::from_ref(&inbound_peer),
+                &equal_inbound_candidate.onion_pubkey,
+                equal_inbound_candidate.origin,
+                equal_inbound_candidate.score_seconds,
+                equal_inbound_candidate.first_contact_direction,
+                1,
+            ),
+            PeerAdmissionPlan::Reject
+        );
+        assert_eq!(
+            plan_peer_admission(
+                std::slice::from_ref(&reserved_peer),
+                &built_in_candidate.onion_pubkey,
+                built_in_candidate.origin,
+                built_in_candidate.score_seconds,
+                built_in_candidate.first_contact_direction,
+                1,
+            ),
+            PeerAdmissionPlan::Reject
+        );
+    }
+
+    #[test]
+    fn manual_peer_displaces_inbound_peer_at_capacity() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Node::with_local_storage("manual-capacity-owner", filesystem)?;
+        let capacity = 8;
+
+        for index in 0..capacity {
+            let inbound = Node::new(&format!("manual-capacity-inbound-{index}"))?;
+            let inbound_public_key = keys::public_key_from_onion_hostname(inbound.address())?;
+            node.track_peer_identity_with_capacity(
+                &inbound_public_key,
+                peer_origin_code(false, false),
+                storedpb::FirstContactDirection::Inbound as i32,
+                capacity,
+            )?;
+        }
+        assert_eq!(node.known_peers().len(), capacity);
+
+        let manual_peer = Node::new("manual-capacity-good")?;
+        let manual_public_key = keys::public_key_from_onion_hostname(manual_peer.address())?;
+        node.track_peer_identity_with_capacity(
+            &manual_public_key,
+            storedpb::PeerOrigin::Manual as i32,
+            storedpb::FirstContactDirection::Unknown as i32,
+            capacity,
+        )?;
+
+        let known_peers = node.known_peers();
+        assert_eq!(known_peers.len(), capacity);
+        assert!(known_peers.contains(&manual_peer.address().to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn inbound_eclipse_peers_cannot_displace_priority_peers() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Node::with_local_storage("eclipse-owner", filesystem)?;
+        let capacity = 16;
+
+        let manual_peer = Node::new("eclipse-manual")?;
+        let manual_public_key = keys::public_key_from_onion_hostname(manual_peer.address())?;
+        node.track_peer_identity_with_capacity(
+            &manual_public_key,
+            storedpb::PeerOrigin::Manual as i32,
+            storedpb::FirstContactDirection::Unknown as i32,
+            capacity,
+        )?;
+
+        let reserved_peer = Node::new("eclipse-reserved")?;
+        let reserved_public_key = keys::public_key_from_onion_hostname(reserved_peer.address())?;
+        node.track_peer_identity_with_capacity(
+            &reserved_public_key,
+            peer_origin_code(false, false),
+            storedpb::FirstContactDirection::Outbound as i32,
+            capacity,
+        )?;
+        node.with_store(|store| store.set_peer_score(reserved_public_key.as_bytes(), 100, 1))?;
+
+        let built_in_peer = Node::new("eclipse-built-in")?;
+        let built_in_public_key = keys::public_key_from_onion_hostname(built_in_peer.address())?;
+        node.track_peer_identity_with_capacity(
+            &built_in_public_key,
+            storedpb::PeerOrigin::BuiltIn as i32,
+            storedpb::FirstContactDirection::Unknown as i32,
+            capacity,
+        )?;
+
+        let outbound_peer = Node::new("eclipse-outbound")?;
+        let outbound_public_key = keys::public_key_from_onion_hostname(outbound_peer.address())?;
+        node.track_peer_identity_with_capacity(
+            &outbound_public_key,
+            peer_origin_code(false, false),
+            storedpb::FirstContactDirection::Outbound as i32,
+            capacity,
+        )?;
+
+        for index in 0..(capacity - 4) {
+            let inbound = Node::new(&format!("eclipse-inbound-{index}"))?;
+            let inbound_public_key = keys::public_key_from_onion_hostname(inbound.address())?;
+            node.track_peer_identity_with_capacity(
+                &inbound_public_key,
+                peer_origin_code(false, false),
+                storedpb::FirstContactDirection::Inbound as i32,
+                capacity,
+            )?;
+        }
+        assert_eq!(node.known_peers().len(), capacity);
+
+        for index in 0..32 {
+            let inbound = Node::new(&format!("eclipse-extra-{index}"))?;
+            let inbound_public_key = keys::public_key_from_onion_hostname(inbound.address())?;
+            let error = node
+                .track_peer_identity_with_capacity(
+                    &inbound_public_key,
+                    peer_origin_code(false, false),
+                    storedpb::FirstContactDirection::Inbound as i32,
+                    capacity,
+                )
+                .unwrap_err();
+            assert_eq!(error.code(), Code::ResourceExhausted);
+        }
+
+        let known_peers = node.known_peers();
+        assert_eq!(known_peers.len(), capacity);
+        assert!(known_peers.contains(&manual_peer.address().to_string()));
+        assert!(known_peers.contains(&reserved_peer.address().to_string()));
+        assert!(known_peers.contains(&built_in_peer.address().to_string()));
+        assert!(known_peers.contains(&outbound_peer.address().to_string()));
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]
