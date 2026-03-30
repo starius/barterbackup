@@ -19,20 +19,23 @@
             extensions = [
               "cargo"
               "clippy"
+              "llvm-tools-preview"
               "rust-analyzer"
               "rust-src"
               "rustfmt"
             ];
             targets = [
+              "aarch64-unknown-linux-musl"
+              "x86_64-pc-windows-msvc"
               "x86_64-unknown-linux-musl"
             ];
           };
         in
         f {
-          inherit pkgs rustToolchain;
+          inherit pkgs rustToolchain system;
         });
     in {
-      devShells = forAllSystems ({ pkgs, rustToolchain }:
+      devShells = forAllSystems ({ pkgs, rustToolchain, system }:
         let
           commonPackages = [
             rustToolchain
@@ -40,14 +43,25 @@
             pkgs.cargo-deny
             pkgs.cargo-audit
             pkgs.cargo-fuzz
+            pkgs.cargo-xwin
+            pkgs.cmake
             pkgs.clang
             # Provides clang-format for Makefile proto formatting.
             pkgs.clang-tools
             pkgs.git
+            pkgs.nasm
+            pkgs.ninja
             pkgs.openssl
             pkgs.pkg-config
             pkgs.protobuf
             pkgs.sqlite
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            pkgs.llvmPackages_latest.compiler-rt
+            pkgs.lld
+          ] ++ pkgs.lib.optionals (system == "x86_64-linux") [
+            pkgs.pkgsCross.musl64.stdenv.cc
+          ] ++ pkgs.lib.optionals (system == "aarch64-linux") [
+            pkgs.pkgsCross.aarch64-multiplatform-musl.stdenv.cc
           ];
         in {
           default = pkgs.mkShell {

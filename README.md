@@ -8,6 +8,10 @@ stores encrypted blobs for peers, and recovers the newest revision from peers
 when local state is lost. Peer traffic runs over Tor onion services with
 mutual TLS and enforced post-quantum hybrid key exchange.
 
+Each mirrored peer blob also has an encrypted peer sidecar. A sidecar is a
+small local metadata record that says which peer and content revision the
+cached blob belongs to without exposing plaintext user data.
+
 ## Features
 
 - locked-start daemon with local admin RPC (`clirpc`)
@@ -36,6 +40,12 @@ nix develop
 ```
 
 The Nix shell provides a recent Rust toolchain plus common development tools.
+Any `make` target can be run inside it directly, for example:
+
+```bash
+nix develop --command make test
+nix develop --command make build-static
+```
 
 Without Nix, use a current stable Rust toolchain. Protobuf compilation uses a
 vendored `protoc`, so a host `protoc` installation is not required.
@@ -57,6 +67,22 @@ Install the binaries into Cargo's install root:
 ```bash
 make install
 ```
+
+Build distributable variants:
+
+```bash
+make build-static
+make build-windows
+make sanitize-address
+```
+
+`make build-static` produces musl-linked Linux binaries for the current Linux
+host architecture. `make build-windows` uses `cargo-xwin` to produce
+`x86_64-pc-windows-msvc` binaries and requests static CRT linkage; Windows
+system DLLs still remain dynamic as usual, and the first run downloads the
+Microsoft SDK pieces that `cargo-xwin` needs. `make sanitize-address` is a
+Linux-only nightly target that rebuilds the workspace with AddressSanitizer
+instrumentation.
 
 ## Test
 
@@ -101,57 +127,61 @@ Important current behavior:
 - those keys are currently regenerated on each daemon start
 - if you use a custom `BBD_DATA_DIR`, point `BBCLI_CLI_KEYS_DIR` at the same
   directory's `cli-keys` subdirectory
+- on operating systems that support owner-only modes, `BBD_DATA_DIR`,
+  `<data-dir>/cli-keys`, and the files written under them are tightened to
+  owner-only permissions
 
 The daemon also takes an exclusive lock on `<data-dir>/.lock`, so two `bbd`
 instances cannot use the same state directory concurrently.
 
 ## Quick start
 
-Start the daemon:
+Install or otherwise place `bbd` and `bbcli` on your `PATH`, then start the
+daemon:
 
 ```bash
-cargo run --bin bbd --
+bbd
 ```
 
 Unlock it with the main seed/password. Interactive usage will prompt and mask
-input; non-interactive usage can stream the password through stdin:
+input; non-interactive usage can stream the password through stdin. The unlock
+path trims trailing whitespace-like characters from stdin so simple `echo`
+examples are safe:
 
 ```bash
-printf '%s' 'correct horse battery staple' | \
-  cargo run --bin bbcli -- unlock --password-stdin
+echo 'correct horse battery staple' | bbcli unlock --password-stdin
 ```
 
 If you use a custom data directory:
 
 ```bash
-BBD_DATA_DIR=/tmp/barterbackup cargo run --bin bbd --
-printf '%s' 'correct horse battery staple' | \
-  BBCLI_CLI_KEYS_DIR=/tmp/barterbackup/cli-keys \
-  cargo run --bin bbcli -- unlock --password-stdin
+BBD_DATA_DIR=/tmp/barterbackup bbd
+echo 'correct horse battery staple' | \
+  BBCLI_CLI_KEYS_DIR=/tmp/barterbackup/cli-keys bbcli unlock --password-stdin
 ```
 
 Add a peer:
 
 ```bash
-cargo run --bin bbcli -- connect-peer <peer-onion-id>
+bbcli connect-peer <peer-onion-id>
 ```
 
 Manage files:
 
 ```bash
-cargo run --bin bbcli -- set-file alpha.txt ./alpha.txt
-cargo run --bin bbcli -- list-files
-cargo run --bin bbcli -- get-file alpha.txt ./alpha.out
-cargo run --bin bbcli -- delete-file alpha.txt
+bbcli set-file alpha.txt ./alpha.txt
+bbcli list-files
+bbcli get-file alpha.txt ./alpha.out
+bbcli delete-file alpha.txt
 ```
 
 Inspect contracts and recovery:
 
 ```bash
-cargo run --bin bbcli -- get-contracts
-cargo run --bin bbcli -- propose-contract <peer-onion-id>
-cargo run --bin bbcli -- check-contract <peer-onion-id>
-cargo run --bin bbcli -- recover-content
+bbcli get-contracts
+bbcli propose-contract <peer-onion-id>
+bbcli check-contract <peer-onion-id>
+bbcli recover-content
 ```
 
 ## Security model
@@ -161,8 +191,10 @@ cargo run --bin bbcli -- recover-content
 - node identity is a deterministic Ed25519 keypair
 - peer transport uses Arti onion services plus mutual TLS
 - TLS is restricted to TLS 1.3 with `X25519MLKEM768`
-- user data is stored only in encrypted content blobs and encrypted peer
-  sidecars
+- user data is stored only in encrypted content blobs
+- peer metadata is stored only in encrypted peer sidecars
+- daemon-private paths are tightened to owner-only permissions when the host
+  OS provides that notion
 
 ## Notes
 

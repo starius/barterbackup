@@ -521,6 +521,10 @@ fn restrict_owner_only_file(path: &Path) -> Result<()> {
     {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
 
     Ok(())
 }

@@ -30,6 +30,8 @@ Terminology
 Build and test
 
 - Prefer `nix develop` for a ready-to-use toolchain.
+- Any repository `make` target can be run as
+  `nix develop --command make <target>`.
 - Main commands:
   - `cargo build --workspace`
   - `cargo test --workspace`
@@ -41,6 +43,9 @@ Build and test
   - `make fmt`
   - `make clippy`
   - `make install`
+  - `make build-static`
+  - `make build-windows`
+  - `make sanitize-address`
 
 Proto generation
 
@@ -57,7 +62,11 @@ Transport and security
 - TLS policy is TLS 1.3 only with `X25519MLKEM768` enforced.
 - Node identity is the deterministic Ed25519 key derived from the main seed.
 - Local content and mirrored peer content must remain encrypted at rest.
+- A peer sidecar is the encrypted local metadata record stored alongside one
+  mirrored peer blob.
 - The daemon locks the data directory with `<data-dir>/.lock`.
+- On operating systems that support owner-only modes, the data directory,
+  `cli-keys`, and the private files under them are tightened accordingly.
 
 Current operational details
 
