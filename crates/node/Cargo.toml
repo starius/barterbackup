@@ -9,6 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
+content = { path = "../content" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tonic = { version = "0.14.2", features = ["transport", "tls-connect-info", "tls-ring"] }
 protos = { path = "../protos" }

@@ -117,6 +117,6 @@ impl PeerConnector for MockPeerConnector {
             .ok_or_else(|| anyhow::anyhow!("unknown peer onion: {peer_onion}"))?;
         let channel = connect_peer_channel(&endpoint, peer_onion, client_private_key).await?;
 
-        Ok(PeerClient::new(channel))
+        Ok(transport::configure_peer_client(PeerClient::new(channel)))
     }
 }

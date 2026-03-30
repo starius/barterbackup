@@ -6,7 +6,9 @@
 
 use anyhow::Result;
 use clock::{Clock, SystemClock, Timestamp};
+use content::CONTENT_ID_LEN;
 use futures::{stream, Stream};
+use std::future::Future;
 use protos::{bbrpc, clirpc};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,8 +18,6 @@ use storage::{Filesystem, StorageError, Store};
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tonic::{Code, Response, Status};
 use transport::PeerConnector;
-
-const MAX_PEER_CONTENT_BYTES: i64 = 4 * 1024 * 1024;
 
 /// PeerIdentity describes the authenticated peer that issued a request.
 struct PeerIdentity {
@@ -45,6 +45,35 @@ pub struct Node {
     storage_config: Mutex<clirpc::StorageConfig>,
     /// peer_connector dials other nodes when peer sync is enabled.
     peer_connector: Mutex<Option<Arc<dyn PeerConnector>>>,
+}
+
+/// Return the peer-content size limit as an `i64` for protobuf comparisons.
+fn max_peer_content_bytes_i64() -> i64 {
+    i64::try_from(transport::MAX_PEER_CONTENT_BYTES).unwrap_or(i64::MAX)
+}
+
+/// Validate one peer-visible content identifier.
+fn validate_peer_content_id(content_id: &[u8]) -> Result<(), Status> {
+    if content_id.len() != CONTENT_ID_LEN {
+        return Err(Status::invalid_argument(
+            "content id has an invalid length",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate one peer-visible content descriptor before we trust its sizes.
+fn validate_peer_content_info(content_info: &bbrpc::ContentInfo) -> Result<(), Status> {
+    if content_info.content_length <= 0 {
+        return Err(Status::invalid_argument("content length must be positive"));
+    }
+    if content_info.content_length > max_peer_content_bytes_i64() {
+        return Err(Status::invalid_argument("content is too large"));
+    }
+    validate_peer_content_id(&content_info.content_id)?;
+
+    Ok(())
 }
 
 impl Node {
@@ -148,12 +177,23 @@ impl Node {
 
     /// Build the responder content summary for bbrpc.
     fn responder_content(&self) -> Result<Option<bbrpc::ContentInfo>, Status> {
-        self.with_store(|store| {
+        let content = self.with_store(|store| {
             Ok(store.current_content().map(|current| bbrpc::ContentInfo {
                 content_id: current.content_id.clone(),
                 content_length: i64::try_from(current.blob_len).unwrap_or(i64::MAX),
             }))
-        })
+        })?;
+
+        if content
+            .as_ref()
+            .is_some_and(|content_info| content_info.content_length > max_peer_content_bytes_i64())
+        {
+            return Err(Status::failed_precondition(
+                "current content exceeds the peer transport limit",
+            ));
+        }
+
+        Ok(content)
     }
 
     /// Install the outbound peer connector used for peer synchronization.
@@ -269,10 +309,36 @@ impl Node {
             .unwrap()
             .clone()
             .ok_or_else(|| Status::failed_precondition("peer connector is not configured"))?;
-        connector
-            .connect(peer_onion, &self.ed25519_keypair.secret)
-            .await
-            .map_err(|error| Status::unavailable(format!("connect peer: {error}")))
+        let client = tokio::time::timeout(
+            transport::PEER_CONNECT_TIMEOUT,
+            connector.connect(peer_onion, &self.ed25519_keypair.secret),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("connect peer timed out"))?
+        .map_err(|error| Status::unavailable(format!("connect peer: {error}")))?;
+
+        Ok(transport::configure_peer_client(client))
+    }
+
+    /// Run one peer RPC under the shared timeout policy.
+    async fn peer_rpc<T, F>(
+        &self,
+        peer_onion: &str,
+        operation: &'static str,
+        future: F,
+    ) -> Result<T, Status>
+    where
+        F: Future<Output = Result<Response<T>, tonic::Status>>,
+    {
+        match tokio::time::timeout(transport::PEER_RPC_TIMEOUT, future).await {
+            Ok(Ok(response)) => Ok(response.into_inner()),
+            Ok(Err(error)) => Err(Status::unavailable(format!(
+                "{operation} from {peer_onion}: {error}"
+            ))),
+            Err(_) => Err(Status::deadline_exceeded(format!(
+                "{operation} from {peer_onion} timed out"
+            ))),
+        }
     }
 
     /// Download an encrypted blob from a peer and verify the advertised hash.
@@ -280,19 +346,45 @@ impl Node {
         &self,
         peer_onion: &str,
         content_id: &[u8],
+        expected_length: i64,
     ) -> Result<Vec<u8>, Status> {
+        validate_peer_content_id(content_id)?;
+        if expected_length <= 0 {
+            return Err(Status::invalid_argument(
+                "expected content length must be positive",
+            ));
+        }
+        if expected_length > max_peer_content_bytes_i64() {
+            return Err(Status::invalid_argument("expected content is too large"));
+        }
+
         let mut client = self.connect_peer_client(peer_onion).await?;
-        let response = client
-            .download(bbrpc::DownloadRequest {
-                content_id: content_id.to_vec(),
-                offset: 0,
-                reference_content_id: Vec::new(),
-            })
-            .await
-            .map_err(|error| Status::unavailable(format!("download peer content: {error}")))?
-            .into_inner();
+        let response = self
+            .peer_rpc(
+                peer_onion,
+                "download peer content",
+                client.download(bbrpc::DownloadRequest {
+                    content_id: content_id.to_vec(),
+                    offset: 0,
+                    reference_content_id: Vec::new(),
+                }),
+            )
+            .await?;
         if response.total_length < 0 {
             return Err(Status::internal("peer returned a negative content length"));
+        }
+        if response.total_length > max_peer_content_bytes_i64() {
+            return Err(Status::resource_exhausted(
+                "peer returned content larger than the transport limit",
+            ));
+        }
+        if response.total_length != expected_length {
+            return Err(Status::data_loss(
+                "peer returned a different content length than advertised",
+            ));
+        }
+        if response.sha256.len() != 32 {
+            return Err(Status::data_loss("peer returned an invalid content hash"));
         }
 
         // The current protocol implementation serves whole blobs as raw bytes.
@@ -376,9 +468,14 @@ impl Node {
 
         match content_info {
             Some(content_info) => {
+                validate_peer_content_info(content_info)?;
                 if self.needs_mirrored_blob_download(&content_info.content_id)? {
                     let blob = self
-                        .download_peer_blob(peer_onion, &content_info.content_id)
+                        .download_peer_blob(
+                            peer_onion,
+                            &content_info.content_id,
+                            content_info.content_length,
+                        )
                         .await?;
                     self.with_store(|store| {
                         store.write_mirrored_blob(&content_info.content_id, &blob)
@@ -583,10 +680,13 @@ impl Node {
             // Probe the peer live so the contract view reflects reachability
             // and can opportunistically refresh mirrored peer blobs.
             if let Ok(mut client) = self.connect_peer_client(&peer_onion).await {
-                if let Ok(revision) = client
-                    .get_content_revision(bbrpc::GetContentRevisionRequest {})
+                if let Ok(revision) = self
+                    .peer_rpc(
+                        &peer_onion,
+                        "get content revision",
+                        client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
+                    )
                     .await
-                    .map(|response| response.into_inner())
                 {
                     online = true;
                     our_remaining_seconds = revision.requester_remaining_seconds;
@@ -637,11 +737,13 @@ impl Node {
         // Query the peer's live contract state before deciding what needs to
         // be synchronized in either direction.
         let mut client = self.connect_peer_client(peer_onion).await?;
-        let revision = client
-            .get_content_revision(bbrpc::GetContentRevisionRequest {})
-            .await
-            .map_err(|error| Status::unavailable(format!("get content revision: {error}")))?
-            .into_inner();
+        let revision = self
+            .peer_rpc(
+                peer_onion,
+                "get content revision",
+                client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
+            )
+            .await?;
         let their_content_length = revision
             .responder_content
             .as_ref()
@@ -689,12 +791,14 @@ impl Node {
             .as_ref()
             .map(|content_info| content_info.content_id.clone());
         if peer_has_our_content != desired_content_id {
-            client
-                .set_content_revision(bbrpc::SetContentRevisionRequest {
+            self.peer_rpc(
+                peer_onion,
+                "set content revision",
+                client.set_content_revision(bbrpc::SetContentRevisionRequest {
                     requester_content: our_content.clone(),
-                })
-                .await
-                .map_err(|error| Status::unavailable(format!("set content revision: {error}")))?;
+                }),
+            )
+            .await?;
             uploaded_our_content = our_content_length;
         }
 
@@ -737,11 +841,13 @@ impl Node {
         // Refresh the peer's advertised content before validating their copy of
         // our own revision.
         let mut client = self.connect_peer_client(peer_onion).await?;
-        let revision = client
-            .get_content_revision(bbrpc::GetContentRevisionRequest {})
-            .await
-            .map_err(|error| Status::unavailable(format!("get content revision: {error}")))?
-            .into_inner();
+        let revision = self
+            .peer_rpc(
+                peer_onion,
+                "get content revision",
+                client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
+            )
+            .await?;
         self.sync_peer_content_info(
             peer_onion,
             &peer_public_key,
@@ -791,15 +897,17 @@ impl Node {
         let local_blob = self.with_store(|store| store.current_blob())?;
         let (section_offset, section_length) =
             self.sample_section(&peer_public_key, &our_content.content_id, local_blob.len());
-        let download = client
-            .download(bbrpc::DownloadRequest {
-                content_id: our_content.content_id.clone(),
-                offset: i64::try_from(section_offset).unwrap_or(i64::MAX),
-                reference_content_id: Vec::new(),
-            })
-            .await
-            .map_err(|error| Status::unavailable(format!("download sampled section: {error}")))?
-            .into_inner();
+        let download = self
+            .peer_rpc(
+                peer_onion,
+                "download sampled section",
+                client.download(bbrpc::DownloadRequest {
+                    content_id: our_content.content_id.clone(),
+                    offset: i64::try_from(section_offset).unwrap_or(i64::MAX),
+                    reference_content_id: Vec::new(),
+                }),
+            )
+            .await?;
         let expected_hash = Sha256::digest(&local_blob);
         let expected_total_length = i64::try_from(local_blob.len()).unwrap_or(i64::MAX);
         let passed = download.total_length == expected_total_length
@@ -852,11 +960,15 @@ impl Node {
                 Ok(client) => client,
                 Err(_) => continue,
             };
-            let revision = match client
-                .get_content_revision(bbrpc::GetContentRevisionRequest {})
+            let revision = match self
+                .peer_rpc(
+                    &peer_onion,
+                    "get content revision",
+                    client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
+                )
                 .await
             {
-                Ok(revision) => revision.into_inner(),
+                Ok(revision) => revision,
                 Err(_) => continue,
             };
             let Some(content_info) = revision.requester_content else {
@@ -902,7 +1014,11 @@ impl Node {
                 let mut last_error = None;
                 for source_peer in &candidate.peers {
                     match self
-                        .download_peer_blob(source_peer, &candidate.content_id)
+                        .download_peer_blob(
+                            source_peer,
+                            &candidate.content_id,
+                            candidate.content_length,
+                        )
                         .await
                     {
                         Ok(blob) => {
@@ -1277,15 +1393,7 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         let peer_identity = self.node.peer_identity_from_request(&request)?;
         let requester_content = request.into_inner().requester_content;
         if let Some(content_info) = requester_content.as_ref() {
-            if content_info.content_length <= 0 {
-                return Err(Status::invalid_argument("content length must be positive"));
-            }
-            if content_info.content_length > MAX_PEER_CONTENT_BYTES {
-                return Err(Status::invalid_argument("content is too large"));
-            }
-            if content_info.content_id.is_empty() {
-                return Err(Status::invalid_argument("content id is required"));
-            }
+            validate_peer_content_info(content_info)?;
         }
 
         self.node
@@ -1305,11 +1413,14 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
     ) -> Result<tonic::Response<bbrpc::DownloadResponse>, tonic::Status> {
         let peer_identity = self.node.peer_identity_from_request(&request).ok();
         let request = request.into_inner();
-        if request.content_id.is_empty() {
-            return Err(Status::invalid_argument("content_id is required"));
-        }
+        validate_peer_content_id(&request.content_id)?;
         if request.offset < 0 {
             return Err(Status::invalid_argument("offset must be non-negative"));
+        }
+        if !request.reference_content_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "reference_content_id is not supported",
+            ));
         }
 
         let offset = usize::try_from(request.offset)
@@ -1423,8 +1534,11 @@ mod tests {
         let service = P2pService::new(node.clone());
         let listener = netmock::bind_peer_listener(&node.ed25519_keypair().secret).await?;
         let endpoint = listener.endpoint().to_string();
-        let router =
-            tonic::transport::Server::builder().add_service(BarterBackupServerServer::new(service));
+        let router = tonic::transport::Server::builder().add_service(
+            BarterBackupServerServer::new(service)
+                .max_decoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES)
+                .max_encoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES),
+        );
         let handle = tokio::spawn(router.serve_with_incoming(listener.into_incoming()));
 
         Ok((endpoint, handle))
@@ -1542,7 +1656,9 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("unknown peer onion: {peer_onion}"))?;
             let channel = Endpoint::from_shared(endpoint)?.connect().await?;
 
-            Ok(transport::PeerClient::new(channel))
+            Ok(transport::configure_peer_client(transport::PeerClient::new(
+                channel,
+            )))
         }
     }
 
@@ -1560,7 +1676,11 @@ mod tests {
         let address = listener.local_addr()?;
         let handle = tokio::spawn(
             tonic::transport::Server::builder()
-                .add_service(BarterBackupServerServer::new(service))
+                .add_service(
+                    BarterBackupServerServer::new(service)
+                        .max_decoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES)
+                        .max_encoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES),
+                )
                 .serve_with_incoming(TcpListenerStream::new(listener)),
         );
 
@@ -1800,6 +1920,8 @@ mod tests {
             name: &'static str,
             /// response is returned by the static peer.
             response: bbrpc::DownloadResponse,
+            /// expected_length is the length advertised before download starts.
+            expected_length: i64,
             /// expected_code is the gRPC status mapped by the node.
             expected_code: Code,
         }
@@ -1816,6 +1938,7 @@ mod tests {
                         },
                     )),
                 },
+                expected_length: 4,
                 expected_code: Code::Internal,
             },
             Case {
@@ -1825,6 +1948,7 @@ mod tests {
                     sha256: Sha256::digest(b"blob").to_vec(),
                     section: None,
                 },
+                expected_length: 4,
                 expected_code: Code::Internal,
             },
             Case {
@@ -1839,6 +1963,7 @@ mod tests {
                         },
                     )),
                 },
+                expected_length: 4,
                 expected_code: Code::Unimplemented,
             },
             Case {
@@ -1852,6 +1977,7 @@ mod tests {
                         },
                     )),
                 },
+                expected_length: 5,
                 expected_code: Code::Internal,
             },
             Case {
@@ -1865,7 +1991,50 @@ mod tests {
                         },
                     )),
                 },
+                expected_length: 4,
                 expected_code: Code::DataLoss,
+            },
+            Case {
+                name: "invalid hash length",
+                response: bbrpc::DownloadResponse {
+                    total_length: 4,
+                    sha256: vec![0u8; 31],
+                    section: Some(bbrpc::download_response::Section::RawBytes(
+                        bbrpc::RawBytes {
+                            value: b"blob".to_vec(),
+                        },
+                    )),
+                },
+                expected_length: 4,
+                expected_code: Code::DataLoss,
+            },
+            Case {
+                name: "unexpected total length",
+                response: bbrpc::DownloadResponse {
+                    total_length: 4,
+                    sha256: Sha256::digest(b"blob").to_vec(),
+                    section: Some(bbrpc::download_response::Section::RawBytes(
+                        bbrpc::RawBytes {
+                            value: b"blob".to_vec(),
+                        },
+                    )),
+                },
+                expected_length: 5,
+                expected_code: Code::DataLoss,
+            },
+            Case {
+                name: "oversized length",
+                response: bbrpc::DownloadResponse {
+                    total_length: max_peer_content_bytes_i64() + 1,
+                    sha256: vec![0u8; 32],
+                    section: Some(bbrpc::download_response::Section::RawBytes(
+                        bbrpc::RawBytes {
+                            value: b"blob".to_vec(),
+                        },
+                    )),
+                },
+                expected_length: 4,
+                expected_code: Code::ResourceExhausted,
             },
         ];
 
@@ -1881,8 +2050,9 @@ mod tests {
             let (endpoint, server) = spawn_plain_peer_server(static_service).await?;
             connector.register_peer(peer_identity.address(), &endpoint);
 
+            let content_id = vec![0x44; CONTENT_ID_LEN];
             let error = node
-                .download_peer_blob(peer_identity.address(), b"content-id")
+                .download_peer_blob(peer_identity.address(), &content_id, case.expected_length)
                 .await
                 .unwrap_err();
             assert_eq!(error.code(), case.expected_code, "case {}", case.name);
@@ -1984,6 +2154,143 @@ mod tests {
 
         requester_server.abort();
         responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_content_revision_rejects_invalid_content_info() -> anyhow::Result<()> {
+        struct Case {
+            /// name is the subtest label.
+            name: &'static str,
+            /// content is the invalid requester content.
+            content: bbrpc::ContentInfo,
+        }
+
+        let cases = vec![
+            Case {
+                name: "zero length",
+                content: bbrpc::ContentInfo {
+                    content_id: vec![0x11; CONTENT_ID_LEN],
+                    content_length: 0,
+                },
+            },
+            Case {
+                name: "too large",
+                content: bbrpc::ContentInfo {
+                    content_id: vec![0x22; CONTENT_ID_LEN],
+                    content_length: max_peer_content_bytes_i64() + 1,
+                },
+            },
+            Case {
+                name: "bad id length",
+                content: bbrpc::ContentInfo {
+                    content_id: vec![0x33; CONTENT_ID_LEN - 1],
+                    content_length: 1,
+                },
+            },
+        ];
+
+        for case in cases {
+            let responder_node = Arc::new(Node::with_local_storage(
+                &format!("responder-{}", case.name),
+                Arc::new(storage::MemoryFilesystem::new()),
+            )?);
+            let requester_node = Arc::new(Node::new(&format!("requester-{}", case.name))?);
+            let connector = Arc::new(netmock::MockPeerConnector::new());
+            let responder_server =
+                spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
+            let mut client =
+                connect_p2p_client(requester_node, responder_node, connector.as_ref()).await?;
+
+            let error = client
+                .set_content_revision(bbrpc::SetContentRevisionRequest {
+                    requester_content: Some(case.content.clone()),
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), Code::InvalidArgument, "case {}", case.name);
+
+            responder_server.abort();
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn download_rejects_reference_requests() -> anyhow::Result<()> {
+        let server_node = Arc::new(Node::with_local_storage(
+            "download-reference-server",
+            Arc::new(storage::MemoryFilesystem::new()),
+        )?);
+        let client_node = Arc::new(Node::new("download-reference-client")?);
+        let cli = CliService::new(server_node.clone());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+
+        cli.set_file(tonic::Request::new(clirpc::SetFileRequest {
+            file: Some(clirpc::File {
+                name: "alpha.txt".to_string(),
+                data: b"alpha-body".to_vec(),
+            }),
+        }))
+        .await?;
+
+        let server = spawn_registered_p2p_server(server_node.clone(), connector.as_ref()).await?;
+        let mut p2p =
+            connect_p2p_client(client_node.clone(), server_node.clone(), connector.as_ref())
+                .await?;
+        let responder = p2p
+            .get_content_revision(tonic::Request::new(bbrpc::GetContentRevisionRequest {}))
+            .await?
+            .into_inner()
+            .responder_content
+            .unwrap();
+
+        let error = p2p
+            .download(tonic::Request::new(bbrpc::DownloadRequest {
+                content_id: responder.content_id,
+                offset: 0,
+                reference_content_id: vec![0x55; CONTENT_ID_LEN],
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::InvalidArgument);
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_message_limit_rejects_oversized_download_message() -> anyhow::Result<()> {
+        let node = Arc::new(Node::new("download-limit-client")?);
+        let peer_identity = Node::new("download-limit-peer")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        node.set_peer_connector(connector.clone());
+        let oversized = vec![0u8; transport::PEER_GRPC_MESSAGE_LIMIT_BYTES + 1];
+        let static_service = StaticPeerService::new(
+            bbrpc::GetContentRevisionResponse::default(),
+            DownloadBehavior::Response(bbrpc::DownloadResponse {
+                total_length: max_peer_content_bytes_i64(),
+                sha256: vec![0u8; 32],
+                section: Some(bbrpc::download_response::Section::RawBytes(
+                    bbrpc::RawBytes { value: oversized },
+                )),
+            }),
+        );
+        let (endpoint, server) = spawn_plain_peer_server(static_service).await?;
+        connector.register_peer(peer_identity.address(), &endpoint);
+
+        let content_id = vec![0x66; CONTENT_ID_LEN];
+        let error = node
+            .download_peer_blob(
+                peer_identity.address(),
+                &content_id,
+                max_peer_content_bytes_i64(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::Unavailable);
+
+        server.abort();
         Ok(())
     }
 

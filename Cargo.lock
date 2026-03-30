@@ -537,6 +537,7 @@ dependencies = [
  "clap",
  "clitls",
  "dirs 5.0.1",
+ "ed25519-dalek 1.0.1",
  "fs2",
  "futures-util",
  "hex",
@@ -554,6 +555,7 @@ dependencies = [
  "tonic",
  "tracing",
  "tracing-subscriber",
+ "transport",
 ]
 
 [[package]]

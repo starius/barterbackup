@@ -210,8 +210,11 @@ impl PeerRuntimeFactory for TorPeerRuntimeFactory {
         // Run the peer-facing gRPC server until shutdown is requested.
         let shutdown = CancellationToken::new();
         let shutdown_signal = shutdown.clone();
-        let router = tonic::transport::Server::builder()
-            .add_service(BarterBackupServerServer::new(P2pService::new(node.clone())));
+        let router = tonic::transport::Server::builder().add_service(
+            BarterBackupServerServer::new(P2pService::new(node.clone()))
+                .max_decoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES)
+                .max_encoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES),
+        );
         let task = tokio::spawn(async move {
             router
                 .serve_with_incoming_shutdown(listener.into_incoming(), async move {
@@ -779,17 +782,36 @@ fn cleanup_local_cli_tls(key_dir: &Path) -> Result<()> {
     }
 }
 
+/// Wait for one maintenance step unless shutdown has already started.
+async fn wait_for_maintenance_step<T, F>(shutdown: &CancellationToken, future: F) -> Option<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::select! {
+        _ = shutdown.cancelled() => None,
+        result = future => Some(result),
+    }
+}
+
 /// Run one background maintenance pass for `node`.
-async fn run_maintenance_pass(node: &Node) {
+async fn run_maintenance_pass(node: &Node, shutdown: &CancellationToken) {
     // Attempt recovery first so the local node restores its newest revision
     // before it starts proposing or checking contracts.
-    if let Err(error) = node.recover_content_update().await {
+    let Some(recovery_result) = wait_for_maintenance_step(shutdown, node.recover_content_update()).await else {
+        return;
+    };
+    if let Err(error) = recovery_result {
         warn!(%error, "background recovery pass failed");
     }
 
     // Then refresh, propose, and check contracts for every known peer.
     for peer_onion in node.known_peers() {
-        match node.propose_contract_updates(&peer_onion).await {
+        let Some(proposal_result) =
+            wait_for_maintenance_step(shutdown, node.propose_contract_updates(&peer_onion)).await
+        else {
+            break;
+        };
+        match proposal_result {
             Ok(_) => {}
             Err(error) => {
                 warn!(peer = %peer_onion, %error, "background contract proposal failed");
@@ -797,7 +819,12 @@ async fn run_maintenance_pass(node: &Node) {
             }
         }
 
-        if let Err(error) = node.check_contract_updates(&peer_onion).await {
+        let Some(check_result) =
+            wait_for_maintenance_step(shutdown, node.check_contract_updates(&peer_onion)).await
+        else {
+            break;
+        };
+        if let Err(error) = check_result {
             warn!(peer = %peer_onion, %error, "background contract check failed");
         }
     }
@@ -822,7 +849,7 @@ async fn run_maintenance_loop(
             break;
         }
 
-        run_maintenance_pass(node.as_ref()).await;
+        run_maintenance_pass(node.as_ref(), &shutdown).await;
     }
 
     Ok(())
@@ -963,7 +990,10 @@ mod tests {
         connect_client_with_keys_dir, get_file_with_client, list_files_with_client,
         set_file_with_client, unlock_with_keys_dir,
     };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
     use tempfile::TempDir;
+    use transport::PeerConnector;
 
     /// NoopPeerRuntimeFactory lets daemon tests exercise unlock flow without
     /// bootstrapping Tor.
@@ -972,6 +1002,60 @@ mod tests {
     #[async_trait]
     impl PeerRuntimeFactory for NoopPeerRuntimeFactory {
         async fn start(&self, _node: Arc<Node>) -> Result<StartedTask> {
+            let shutdown = CancellationToken::new();
+            let shutdown_signal = shutdown.clone();
+            let task = tokio::spawn(async move {
+                shutdown_signal.cancelled().await;
+                Ok(())
+            });
+
+            Ok(StartedTask::new(shutdown, task))
+        }
+    }
+
+    /// HangingPeerConnector never completes peer dials and signals when one starts.
+    #[derive(Default)]
+    struct HangingPeerConnector {
+        started: AtomicBool,
+        started_notify: Notify,
+    }
+
+    impl HangingPeerConnector {
+        /// Wait until the first dial attempt reaches the connector.
+        async fn wait_started(&self, timeout: Duration) -> anyhow::Result<()> {
+            if self.started.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+
+            tokio::time::timeout(timeout, self.started_notify.notified())
+                .await
+                .context("wait for hanging peer dial")?;
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl PeerConnector for HangingPeerConnector {
+        async fn connect(
+            &self,
+            _peer_onion: &str,
+            _client_private_key: &ed25519_dalek::SecretKey,
+        ) -> anyhow::Result<transport::PeerClient> {
+            self.started.store(true, Ordering::SeqCst);
+            self.started_notify.notify_waiters();
+            std::future::pending().await
+        }
+    }
+
+    /// HangingPeerRuntimeFactory injects a peer connector that never finishes dials.
+    struct HangingPeerRuntimeFactory {
+        connector: Arc<HangingPeerConnector>,
+    }
+
+    #[async_trait]
+    impl PeerRuntimeFactory for HangingPeerRuntimeFactory {
+        async fn start(&self, node: Arc<Node>) -> Result<StartedTask> {
+            node.set_peer_connector(self.connector.clone());
             let shutdown = CancellationToken::new();
             let shutdown_signal = shutdown.clone();
             let task = tokio::spawn(async move {
@@ -1016,7 +1100,11 @@ mod tests {
             let shutdown_signal = shutdown.clone();
             let task = tokio::spawn(async move {
                 tonic::transport::Server::builder()
-                    .add_service(BarterBackupServerServer::new(P2pService::new(node)))
+                    .add_service(
+                        BarterBackupServerServer::new(P2pService::new(node))
+                            .max_decoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES)
+                            .max_encoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES),
+                    )
                     .serve_with_incoming_shutdown(listener.into_incoming(), async move {
                         shutdown_signal.cancelled().await;
                     })
@@ -1621,6 +1709,41 @@ mod tests {
 
         restarted_remote.shutdown().await?;
         local_service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_cancels_stuck_maintenance_pass() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let connector = Arc::new(HangingPeerConnector::default());
+        let (maintenance_config, _tick) = manual_maintenance();
+        let service = DaemonService::with_maintenance_config(
+            temp_dir.path().to_path_buf(),
+            Arc::new(HangingPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            maintenance_config,
+        );
+
+        service
+            .unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: "shutdown-maintenance".to_string(),
+            }))
+            .await?;
+
+        let stuck_peer = Node::new("stuck-maintenance-peer")?;
+        service
+            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: stuck_peer.address().to_string(),
+                }),
+            }))
+            .await?;
+        connector.wait_started(Duration::from_secs(1)).await?;
+
+        tokio::time::timeout(Duration::from_secs(1), service.shutdown())
+            .await
+            .context("daemon shutdown timed out while maintenance was stuck")??;
         Ok(())
     }
 }

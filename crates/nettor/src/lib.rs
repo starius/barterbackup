@@ -158,7 +158,7 @@ impl PeerConnector for TorTransport {
             }))
             .await?;
 
-        Ok(PeerClient::new(channel))
+        Ok(transport::configure_peer_client(PeerClient::new(channel)))
     }
 }
 

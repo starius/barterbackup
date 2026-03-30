@@ -24,8 +24,10 @@ fs2 = "0.4"
 hex = "0.4"
 keys = { path = "../../crates/keys" }
 nettor = { path = "../../crates/nettor" }
+transport = { path = "../../crates/transport" }
 
 [dev-dependencies]
 bbcli = { path = "../bbcli" }
 netmock = { path = "../../crates/netmock" }
 tempfile = "3"
+ed25519-dalek = "1"
