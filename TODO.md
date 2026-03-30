@@ -13,6 +13,12 @@ These are the product and hardening items that are still unresolved.
   on whether to keep that behavior or persist and reuse the local admin keys,
   and if we persist them, whether the client key lives on the host or stays on
   the operator machine.
+- Rewrap mirrored peer blobs before storing them on local disk. The current
+  store encrypts peer metadata in the sidecar, but it writes downloaded peer
+  content blobs to disk as raw remote-provided bytes after hash verification.
+  We should authenticate and encrypt those mirrored blobs again under locally
+  derived storage keys before writing them, so untrusted peers never control
+  literal on-disk bytes outside our own AEAD-wrapped format.
 - Surface divergent sibling timelines during recovery. Recovery currently picks
   the newest revision by decrypted timestamp, but the daemon and CLI still need
   RPCs and UX to show conflicting branches, warn about later-discovered
