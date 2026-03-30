@@ -41,6 +41,7 @@
             pkgs.cargo-audit
             pkgs.cargo-fuzz
             pkgs.clang
+            # Provides clang-format for Makefile proto formatting.
             pkgs.clang-tools
             pkgs.git
             pkgs.openssl

@@ -1,4 +1,6 @@
 CARGO ?= cargo
+CLANG_FORMAT ?= clang-format
+PROTO_FILES := $(shell find bbrpc clirpc storedpb -type f -name '*.proto' | sort)
 
 .PHONY: build test unit fmt clippy install clean
 
@@ -12,6 +14,7 @@ unit: test
 
 fmt:
 	$(CARGO) fmt --all
+	$(CLANG_FORMAT) -i $(PROTO_FILES)
 
 clippy:
 	$(CARGO) clippy --workspace --all-targets

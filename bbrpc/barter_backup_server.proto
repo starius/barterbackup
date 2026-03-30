@@ -27,7 +27,6 @@ service BarterBackupServer {
     // Download downloads a section of a file which can be content of either
     // the requester or the responder.
     rpc Download(DownloadRequest) returns (DownloadResponse);
-
 }
 
 // HealthCheckRequest is an empty health check request.
