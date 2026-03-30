@@ -29,6 +29,11 @@ These are the product and hardening items that are still unresolved.
   block Tor still needs a product decision and implementation path, including
   whether to support external Tor, pluggable transports, or operator-managed
   hidden-service keys.
+- Finish production hardening around observability, resource bounds, and
+  hostile-input handling. The daemon still needs a clearer operator-facing
+  story for structured logs and per-peer summaries, plus explicit limits and
+  policies for connection counts, task cancellation, chunk or metadata sizes,
+  repeated partial downloads, and other malicious or malformed peer behavior.
 - Flesh out storage accounting and contract policy beyond the current scoring
   and sync model. Storage quotas, expiration policy, and operator-facing
   visibility are still basic.
