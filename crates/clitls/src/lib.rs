@@ -29,6 +29,8 @@ use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use std::fs;
 use std::io;
 use std::net::IpAddr;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use tokio_rustls::TlsConnector;
@@ -48,21 +50,26 @@ pub fn write_keys(
     client_priv: &SecretKey,
 ) -> Result<()> {
     let dir = dir.as_ref();
-    fs::create_dir_all(dir).context("create cli-keys dir")?;
+    ensure_owner_only_dir(dir).context("create cli-keys dir")?;
     // server.pub (SPKI)
     let spki_der = public_key_to_spki_der(server_pub)?;
     let spki_pem = Pem::new("PUBLIC KEY", spki_der);
-    fs::write(dir.join("server.pub"), pem::encode(&spki_pem)).context("write server.pub")?;
+    write_owner_only_file(&dir.join("server.pub"), pem::encode(&spki_pem).as_bytes())
+        .context("write server.pub")?;
     // client.key (PKCS#8 minimal v1)
     let client_der = secret_to_pkcs8_der(client_priv);
     let client_pem = Pem::new("PRIVATE KEY", client_der);
-    fs::write(dir.join("client.key"), pem::encode(&client_pem)).context("write client.key")?;
+    write_owner_only_file(&dir.join("client.key"), pem::encode(&client_pem).as_bytes())
+        .context("write client.key")?;
     Ok(())
 }
 
 /// Read the local CLI pinning files written by [`write_keys`].
 pub fn read_keys(dir: impl AsRef<Path>) -> Result<(PublicKey, SecretKey)> {
     let dir = dir.as_ref();
+    ensure_owner_only_dir(dir).context("tighten cli-keys dir")?;
+    restrict_owner_only_file(&dir.join("server.pub")).context("tighten server.pub")?;
+    restrict_owner_only_file(&dir.join("client.key")).context("tighten client.key")?;
     let spki_pem = fs::read_to_string(dir.join("server.pub")).context("read server.pub")?;
     let spki = pem::parse(spki_pem).context("parse server.pub pem")?;
     if spki.tag() != "PUBLIC KEY" {
@@ -496,6 +503,34 @@ fn spki_der_to_public_key(spki: &[u8]) -> Result<PublicKey> {
     PublicKey::from_bytes(&spki[12..44]).map_err(|e: SignatureError| anyhow!("{e}"))
 }
 
+/// Create `dir` if needed and tighten it to owner-only permissions.
+fn ensure_owner_only_dir(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir)?;
+
+    #[cfg(unix)]
+    {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+
+    Ok(())
+}
+
+/// Tighten one local admin TLS file to owner-only permissions.
+fn restrict_owner_only_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+
+    Ok(())
+}
+
+/// Write one local admin TLS file with owner-only permissions.
+fn write_owner_only_file(path: &Path, data: &[u8]) -> Result<()> {
+    fs::write(path, data)?;
+    restrict_owner_only_file(path)
+}
+
 // Minimal PKCS#8 v1 encode/decode for Ed25519 keys.
 fn secret_to_pkcs8_der(secret: &SecretKey) -> Vec<u8> {
     // RFC 8410 stores the raw 32-byte seed inside an inner OCTET STRING that
@@ -540,6 +575,8 @@ mod tests {
     use protos::clirpc::HealthCheckRequest;
     use rustls::crypto::aws_lc_rs;
     use std::net::SocketAddr;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -691,6 +728,21 @@ mod tests {
         let (sp, cp) = read_keys(dir.path())?;
         assert_eq!(sp, server_pub);
         assert_eq!(cp.to_bytes(), client_priv.to_bytes());
+        #[cfg(unix)]
+        {
+            let dir_mode = std::fs::metadata(dir.path())?.permissions().mode() & 0o777;
+            let server_mode = std::fs::metadata(dir.path().join("server.pub"))?
+                .permissions()
+                .mode()
+                & 0o777;
+            let client_mode = std::fs::metadata(dir.path().join("client.key"))?
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o700);
+            assert_eq!(server_mode, 0o600);
+            assert_eq!(client_mode, 0o600);
+        }
         Ok(())
     }
 

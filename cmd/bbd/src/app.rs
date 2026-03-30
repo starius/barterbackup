@@ -10,6 +10,8 @@ use protos::bbrpc::barter_backup_server_server::BarterBackupServerServer;
 use protos::clirpc;
 use protos::clirpc::barter_backup_client_server::{BarterBackupClient, BarterBackupClientServer};
 use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -320,10 +322,12 @@ impl DaemonService {
         let fingerprint = hex::encode(keys::derive_key(&master, "fingerprint", 32)?);
 
         match fs::read_to_string(&fingerprint_path) {
-            Ok(existing) => Ok(existing.trim() == fingerprint),
+            Ok(existing) => {
+                restrict_owner_only_file(&fingerprint_path)?;
+                Ok(existing.trim() == fingerprint)
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::write(&fingerprint_path, format!("{fingerprint}\n"))
-                    .with_context(|| format!("write {}", fingerprint_path.display()))?;
+                write_owner_only_file(&fingerprint_path, format!("{fingerprint}\n").as_bytes())?;
                 Ok(true)
             }
             Err(error) => {
@@ -721,8 +725,10 @@ impl DirLock {
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(lock_path)
             .with_context(|| format!("open {}", lock_path.display()))?;
+        restrict_owner_only_file(lock_path)?;
         file.try_lock_exclusive()
             .with_context(|| format!("lock {}", lock_path.display()))?;
         Ok(Self { file })
@@ -738,8 +744,7 @@ impl Drop for DirLock {
 /// Prepare the local CLI key directory and server TLS configuration.
 fn prepare_local_cli_tls(data_dir: &Path) -> Result<LocalCliTls> {
     let cli_keys_dir = data_dir.join("cli-keys");
-    fs::create_dir_all(&cli_keys_dir)
-        .with_context(|| format!("create {}", cli_keys_dir.display()))?;
+    ensure_owner_only_dir(&cli_keys_dir)?;
 
     // Clean any stale key material from a previous unclean shutdown before we
     // publish fresh local CLI credentials.
@@ -763,6 +768,36 @@ fn prepare_local_cli_tls(data_dir: &Path) -> Result<LocalCliTls> {
         key_dir: cli_keys_dir,
         server_tls,
     })
+}
+
+/// Create `path` if needed and tighten its directory permissions.
+fn ensure_owner_only_dir(path: &Path) -> Result<()> {
+    fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("chmod 700 {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+/// Tighten one private file to owner-only permissions when supported.
+fn restrict_owner_only_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod 600 {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+/// Write one daemon-private file with owner-only permissions.
+fn write_owner_only_file(path: &Path, data: &[u8]) -> Result<()> {
+    fs::write(path, data).with_context(|| format!("write {}", path.display()))?;
+    restrict_owner_only_file(path)
 }
 
 /// Remove the ephemeral local CLI key directory after shutdown.
@@ -888,7 +923,7 @@ where
     F: std::future::Future<Output = ()> + Send,
 {
     let data_dir = config.resolved_data_dir()?;
-    fs::create_dir_all(&data_dir).with_context(|| format!("create {}", data_dir.display()))?;
+    ensure_owner_only_dir(&data_dir)?;
 
     // Hold an exclusive lock on the whole data directory so two daemon
     // processes can never mutate the same state tree concurrently.
@@ -992,6 +1027,8 @@ mod tests {
         connect_client_with_keys_dir, get_file_with_client, list_files_with_client,
         set_file_with_client, unlock_with_keys_dir,
     };
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use tempfile::TempDir;
@@ -1173,6 +1210,12 @@ mod tests {
         Ok(node.mirrored_peer_content_id(peer_onion)?)
     }
 
+    /// Return the low Unix permission bits for `path`.
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn dir_lock_blocks_second_owner() -> Result<()> {
         let temp_dir = TempDir::new()?;
@@ -1182,6 +1225,24 @@ mod tests {
 
         drop(first);
         assert!(DirLock::acquire(&temp_dir.path().join(".lock")).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn private_helpers_create_owner_only_paths() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let data_dir = temp_dir.path().join("data");
+        let private_file = data_dir.join("fingerprint.txt");
+
+        ensure_owner_only_dir(&data_dir)?;
+        write_owner_only_file(&private_file, b"fingerprint\n")?;
+
+        #[cfg(unix)]
+        {
+            assert_eq!(mode(&data_dir), 0o700);
+            assert_eq!(mode(&private_file), 0o600);
+        }
+
         Ok(())
     }
 

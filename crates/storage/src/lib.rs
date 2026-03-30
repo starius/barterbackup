@@ -15,6 +15,8 @@ use rand::RngCore;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
@@ -152,6 +154,8 @@ impl OsFilesystem {
     /// Create an on-disk filesystem rooted at `root`.
     pub fn new(root: impl AsRef<Path>) -> Result<Self, StorageError> {
         fs::create_dir_all(root.as_ref())?;
+        #[cfg(unix)]
+        fs::set_permissions(root.as_ref(), fs::Permissions::from_mode(0o700))?;
         Ok(Self {
             root: Arc::new(root.as_ref().to_path_buf()),
         })
@@ -181,6 +185,8 @@ impl Filesystem for OsFilesystem {
         let target = self.root.join(name);
         temp.persist(&target)
             .map_err(|err| StorageError::Io(err.error))?;
+        #[cfg(unix)]
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
 
         // Sync the directory entry so the rename survives power loss.
         File::open(self.root.as_ref())?.sync_all()?;
@@ -1205,5 +1211,16 @@ mod tests {
         fs.write_atomic("blob", b"v2").unwrap();
 
         assert_eq!(fs.read("blob").unwrap(), b"v2".to_vec());
+        #[cfg(unix)]
+        {
+            let dir_mode = fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777;
+            let file_mode = fs::metadata(temp.path().join("blob"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o700);
+            assert_eq!(file_mode, 0o600);
+        }
     }
 }

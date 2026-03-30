@@ -13,6 +13,8 @@ use futures::{Stream, StreamExt};
 use hyper_util::rt::TokioIo;
 use std::fs;
 use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -50,6 +52,9 @@ impl TorTransport {
     pub async fn new(state_dir: impl AsRef<Path>) -> Result<Self> {
         fs::create_dir_all(state_dir.as_ref())
             .with_context(|| format!("create tor state dir {}", state_dir.as_ref().display()))?;
+        #[cfg(unix)]
+        fs::set_permissions(state_dir.as_ref(), fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("chmod 700 {}", state_dir.as_ref().display()))?;
 
         let mut cfg_builder = TorClientConfig::builder();
         cfg_builder
