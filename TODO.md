@@ -23,6 +23,10 @@ These are the product and hardening items that are still unresolved.
   block Tor still needs a product decision and implementation path, including
   whether to support external Tor, pluggable transports, or operator-managed
   hidden-service keys.
+- Finish the real-Tor end-to-end validation story. The ignored
+  `live_tor_recovery_round_trip` test exists, but it still needs a longer soak
+  run or a better validation environment to prove the full two-node public-Tor
+  recovery path end to end.
 - Finish the remaining operator-facing hardening around observability and
   resource controls. Structured peer logs, peer I/O bounds, timeout handling,
   and dedicated fuzz targets are now in place, but the daemon still needs
@@ -31,3 +35,18 @@ These are the product and hardening items that are still unresolved.
 - Flesh out storage accounting and contract policy beyond the current scoring
   and sync model. Storage quotas, expiration policy, and operator-facing
   visibility are still basic.
+- Split peer revision tracking into latest-known and latest-cached states. When
+  storage pressure prevents caching the newest advertised peer blob locally, the
+  node should still report both the newest known peer revision and the newest
+  locally cached revision that can actually be served or recovered.
+- Raise the default peer-storage budget from 64 MiB to 1 GiB so the default
+  node can retain roughly 256 full 4 MiB peer blobs before best-effort
+  eviction pressure begins.
+- Add explicit cross-host static Linux build targets:
+  `make build-static-linux-amd64` and `make build-static-linux-arm64`. Both
+  targets should produce release musl-linked Linux binaries and work inside
+  `nix develop` on any supported host, using cross-compilation when needed.
+- Add all generated build-artifact directories created by `make` workflows to
+  `.gitignore`, including existing paths such as `target-static/` and any
+  other target or output directories used by static, Windows, sanitizer, fuzz,
+  or cross-build targets.
