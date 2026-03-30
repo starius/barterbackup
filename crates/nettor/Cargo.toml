@@ -10,7 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
-clitls = { path = "../clitls" }
+tlsutil = { path = "../tlsutil" }
 ed25519-dalek = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 keys = { path = "../keys" }

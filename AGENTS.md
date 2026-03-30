@@ -11,7 +11,7 @@ Repository layout
 - `cmd/bbcli`: CLI binary.
 - `crates/protos`: protobuf/gRPC bindings compiled at build time.
 - `crates/keys`: seed derivation and onion identity helpers.
-- `crates/clitls`: local and peer TLS helpers.
+- `crates/tlsutil`: local and peer TLS helpers.
 - `crates/content`: encrypted content blob format.
 - `crates/storage`: encrypted local and mirrored-peer storage.
 - `crates/clock`: system and manual clocks.

@@ -7,7 +7,7 @@ members = [
     "crates/storage",
     "crates/transport",
     "crates/node",
-    "crates/clitls",
+    "crates/tlsutil",
     "crates/netmock",
     "crates/nettor",
     "cmd/bbd",

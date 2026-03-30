@@ -1,12 +1,22 @@
-//! Local CLI <-> daemon TLS helpers.
+//! Shared TLS helpers for local admin RPC and peer-to-peer RPC.
 //!
-//! Files:
-//! - server.pub: PEM-encoded SubjectPublicKeyInfo (X.509) of the server cert.
-//! - client.key: PEM-encoded PKCS#8 Ed25519 private key of the client.
+//! Local admin files:
+//! - `server.pub`: PEM-encoded SubjectPublicKeyInfo (X.509) of the local
+//!   daemon cert.
+//! - `client.key`: PEM-encoded PKCS#8 Ed25519 private key of the local CLI
+//!   client.
 //!
-//! TLS:
-//! - Server requires any client cert, then pins the expected client ed25519 public key.
-//! - Client pins server public key by comparing the end-entity cert’s SPKI.
+//! Local admin TLS:
+//! - The local server requires a client cert, then pins the expected client
+//!   Ed25519 public key.
+//! - The local client pins the server public key by comparing the end-entity
+//!   cert's SPKI.
+//!
+//! Peer TLS:
+//! - Peer servers require client certificates and derive peer identity from
+//!   the presented Ed25519 public key.
+//! - Peer clients pin the expected server onion hostname by validating the
+//!   presented Ed25519 certificate against that hostname.
 
 use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::{Keypair, PublicKey, SecretKey, SignatureError};

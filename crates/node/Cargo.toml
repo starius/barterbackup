@@ -15,7 +15,7 @@ tonic = { version = "0.14.2", features = ["transport", "tls-connect-info", "tls-
 protos = { path = "../protos" }
 keys = { path = "../keys" }
 storage = { path = "../storage" }
-clitls = { path = "../clitls" }
+tlsutil = { path = "../tlsutil" }
 transport = { path = "../transport" }
 clock = { path = "../clock" }
 sha2 = "0.10"

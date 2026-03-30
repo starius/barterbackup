@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use clap::Parser;
-use clitls::{build_server_tls, generate_ed25519, write_keys};
+use tlsutil::{build_server_tls, generate_ed25519, write_keys};
 use dirs::home_dir;
 use fs2::FileExt;
 use futures_util::StreamExt;

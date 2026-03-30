@@ -59,7 +59,7 @@ impl MockPeerListener {
 
 /// Bind a TLS listener suitable for peer-to-peer gRPC tests.
 pub async fn bind_peer_listener(server_priv: &SecretKey) -> Result<MockPeerListener> {
-    let server_tls = clitls::build_peer_server_tls(server_priv)?;
+    let server_tls = tlsutil::build_peer_server_tls(server_priv)?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("https://{}", listener.local_addr()?);
 
@@ -76,8 +76,8 @@ pub async fn connect_peer_channel(
     expected_server_onion: &str,
     client_priv: &SecretKey,
 ) -> Result<Channel> {
-    let client_tls = clitls::build_peer_client_tls(expected_server_onion, client_priv)?;
-    clitls::connect_channel(endpoint, client_tls).await
+    let client_tls = tlsutil::build_peer_client_tls(expected_server_onion, client_priv)?;
+    tlsutil::connect_channel(endpoint, client_tls).await
 }
 
 /// MockPeerConnector resolves onion hostnames to localhost mock endpoints.

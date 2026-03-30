@@ -337,7 +337,7 @@ impl Node {
         let end_entity = peer_certificates
             .first()
             .ok_or_else(|| Status::unauthenticated("client certificate required"))?;
-        let public_key = clitls::public_key_from_certificate_der(end_entity.as_ref())
+        let public_key = tlsutil::public_key_from_certificate_der(end_entity.as_ref())
             .map_err(|_| Status::unauthenticated("client certificate required"))?;
 
         Ok(PeerIdentity {

@@ -1,10 +1,10 @@
 [package]
-name = "clitls"
+name = "tlsutil"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "clitls"
+name = "tlsutil"
 path = "src/lib.rs"
 
 [dependencies]

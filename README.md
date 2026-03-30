@@ -98,7 +98,7 @@ Useful focused runs:
 cargo test -p bbd
 cargo test -p bbcli
 cargo test -p node
-cargo test -p clitls
+cargo test -p tlsutil
 cargo test -p content
 ```
 

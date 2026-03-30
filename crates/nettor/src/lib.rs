@@ -89,7 +89,7 @@ impl TorTransport {
         let onion_address =
             keys::onion_hostname_from_public_key(&ed25519_dalek::PublicKey::from(server_priv));
         let tls_acceptor =
-            tokio_rustls::TlsAcceptor::from(Arc::new(clitls::build_peer_server_tls(server_priv)?));
+            tokio_rustls::TlsAcceptor::from(Arc::new(tlsutil::build_peer_server_tls(server_priv)?));
         let (tx, rx) = mpsc::channel(32);
         let mut stream_requests = handle_rend_requests(rend_requests);
 
@@ -133,7 +133,7 @@ impl PeerConnector for TorTransport {
         peer_onion: &str,
         client_private_key: &SecretKey,
     ) -> Result<PeerClient> {
-        let client_tls = clitls::build_peer_client_tls(peer_onion, client_private_key)?;
+        let client_tls = tlsutil::build_peer_client_tls(peer_onion, client_private_key)?;
         let endpoint = Endpoint::from_shared(format!("http://{peer_onion}:80"))?;
         let connector = tokio_rustls::TlsConnector::from(Arc::new(client_tls));
         let server_name = ServerName::try_from(peer_onion.to_string())

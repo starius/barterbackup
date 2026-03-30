@@ -9,7 +9,7 @@ clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tonic = { version = "0.14.2", features = ["transport", "tls-aws-lc"] }
 protos = { path = "../../crates/protos" }
-clitls = { path = "../../crates/clitls" }
+tlsutil = { path = "../../crates/tlsutil" }
 dirs = "5"
 futures-util = "0.3"
 crossterm = "0.29"

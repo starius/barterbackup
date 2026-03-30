@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
-use clitls::{connect_pinned_channel, read_keys};
+use tlsutil::{connect_pinned_channel, read_keys};
 use crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use dirs::home_dir;
