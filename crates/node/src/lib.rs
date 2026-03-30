@@ -2278,6 +2278,74 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn corrupted_mirrored_blob_is_redownloaded_on_next_sync() -> anyhow::Result<()> {
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage("requester-refresh", requester_filesystem)?);
+        let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let responder_node = Arc::new(Node::with_local_storage("responder-refresh", responder_filesystem.clone())?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        responder_node.set_peer_connector(connector.clone());
+        responder_node.add_known_peer(requester_node.address())?;
+
+        let requester_cli = CliService::new(requester_node.clone());
+        requester_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let requester_server =
+            spawn_registered_p2p_server(requester_node.clone(), connector.as_ref()).await?;
+        let responder_server =
+            spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
+        let mut requester_to_responder = connect_p2p_client(
+            requester_node.clone(),
+            responder_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
+
+        let requester_content = requester_node.responder_content()?.unwrap();
+        requester_to_responder
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                requester_content: Some(requester_content.clone()),
+            })
+            .await?;
+
+        // Corrupt the locally wrapped mirrored file so the next sync has to
+        // discard it and re-download a clean copy from the peer.
+        let mirrored_file = responder_filesystem
+            .list()?
+            .into_iter()
+            .find(|name| name != ".peer-state.v1")
+            .ok_or_else(|| anyhow::anyhow!("missing mirrored file"))?;
+        let mut wrapped = responder_filesystem.read(&mirrored_file)?;
+        wrapped[0] ^= 0x01;
+        responder_filesystem.write_atomic(&mirrored_file, &wrapped)?;
+        assert!(responder_node
+            .with_store(|store| store.read_mirrored_blob(&requester_content.content_id))
+            .is_err());
+
+        let updates = responder_node
+            .propose_contract_updates(requester_node.address())
+            .await?;
+        assert_eq!(updates.last().map(|update| update.success), Some(true));
+        assert_eq!(
+            responder_node
+                .with_store(|store| store.read_mirrored_blob(&requester_content.content_id))?,
+            requester_node.with_store(|store| store.current_blob())?
+        );
+
+        requester_server.abort();
+        responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn set_content_revision_rejects_invalid_content_info() -> anyhow::Result<()> {
         struct Case {
             /// name is the subtest label.

@@ -13,5 +13,6 @@ members = [
     "cmd/bbd",
     "cmd/bbcli",
 ]
+exclude = ["fuzz"]
 
 resolver = "2"
