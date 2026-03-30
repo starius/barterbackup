@@ -15,10 +15,10 @@ use dirs::home_dir;
 use futures_util::TryStreamExt;
 use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
 use protos::clirpc::{
-    CheckContractRequest, ConnectPeerRequest, DeleteFileRequest, File, GetContractsRequest,
-    GetFileRequest, GetStorageConfigRequest, HealthCheckRequest, ListFilesRequest,
-    ProposeContractRequest, RecoverContentRequest, SetFileRequest, SetStorageConfigRequest,
-    StopRequest, StorageConfig, UnlockRequest,
+    CheckContractRequest, ConnectPeerRequest, DeleteFileRequest, ExportBuiltInPeersRequest, File,
+    GetContractsRequest, GetFileRequest, GetStorageConfigRequest, HealthCheckRequest,
+    ListFilesRequest, ProposeContractRequest, RecoverContentRequest, SetFileRequest,
+    SetStorageConfigRequest, StopRequest, StorageConfig, UnlockRequest,
 };
 use tokio::time::sleep;
 use tonic::transport::Channel;
@@ -106,6 +106,10 @@ enum Command {
 
     /// Print the daemon's current known peer list.
     ConnectedPeers,
+
+    /// Print the Rust source file for the compiled built-in peer list.
+    #[command(hide = true)]
+    ExportBuiltInPeers,
 
     /// Update local storage policy values.
     SetStorageConfig {
@@ -196,6 +200,7 @@ async fn run_parsed(args: Args) -> Result<()> {
             connect_peer(&args.daemon_addr, &onion_service_id).await?
         }
         Command::ConnectedPeers => connected_peers(&args.daemon_addr).await?,
+        Command::ExportBuiltInPeers => export_built_in_peers(&args.daemon_addr).await?,
         Command::SetStorageConfig {
             allocated_storage_for_peers,
             min_replicas,
@@ -362,6 +367,14 @@ async fn connected_peers(addr: &str) -> Result<()> {
     for peer in connected_peers_with_client(&mut client).await? {
         println!("{peer}");
     }
+    Ok(())
+}
+
+/// Print the Rust source file for the built-in peer list.
+async fn export_built_in_peers(addr: &str) -> Result<()> {
+    let mut client = connect_client(addr).await?;
+    let source = export_built_in_peers_with_client(&mut client).await?;
+    print!("{source}");
     Ok(())
 }
 
@@ -675,6 +688,17 @@ pub async fn connected_peers_with_client(
         .collect())
 }
 
+/// Export the full built-in peer source file through an already connected client.
+pub async fn export_built_in_peers_with_client(
+    client: &mut BarterBackupClientClient<Channel>,
+) -> Result<String> {
+    Ok(client
+        .export_built_in_peers(ExportBuiltInPeersRequest {})
+        .await?
+        .into_inner()
+        .rust_source)
+}
+
 /// Update storage policy through an already connected client.
 pub async fn set_storage_config_with_client(
     client: &mut BarterBackupClientClient<Channel>,
@@ -941,6 +965,27 @@ mod tests {
 
         peer_a_server.abort();
         peer_b_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn export_built_in_peers_includes_live_connected_peer() -> anyhow::Result<()> {
+        let local_filesystem: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let local_node = Arc::new(Node::with_local_storage("local", local_filesystem)?);
+        let remote_peer = Arc::new(Node::new("built-in-export-peer")?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        local_node.set_peer_connector(connector.clone());
+        let mut client = spawn_cli_server_for_node(local_node.clone()).await?;
+        let remote_server =
+            spawn_registered_p2p_server(remote_peer.clone(), connector.as_ref()).await?;
+
+        connect_peer_with_client(&mut client, remote_peer.address()).await?;
+        let source = export_built_in_peers_with_client(&mut client).await?;
+
+        assert!(source.contains("pub const BUILTIN_PEERS"));
+        assert!(source.contains(remote_peer.address()));
+
+        remote_server.abort();
         Ok(())
     }
 

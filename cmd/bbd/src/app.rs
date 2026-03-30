@@ -517,6 +517,15 @@ impl BarterBackupClient for DaemonService {
             .await
     }
 
+    async fn export_built_in_peers(
+        &self,
+        request: tonic::Request<clirpc::ExportBuiltInPeersRequest>,
+    ) -> Result<Response<clirpc::ExportBuiltInPeersResponse>, Status> {
+        CliService::new(self.unlocked_node().await?)
+            .export_built_in_peers(request)
+            .await
+    }
+
     async fn set_file(
         &self,
         request: tonic::Request<clirpc::SetFileRequest>,
@@ -658,6 +667,13 @@ impl BarterBackupClient for DaemonRpcService {
         request: tonic::Request<clirpc::ConnectedPeersRequest>,
     ) -> Result<Response<clirpc::ConnectedPeersResponse>, Status> {
         self.daemon.connected_peers(request).await
+    }
+
+    async fn export_built_in_peers(
+        &self,
+        request: tonic::Request<clirpc::ExportBuiltInPeersRequest>,
+    ) -> Result<Response<clirpc::ExportBuiltInPeersResponse>, Status> {
+        self.daemon.export_built_in_peers(request).await
     }
 
     async fn set_file(

@@ -4,6 +4,8 @@
 //! surface that depends on it. Peer-to-peer contract management and Tor-backed
 //! transport still need further work.
 
+mod builtin_peers;
+
 use anyhow::Result;
 use clock::{Clock, SystemClock, Timestamp};
 use content::CONTENT_ID_LEN;
@@ -139,6 +141,43 @@ fn content_id_hex(content_id: &[u8]) -> String {
     hex::encode(content_id)
 }
 
+/// Return the compiled built-in peer list as owned strings.
+fn built_in_peers() -> Vec<String> {
+    builtin_peers::BUILTIN_PEERS
+        .iter()
+        .map(|peer| (*peer).to_string())
+        .collect()
+}
+
+/// Merge built-in peers with additional live peers for source export.
+fn merged_export_peers(additional_peers: &[String]) -> Vec<String> {
+    let mut peers = BTreeSet::new();
+    peers.extend(built_in_peers());
+    peers.extend(additional_peers.iter().cloned());
+    peers.into_iter().collect()
+}
+
+/// Render the full Rust source file that defines the built-in peer list.
+fn render_built_in_peer_source(peers: &[String]) -> String {
+    let mut source = String::from(
+        "//! Built-in bootstrap peers compiled into the binary.\n\
+         //!\n\
+         //! Operators can regenerate this file from a live node with the hidden\n\
+         //! `bbcli export-built-in-peers` command.\n\n\
+         /// BUILTIN_PEERS is the compiled bootstrap peer list.\n\
+         pub const BUILTIN_PEERS: &[&str] = &[\n",
+    );
+
+    for peer in peers {
+        source.push_str("    \"");
+        source.push_str(peer);
+        source.push_str("\",\n");
+    }
+
+    source.push_str("];\n");
+    source
+}
+
 /// MirroredBlobState reports whether a cached peer blob is present or needs refresh.
 enum MirroredBlobState {
     /// Present means the cached mirrored blob is valid and usable.
@@ -197,7 +236,7 @@ impl Node {
             .map(|filesystem| Store::new_with_time_source(filesystem, &master, clock.clone()))
             .transpose()?
             .map(Mutex::new);
-        let known_peers = store
+        let known_peers: BTreeSet<String> = store
             .as_ref()
             .map(|store| {
                 store
@@ -213,6 +252,8 @@ impl Node {
                     .collect()
             })
             .unwrap_or_default();
+        let mut known_peers = known_peers;
+        known_peers.extend(built_in_peers());
 
         Ok(Self {
             ed25519_keypair: keypair,
@@ -296,6 +337,18 @@ impl Node {
     /// Return the configured peer onion hostnames in deterministic order.
     pub fn known_peers(&self) -> Vec<String> {
         self.known_peers.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// Render the full built-in peer source file from built-ins plus live peers.
+    pub async fn export_built_in_peer_source(&self) -> Result<String, Status> {
+        let connected_peers = self.connected_peers_response().await?;
+        let live_peers = connected_peers
+            .connected_peers
+            .into_iter()
+            .map(|peer| peer.onion_service_id)
+            .collect::<Vec<_>>();
+
+        Ok(render_built_in_peer_source(&merged_export_peers(&live_peers)))
     }
 
     /// Return the current local content info, if one exists.
@@ -1611,6 +1664,15 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         Ok(Response::new(self.node.connected_peers_response().await?))
     }
 
+    async fn export_built_in_peers(
+        &self,
+        _request: tonic::Request<clirpc::ExportBuiltInPeersRequest>,
+    ) -> Result<tonic::Response<clirpc::ExportBuiltInPeersResponse>, tonic::Status> {
+        Ok(Response::new(clirpc::ExportBuiltInPeersResponse {
+            rust_source: self.node.export_built_in_peer_source().await?,
+        }))
+    }
+
     async fn set_file(
         &self,
         request: tonic::Request<clirpc::SetFileRequest>,
@@ -2316,6 +2378,29 @@ mod tests {
         let reloaded = Node::with_local_storage("owner", filesystem)?;
         assert_eq!(reloaded.known_peers(), vec![peer.address().to_string()]);
         Ok(())
+    }
+
+    #[test]
+    fn merged_export_peers_deduplicates_and_sorts() {
+        let peers = merged_export_peers(&[
+            "z.onion".to_string(),
+            "a.onion".to_string(),
+            "z.onion".to_string(),
+        ]);
+
+        assert_eq!(peers, vec!["a.onion".to_string(), "z.onion".to_string()]);
+    }
+
+    #[test]
+    fn rendered_built_in_peer_source_contains_peer_entries() {
+        let source = render_built_in_peer_source(&[
+            "alpha.onion".to_string(),
+            "beta.onion".to_string(),
+        ]);
+
+        assert!(source.contains("pub const BUILTIN_PEERS"));
+        assert!(source.contains("\"alpha.onion\""));
+        assert!(source.contains("\"beta.onion\""));
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -24,6 +24,11 @@ service BarterBackupClient {
     // ConnectedPeers returns the list of connected online peers.
     rpc ConnectedPeers(ConnectedPeersRequest) returns (ConnectedPeersResponse);
 
+    // ExportBuiltInPeers renders the Rust source file for the compiled
+    // built-in bootstrap peer list.
+    rpc ExportBuiltInPeers(ExportBuiltInPeersRequest)
+        returns (ExportBuiltInPeersResponse);
+
     // SetFile sends a single file to the daemon. The daemon assembles a
     // single content blob from the current set of files, stores it encrypted
     // locally, and uploads the resulting content to other peers (also
@@ -124,6 +129,13 @@ message ConnectedPeersResponse {
 
     // offline_peers contains the list of known offline peers.
     repeated Peer offline_peers = 3;
+}
+
+message ExportBuiltInPeersRequest {}
+
+message ExportBuiltInPeersResponse {
+    // rust_source is the complete Rust source file for the built-in peer list.
+    string rust_source = 1;
 }
 
 // File represents a single user-provided file that participates in forming

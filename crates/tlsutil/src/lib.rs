@@ -684,6 +684,13 @@ mod tests {
         {
             Err(Status::unimplemented(""))
         }
+        async fn export_built_in_peers(
+            &self,
+            _: Request<protos::clirpc::ExportBuiltInPeersRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::ExportBuiltInPeersResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
         async fn set_file(
             &self,
             _: Request<protos::clirpc::SetFileRequest>,
