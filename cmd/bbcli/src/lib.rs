@@ -218,10 +218,7 @@ fn resolve_unlock_password(password: Option<String>, password_stdin: bool) -> Re
     }
 
     if let Some(password) = password {
-        if password.is_empty() {
-            bail!("main password is required");
-        }
-        return Ok(password);
+        return normalize_main_password(password);
     }
 
     if io::stdin().is_terminal() {
@@ -231,19 +228,22 @@ fn resolve_unlock_password(password: Option<String>, password_stdin: bool) -> Re
     bail!("main password is required; use --password-stdin when piping it")
 }
 
-/// Read one password from a byte stream and trim trailing line endings.
+/// Normalize one main-password input by trimming trailing whitespace.
+fn normalize_main_password(password: String) -> Result<String> {
+    let password = password.trim_end_matches(char::is_whitespace).to_string();
+    if password.is_empty() {
+        bail!("main password is required");
+    }
+    Ok(password)
+}
+
+/// Read one password from a byte stream and trim trailing whitespace.
 fn read_password_from_reader(reader: &mut impl Read) -> Result<String> {
     let mut password = String::new();
     reader
         .read_to_string(&mut password)
         .context("read password")?;
-    let password = password
-        .trim_end_matches(|character| character == '\r' || character == '\n')
-        .to_string();
-    if password.is_empty() {
-        bail!("main password is required");
-    }
-    Ok(password)
+    normalize_main_password(password)
 }
 
 /// Prompt for a password on a real terminal while masking input with `*`.
@@ -269,11 +269,9 @@ fn prompt_password_from_terminal() -> Result<String> {
                 writeln!(stderr).context("finish password prompt")?;
                 break;
             }
-            KeyCode::Backspace => {
-                if password.pop().is_some() {
-                    write!(stderr, "\u{8} \u{8}").context("erase masked password character")?;
-                    stderr.flush().context("flush password erase")?;
-                }
+            KeyCode::Backspace if password.pop().is_some() => {
+                write!(stderr, "\u{8} \u{8}").context("erase masked password character")?;
+                stderr.flush().context("flush password erase")?;
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 writeln!(stderr).context("finish cancelled password prompt")?;
@@ -288,10 +286,7 @@ fn prompt_password_from_terminal() -> Result<String> {
         }
     }
 
-    if password.is_empty() {
-        bail!("main password is required");
-    }
-    Ok(password)
+    normalize_main_password(password)
 }
 
 /// Print server onion and uptime.
@@ -771,8 +766,13 @@ mod tests {
     }
 
     #[test]
-    fn password_reader_trims_trailing_line_endings() {
+    fn password_reader_trims_trailing_whitespace() {
         let mut cursor = Cursor::new(b"seed phrase\r\n".to_vec());
+        let password = read_password_from_reader(&mut cursor).unwrap();
+
+        assert_eq!(password, "seed phrase");
+
+        let mut cursor = Cursor::new(b"seed phrase \t \n".to_vec());
         let password = read_password_from_reader(&mut cursor).unwrap();
 
         assert_eq!(password, "seed phrase");
