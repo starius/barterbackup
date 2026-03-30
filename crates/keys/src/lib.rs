@@ -72,7 +72,7 @@ pub fn derive_ed25519_from_master(
         secret: sk,
         public: pk,
     };
-    let pubk = kp.public.clone();
+    let pubk = kp.public;
     Ok((kp, pubk))
 }
 

@@ -2,15 +2,7 @@ syntax = "proto3";
 
 package clirpc;
 
-// BarterBackupClient is a gRPC service implemented by the BarterBackup
-// daemon and exposed locally. The CLI tool speaks to the daemon using this
-// protocol.
-//
-// Terminology:
-// - File: A user-provided file (one or more) that a client uploads to the
-//   daemon. Files are inputs.
-// - Content: A single finalized encrypted blob produced by the daemon from
-//   the current set of files. This is what gets backed up to peers.
+// BarterBackupClient is the local gRPC service exposed by the daemon.
 service BarterBackupClient {
     // LocalHealthCheck returns success when the local daemon is healthy.
     // Renamed from HealthCheck to avoid a method name collision with bbrpc

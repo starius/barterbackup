@@ -217,8 +217,8 @@ pub fn public_key_from_certificate_der(certificate_der: &[u8]) -> Result<PublicK
         .map_err(|err: SignatureError| anyhow!("{err}"))
 }
 
-/// OpenSSL contexts enforcing TLS 1.3 and hybrid X25519MLKEM768 groups.
-// No OpenSSL: we use rustls + rustls-post-quantum to enforce hybrid KEM.
+// No OpenSSL: we use rustls + rustls-post-quantum to enforce TLS 1.3 and the
+// hybrid X25519MLKEM768 key exchange groups.
 
 /// Build the rustls crypto provider used for all local and peer connections.
 fn crypto_provider() -> CryptoProvider {
@@ -491,13 +491,13 @@ fn public_key_to_spki_der(pubkey: &PublicKey) -> Result<Vec<u8>> {
 
 fn spki_der_to_public_key(spki: &[u8]) -> Result<PublicKey> {
     // Expect exactly: SEQ(0x30 0x2a) ALG(0x30 0x05 0x06 0x03 2b 65 70) BITSTRING(0x03 0x21 0x00) + 32 bytes
-    if spki.len() != 44 || &spki[0..2] != [0x30, 0x2a] {
+    if spki.len() != 44 || spki[0..2] != [0x30, 0x2a] {
         return Err(anyhow!("unsupported SPKI format"));
     }
-    if &spki[2..9] != [0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70] {
+    if spki[2..9] != [0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70] {
         return Err(anyhow!("SPKI not Ed25519"));
     }
-    if &spki[9..12] != [0x03, 0x21, 0x00] {
+    if spki[9..12] != [0x03, 0x21, 0x00] {
         return Err(anyhow!("invalid SPKI BIT STRING"));
     }
     PublicKey::from_bytes(&spki[12..44]).map_err(|e: SignatureError| anyhow!("{e}"))
@@ -755,7 +755,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
-        let svc = BarterBackupClientServer::new(Hc::default());
+        let svc = BarterBackupClientServer::new(Hc);
         let incoming = TcpListenerStream::new(listener).filter_map(move |result| {
             let tls_acceptor = tls_acceptor.clone();
 
@@ -959,7 +959,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(srv_cfg));
-        let svc = BarterBackupClientServer::new(Hc::default());
+        let svc = BarterBackupClientServer::new(Hc);
         let incoming = TcpListenerStream::new(listener).filter_map(move |result| {
             let tls_acceptor = tls_acceptor.clone();
 

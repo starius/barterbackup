@@ -618,7 +618,7 @@ impl Store {
             return Ok(());
         }
         if valid.len() == 2 && invalid.is_empty() {
-            valid.sort_by(|left, right| compare_candidates(left, right));
+            valid.sort_by(compare_candidates);
             let newest = valid.pop().unwrap();
             let older = valid.pop().unwrap();
             let _ = self.fs.remove(&older.name);

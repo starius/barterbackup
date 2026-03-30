@@ -322,7 +322,7 @@ impl ContentCodec {
         }
 
         // Keep the padding opaque, but require the full blob alignment.
-        if encoded.len() % CONTENT_ALIGNMENT != 0 {
+        if !encoded.len().is_multiple_of(CONTENT_ALIGNMENT) {
             return Err(ContentError::Truncated);
         }
 
