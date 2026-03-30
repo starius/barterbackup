@@ -50,3 +50,12 @@ These are the product and hardening items that are still unresolved.
   `.gitignore`, including existing paths such as `target-static/` and any
   other target or output directories used by static, Windows, sanitizer, fuzz,
   or cross-build targets.
+- Eliminate create-then-chmod races in private path handling. Several private
+  files and directories are still created first and restricted afterward. That
+  leaves a short window where another user can open them before the owner-only
+  permissions are applied. Replace those flows with atomic owner-only creation
+  on platforms that support it.
+- Bring the `clitls` crate name, module comments, and README wording into sync
+  with reality. The crate currently contains both local CLI↔daemon TLS helpers
+  and peer-to-peer TLS helpers, so either the package should be renamed to
+  reflect both roles or the peer/local TLS pieces should be split cleanly.
