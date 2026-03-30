@@ -258,6 +258,21 @@ message ContractInfo {
 
     // online indicates if the peer is online now.
     bool online = 6;
+
+    // their_latest_known_content_id is the newest peer revision we know exists.
+    bytes their_latest_known_content_id = 7;
+
+    // their_latest_known_content_length is the size of the newest known peer
+    // revision in bytes.
+    int64 their_latest_known_content_length = 8;
+
+    // their_latest_cached_content_id is the newest peer revision we currently
+    // keep cached locally.
+    bytes their_latest_cached_content_id = 9;
+
+    // their_latest_cached_content_length is the size of the newest cached peer
+    // revision in bytes.
+    int64 their_latest_cached_content_length = 10;
 }
 
 message GetContractsResponse {
@@ -394,4 +409,28 @@ message RecoverContentUpdate {
     // recovered_most_recent_version indicates whether the most recent version
     // has been fully recovered.
     bool recovered_most_recent_version = 11;
+
+    // freshest_recoverable_content_id is the newest version that was actually
+    // available from at least one peer.
+    bytes freshest_recoverable_content_id = 12;
+
+    // freshest_recoverable_ts is the Unix timestamp (seconds) of the newest
+    // version that was actually available to download.
+    int64 freshest_recoverable_ts = 13;
+
+    // freshest_recoverable_ts_ns is the nanosecond component corresponding to
+    // freshest_recoverable_ts.
+    int64 freshest_recoverable_ts_ns = 14;
+
+    // freshest_recoverable_length is the byte length of the newest version
+    // that was actually available to download.
+    int64 freshest_recoverable_length = 15;
+
+    // num_peers_with_freshest_recoverable_version is the number of peers that
+    // could actually serve the freshest recoverable version.
+    int64 num_peers_with_freshest_recoverable_version = 16;
+
+    // recovered_fallback_version indicates that recovery succeeded only by
+    // falling back from the newest known version to an older available one.
+    bool recovered_fallback_version = 17;
 }

@@ -61,8 +61,8 @@ message ContentInfo {
 message GetContentRevisionRequest {}
 
 message GetContentRevisionResponse {
-    // requester_content is the description of the requester's content stored
-    // by the responder, if any.
+    // requester_content is the newest requester revision that the responder
+    // currently caches and can return on Download, if any.
     ContentInfo requester_content = 1;
 
     // requester_remaining_seconds is the amount of time the responder will
@@ -74,6 +74,10 @@ message GetContentRevisionResponse {
     // the requester has to store to fulfill the conditions of the contract.
     // Can be empty if the responder does not store anything at the moment.
     ContentInfo responder_content = 3;
+
+    // requester_latest_known_content is the newest requester revision the
+    // responder knows about, even if it no longer caches that revision.
+    ContentInfo requester_latest_known_content = 4;
 }
 
 message SetContentRevisionRequest {

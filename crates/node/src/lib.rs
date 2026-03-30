@@ -56,7 +56,7 @@ fn max_peer_content_bytes_i64() -> i64 {
 }
 
 /// DEFAULT_ALLOCATED_STORAGE_FOR_PEERS is the default peer-cache budget.
-const DEFAULT_ALLOCATED_STORAGE_FOR_PEERS: i64 = 64 * 1024 * 1024;
+const DEFAULT_ALLOCATED_STORAGE_FOR_PEERS: i64 = 1024 * 1024 * 1024;
 
 /// StorageClass splits mirrored peer blobs into reserved and best-effort sets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -192,11 +192,31 @@ fn peer_origin_code(built_in: bool, manual: bool) -> i32 {
 /// Return the newest locally cached peer content summary, including legacy fallback.
 fn peer_latest_cached_content(peer: &storedpb::Peer) -> Option<storedpb::PeerContent> {
     peer.latest_cached_content.clone().or_else(|| {
+        (peer.latest_known_content.is_none() && !peer.content_id.is_empty()).then(|| {
+            storedpb::PeerContent {
+                content_id: peer.content_id.clone(),
+                content_length: 0,
+            }
+        })
+    })
+}
+
+/// Return the newest known peer content summary, including legacy fallback.
+fn peer_latest_known_content(peer: &storedpb::Peer) -> Option<storedpb::PeerContent> {
+    peer.latest_known_content.clone().or_else(|| {
         (!peer.content_id.is_empty()).then(|| storedpb::PeerContent {
             content_id: peer.content_id.clone(),
             content_length: 0,
         })
     })
+}
+
+/// Convert one stored peer-content summary into the RPC content shape.
+fn rpc_content_info(content: storedpb::PeerContent) -> bbrpc::ContentInfo {
+    bbrpc::ContentInfo {
+        content_id: content.content_id,
+        content_length: content.content_length,
+    }
 }
 
 /// MirroredBlobState reports whether a cached peer blob is present or needs refresh.
@@ -408,6 +428,27 @@ impl Node {
         })
     }
 
+    /// Return the newest known and newest cached summaries for one peer.
+    fn mirrored_peer_revision_state(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+    ) -> Result<(Option<storedpb::PeerContent>, Option<storedpb::PeerContent>), Status> {
+        self.with_store(|store| {
+            let peer = store
+                .peers()
+                .into_iter()
+                .find(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes());
+            Ok(peer
+                .map(|peer| {
+                    (
+                        peer_latest_known_content(&peer),
+                        peer_latest_cached_content(&peer),
+                    )
+                })
+                .unwrap_or((None, None)))
+        })
+    }
+
     /// Extract the authenticated peer identity from the request TLS state.
     fn peer_identity_from_request<T>(
         &self,
@@ -461,6 +502,22 @@ impl Node {
                 Err(StorageError::FileNotFound) => Ok(None),
                 Err(error) => Err(error),
             }
+        })
+    }
+
+    /// Build a responder-side view of the newest requester revision we know exists.
+    fn requester_latest_known_content(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+    ) -> Result<Option<bbrpc::ContentInfo>, Status> {
+        self.with_store(|store| {
+            let peer = store
+                .peers()
+                .into_iter()
+                .find(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes());
+            Ok(peer
+                .and_then(|peer| peer_latest_known_content(&peer))
+                .map(rpc_content_info))
         })
     }
 
@@ -584,7 +641,11 @@ impl Node {
             if store
                 .peers()
                 .iter()
-                .any(|peer| peer.content_id.as_slice() == content_id)
+                .any(|peer| {
+                    peer_latest_cached_content(peer).is_some_and(|content| {
+                        content.content_id.as_slice() == content_id
+                    })
+                })
             {
                 return Ok(());
             }
@@ -818,14 +879,10 @@ impl Node {
         peer_public_key: &ed25519_dalek::PublicKey,
         content_info: Option<&bbrpc::ContentInfo>,
     ) -> Result<(), Status> {
-        let previous_content_id = self.with_store(|store| {
-            Ok(store
-                .peers()
-                .into_iter()
-                .find(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes())
-                .map(|peer| peer.content_id)
-                .filter(|content_id| !content_id.is_empty()))
-        })?;
+        let (_, previous_cached_content) = self.mirrored_peer_revision_state(peer_public_key)?;
+        let previous_cached_content_id = previous_cached_content
+            .as_ref()
+            .map(|content| content.content_id.clone());
 
         match content_info {
             Some(content_info) => {
@@ -833,6 +890,8 @@ impl Node {
                 let content_id = content_id_hex(&content_info.content_id);
                 let mirrored_state = self.mirrored_blob_state(&content_info.content_id)?;
                 let mut storage_error = None;
+                let current_score = self.peer_score_state(peer_public_key)?.0;
+                let next_cached_content;
 
                 // Refresh the mirrored blob whenever it is missing or locally
                 // corrupted so the peer cache never depends on stale bytes.
@@ -849,7 +908,7 @@ impl Node {
                     }
                     match self.plan_mirrored_blob_storage(
                         peer_public_key,
-                        previous_content_id.as_deref(),
+                        previous_cached_content_id.as_deref(),
                         &content_info.content_id,
                         content_info.content_length,
                     )? {
@@ -879,8 +938,18 @@ impl Node {
                                 downloaded_bytes = blob.len(),
                                 "refreshed mirrored peer blob"
                             );
+                            next_cached_content = Some(storedpb::PeerContent {
+                                content_id: content_info.content_id.clone(),
+                                content_length: content_info.content_length,
+                            });
                         }
                         StorageAdmission::TrackOnly => {
+                            next_cached_content = previous_cached_content
+                                .clone()
+                                .filter(|cached_content| {
+                                    cached_content.content_id != content_info.content_id
+                                        && storage_class(current_score) == StorageClass::Reserved
+                                });
                             warn!(
                                 peer = %peer_onion,
                                 content_id = %content_id,
@@ -894,13 +963,29 @@ impl Node {
                             ));
                         }
                     }
+                } else {
+                    next_cached_content = Some(storedpb::PeerContent {
+                        content_id: content_info.content_id.clone(),
+                        content_length: content_info.content_length,
+                    });
                 }
                 self.with_store(|store| {
-                    store.set_peer_content_id(peer_public_key.as_bytes(), &content_info.content_id)
+                    store.set_peer_content_state(
+                        peer_public_key.as_bytes(),
+                        Some(&content_info.content_id),
+                        Some(content_info.content_length),
+                        next_cached_content
+                            .as_ref()
+                            .map(|content| content.content_id.as_slice()),
+                        next_cached_content.as_ref().map(|content| content.content_length),
+                    )
                 })?;
-                if let Some(previous_content_id) = previous_content_id {
-                    if previous_content_id != content_info.content_id {
-                        self.remove_unused_foreign_blob(&previous_content_id)?;
+                if let Some(previous_cached_content_id) = previous_cached_content_id {
+                    let still_cached = next_cached_content
+                        .as_ref()
+                        .is_some_and(|content| content.content_id == previous_cached_content_id);
+                    if !still_cached {
+                        self.remove_unused_foreign_blob(&previous_cached_content_id)?;
                     }
                 }
                 if let Some(error) = storage_error {
@@ -908,12 +993,12 @@ impl Node {
                 }
             }
             None => {
-                let previous_content_id_hex = previous_content_id
+                let previous_content_id_hex = previous_cached_content_id
                     .as_ref()
                     .map(|content_id| content_id_hex(content_id))
                     .unwrap_or_default();
                 self.with_store(|store| store.clear_peer_content_id(peer_public_key.as_bytes()))?;
-                if let Some(previous_content_id) = previous_content_id {
+                if let Some(previous_content_id) = previous_cached_content_id {
                     self.remove_unused_foreign_blob(&previous_content_id)?;
                 }
                 info!(
@@ -1134,6 +1219,8 @@ impl Node {
                     }
                 }
             }
+            let (their_latest_known_content, their_latest_cached_content) =
+                self.mirrored_peer_revision_state(&peer_public_key)?;
 
             contracts.push(clirpc::ContractInfo {
                 peer: Some(clirpc::Peer {
@@ -1144,6 +1231,22 @@ impl Node {
                 their_remaining_seconds: self.peer_score_state(&peer_public_key)?.0,
                 their_content_length: self.mirrored_peer_content_length(&peer_public_key)?,
                 online,
+                their_latest_known_content_id: their_latest_known_content
+                    .as_ref()
+                    .map(|content| content.content_id.clone())
+                    .unwrap_or_default(),
+                their_latest_known_content_length: their_latest_known_content
+                    .as_ref()
+                    .map(|content| content.content_length)
+                    .unwrap_or(0),
+                their_latest_cached_content_id: their_latest_cached_content
+                    .as_ref()
+                    .map(|content| content.content_id.clone())
+                    .unwrap_or_default(),
+                their_latest_cached_content_length: their_latest_cached_content
+                    .as_ref()
+                    .map(|content| content.content_length)
+                    .unwrap_or(0),
             });
         }
 
@@ -1465,11 +1568,12 @@ impl Node {
             peers: Vec<String>,
         }
 
-        let mut candidates = BTreeMap::<Vec<u8>, Candidate>::new();
+        let mut known_candidates = BTreeMap::<Vec<u8>, Candidate>::new();
+        let mut recoverable_candidates = BTreeMap::<Vec<u8>, Candidate>::new();
         let mut peers_with_any_versions = 0i64;
 
-        // Ask every known peer which version of our content it holds and keep
-        // only the metadata needed to pick the newest revision.
+        // Ask every known peer which version of our content it knows about and
+        // which version it can actually serve right now.
         for peer_onion in self.known_peers() {
             let mut client = match self.connect_peer_client(&peer_onion).await {
                 Ok(client) => client,
@@ -1486,43 +1590,71 @@ impl Node {
                 Ok(revision) => revision,
                 Err(_) => continue,
             };
-            let Some(content_info) = revision.requester_content else {
-                continue;
-            };
-            let key = match self.revision_key(&content_info.content_id) {
-                Ok(key) => key,
-                Err(_) => continue,
-            };
+            if let Some(content_info) = revision
+                .requester_latest_known_content
+                .clone()
+                .or_else(|| revision.requester_content.clone())
+            {
+                let key = match self.revision_key(&content_info.content_id) {
+                    Ok(key) => key,
+                    Err(_) => continue,
+                };
 
-            peers_with_any_versions += 1;
-            candidates
-                .entry(content_info.content_id.clone())
-                .and_modify(|candidate| candidate.peers.push(peer_onion.clone()))
-                .or_insert(Candidate {
-                    key,
-                    content_id: content_info.content_id,
-                    content_length: content_info.content_length,
-                    peers: vec![peer_onion],
-                });
+                peers_with_any_versions += 1;
+                known_candidates
+                    .entry(content_info.content_id.clone())
+                    .and_modify(|candidate| candidate.peers.push(peer_onion.clone()))
+                    .or_insert(Candidate {
+                        key,
+                        content_id: content_info.content_id,
+                        content_length: content_info.content_length,
+                        peers: vec![peer_onion.clone()],
+                    });
+            }
+
+            if let Some(content_info) = revision.requester_content {
+                let key = match self.revision_key(&content_info.content_id) {
+                    Ok(key) => key,
+                    Err(_) => continue,
+                };
+
+                recoverable_candidates
+                    .entry(content_info.content_id.clone())
+                    .and_modify(|candidate| candidate.peers.push(peer_onion.clone()))
+                    .or_insert(Candidate {
+                        key,
+                        content_id: content_info.content_id,
+                        content_length: content_info.content_length,
+                        peers: vec![peer_onion],
+                    });
+            }
         }
 
-        // Download the single newest candidate only when it is newer than our
-        // current local revision.
-        let most_recent = candidates
+        // Pick both the newest known revision and the newest revision that at
+        // least one peer can still serve.
+        let most_recent = known_candidates
+            .values()
+            .max_by_key(|candidate| candidate.key)
+            .cloned();
+        let freshest_recoverable = recoverable_candidates
             .values()
             .max_by_key(|candidate| candidate.key)
             .cloned();
         let mut most_recent_downloaded_bytes = 0i64;
         let mut most_recent_downloaded_files = 0i64;
         let mut recovered_most_recent_version = false;
+        let mut recovered_fallback_version = false;
 
-        if let Some(candidate) = most_recent.as_ref() {
+        if let Some(candidate) = freshest_recoverable.as_ref() {
             let current_content = self.responder_content()?;
             let already_current = current_content
                 .as_ref()
                 .is_some_and(|content_info| content_info.content_id == candidate.content_id);
+            recovered_fallback_version = most_recent
+                .as_ref()
+                .is_some_and(|most_recent| most_recent.content_id != candidate.content_id);
             if already_current {
-                recovered_most_recent_version = true;
+                recovered_most_recent_version = !recovered_fallback_version;
             } else {
                 // Try every peer that advertised the newest revision so one
                 // broken replica cannot block recovery from another copy.
@@ -1543,7 +1675,7 @@ impl Node {
                             most_recent_downloaded_files = self.with_store(|store| {
                                 Ok(i64::try_from(store.list_files().len()).unwrap_or(i64::MAX))
                             })?;
-                            recovered_most_recent_version = true;
+                            recovered_most_recent_version = !recovered_fallback_version;
                             last_error = None;
                             info!(
                                 source_peer = %source_peer,
@@ -1602,12 +1734,33 @@ impl Node {
                 .as_ref()
                 .map(|candidate| i64::try_from(candidate.peers.len()).unwrap_or(i64::MAX))
                 .unwrap_or(0),
-            total_versions_found: i64::try_from(candidates.len()).unwrap_or(i64::MAX),
+            total_versions_found: i64::try_from(known_candidates.len()).unwrap_or(i64::MAX),
             num_peers_with_any_versions: peers_with_any_versions,
             most_recent_downloaded_bytes,
             most_recent_downloaded_files,
             total_downloaded_bytes: most_recent_downloaded_bytes,
             recovered_most_recent_version,
+            freshest_recoverable_content_id: freshest_recoverable
+                .as_ref()
+                .map(|candidate| candidate.content_id.clone())
+                .unwrap_or_default(),
+            freshest_recoverable_ts: freshest_recoverable
+                .as_ref()
+                .map(|candidate| i64::try_from(candidate.key.1).unwrap_or(i64::MAX))
+                .unwrap_or(0),
+            freshest_recoverable_ts_ns: freshest_recoverable
+                .as_ref()
+                .map(|candidate| i64::from(candidate.key.2))
+                .unwrap_or(0),
+            freshest_recoverable_length: freshest_recoverable
+                .as_ref()
+                .map(|candidate| candidate.content_length)
+                .unwrap_or(0),
+            num_peers_with_freshest_recoverable_version: freshest_recoverable
+                .as_ref()
+                .map(|candidate| i64::try_from(candidate.peers.len()).unwrap_or(i64::MAX))
+                .unwrap_or(0),
+            recovered_fallback_version,
         })
     }
 }
@@ -1926,17 +2079,25 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         &self,
         request: tonic::Request<bbrpc::GetContentRevisionRequest>,
     ) -> Result<tonic::Response<bbrpc::GetContentRevisionResponse>, tonic::Status> {
-        let requester_content = self
-            .node
-            .peer_identity_from_request(&request)
-            .ok()
+        let peer_identity = self.node.peer_identity_from_request(&request).ok();
+        let requester_content = peer_identity
+            .as_ref()
             .map(|peer_identity| self.node.requester_content(&peer_identity.public_key))
+            .transpose()?
+            .flatten();
+        let requester_latest_known_content = peer_identity
+            .as_ref()
+            .map(|peer_identity| {
+                self.node
+                    .requester_latest_known_content(&peer_identity.public_key)
+            })
             .transpose()?
             .flatten();
         Ok(Response::new(bbrpc::GetContentRevisionResponse {
             requester_content,
             requester_remaining_seconds: 0,
             responder_content: self.node.responder_content()?,
+            requester_latest_known_content,
         }))
     }
 
@@ -2281,6 +2442,17 @@ mod tests {
     /// Report whether one mirrored peer blob is currently cached locally.
     fn cached_peer_blob(node: &Node, content_id: &[u8]) -> anyhow::Result<bool> {
         Ok(node.with_store(|store| store.has_mirrored_blob(content_id))?)
+    }
+
+    /// Return the persisted peer entry for one onion identifier.
+    fn peer_entry(node: &Node, peer_onion: &str) -> anyhow::Result<Option<storedpb::Peer>> {
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)?;
+        Ok(node.with_store(|store| {
+            Ok(store
+                .peers()
+                .into_iter()
+                .find(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes()))
+        })?)
     }
 
     /// Return the current content info and encrypted blob from a node.
@@ -3068,6 +3240,10 @@ mod tests {
         assert_eq!(contracts.len(), 1);
         assert!(contracts[0].online);
         assert!(contracts[0].our_content_synced);
+        assert_eq!(
+            contracts[0].their_latest_known_content_id,
+            contracts[0].their_latest_cached_content_id
+        );
 
         requester_server.abort();
         responder_server.abort();
@@ -3201,12 +3377,97 @@ mod tests {
         let remote_content = remote_node.current_content_info()?.unwrap();
         assert_eq!(
             local_node.mirrored_peer_content_id(remote_node.address())?,
-            Some(remote_content.content_id.clone())
+            None
         );
         assert!(!cached_peer_blob(
             local_node.as_ref(),
             &remote_content.content_id
         )?);
+        let peer = peer_entry(local_node.as_ref(), remote_node.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing peer entry"))?;
+        assert_eq!(
+            peer.latest_known_content
+                .as_ref()
+                .map(|content| content.content_id.clone()),
+            Some(remote_content.content_id.clone())
+        );
+        assert!(peer.latest_cached_content.is_none());
+
+        remote_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reserved_peer_keeps_previous_cached_revision_when_newest_wont_fit(
+    ) -> anyhow::Result<()> {
+        let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let local_node = Arc::new(Node::with_local_storage("local-reserved", local_filesystem)?);
+        let remote_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let remote_node = Arc::new(Node::with_local_storage("remote-reserved", remote_filesystem)?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        local_node.set_peer_connector(connector.clone());
+        remote_node.set_peer_connector(connector.clone());
+        local_node.add_known_peer(remote_node.address())?;
+
+        let remote_cli = CliService::new(remote_node.clone());
+        remote_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: b"small".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let remote_server =
+            spawn_registered_p2p_server(remote_node.clone(), connector.as_ref()).await?;
+        local_node
+            .propose_contract_updates(remote_node.address())
+            .await?;
+        let version_1 = remote_node.current_content_info()?.unwrap();
+        assert!(cached_peer_blob(local_node.as_ref(), &version_1.content_id)?);
+
+        *local_node.storage_config.lock().unwrap() = clirpc::StorageConfig {
+            allocated_storage_for_peers: version_1.content_length,
+            min_replicas: 0,
+        };
+        let remote_public_key = keys::public_key_from_onion_hostname(remote_node.address())?;
+        local_node
+            .with_store(|store| store.set_peer_score(remote_public_key.as_bytes(), 10, 100))?;
+
+        remote_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: vec![b'x'; 1024 * 1024],
+                }),
+            }))
+            .await?;
+        let version_2 = remote_node.current_content_info()?.unwrap();
+        assert!(version_2.content_length > version_1.content_length);
+
+        let error = local_node
+            .propose_contract_updates(remote_node.address())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+        assert!(cached_peer_blob(local_node.as_ref(), &version_1.content_id)?);
+        assert!(!cached_peer_blob(local_node.as_ref(), &version_2.content_id)?);
+
+        let peer = peer_entry(local_node.as_ref(), remote_node.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing peer entry"))?;
+        assert_eq!(
+            peer.latest_known_content
+                .as_ref()
+                .map(|content| content.content_id.clone()),
+            Some(version_2.content_id.clone())
+        );
+        assert_eq!(
+            peer.latest_cached_content
+                .as_ref()
+                .map(|content| content.content_id.clone()),
+            Some(version_1.content_id.clone())
+        );
 
         remote_server.abort();
         Ok(())
@@ -3435,6 +3696,7 @@ mod tests {
                 requester_content: Some(content_info.clone()),
                 requester_remaining_seconds: 0,
                 responder_content: None,
+                requester_latest_known_content: Some(content_info.clone()),
             },
             DownloadBehavior::Response(bbrpc::DownloadResponse {
                 total_length: i64::try_from(blob.len()).unwrap_or(i64::MAX) + 1,
@@ -3530,7 +3792,8 @@ mod tests {
                 .find(|peer| peer.onion_pubkey.as_slice() == left_public_key.as_bytes()))
         })?;
         assert_eq!(
-            right_peer_entry.map(|peer| peer.content_id),
+            right_peer_entry
+                .and_then(|peer| peer.latest_cached_content.map(|content| content.content_id)),
             Some(left_content.content_id)
         );
 
@@ -3619,10 +3882,16 @@ mod tests {
             .await?;
         let final_update = updates.last().unwrap();
         assert_eq!(final_update.most_recent_content_id, version_2.content_id);
+        assert_eq!(
+            final_update.freshest_recoverable_content_id,
+            version_2.content_id
+        );
         assert_eq!(final_update.num_peers_with_most_recent_version, 1);
+        assert_eq!(final_update.num_peers_with_freshest_recoverable_version, 1);
         assert_eq!(final_update.total_versions_found, 2);
         assert_eq!(final_update.num_peers_with_any_versions, 2);
         assert!(final_update.recovered_most_recent_version);
+        assert!(!final_update.recovered_fallback_version);
 
         let recovered_file = recovered_node.with_store(|store| store.get_file("alpha.txt"))?;
         assert_eq!(recovered_file, b"version-2".to_vec());
@@ -3630,6 +3899,82 @@ mod tests {
         peer_b_server.abort();
         peer_a_server.abort();
         owner_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recover_content_falls_back_to_newest_available_version() -> anyhow::Result<()> {
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner_node = Arc::new(Node::with_local_storage("fallback-owner", owner_filesystem)?);
+        let recovered_filesystem: Arc<dyn Filesystem> =
+            Arc::new(storage::MemoryFilesystem::new());
+        let recovered_node = Arc::new(Node::with_local_storage(
+            "fallback-owner",
+            recovered_filesystem,
+        )?);
+        let stale_peer_identity = Node::new("fallback-stale-peer")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        recovered_node.set_peer_connector(connector.clone());
+        recovered_node
+            .known_peers
+            .lock()
+            .unwrap()
+            .insert(stale_peer_identity.address().to_string());
+
+        let owner_cli = CliService::new(owner_node.clone());
+        owner_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"version-1".to_vec(),
+                }),
+            }))
+            .await?;
+        let version_1 = owner_node.responder_content()?.unwrap();
+        let blob_1 = owner_node.with_store(|store| store.current_blob())?;
+
+        owner_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"version-2".to_vec(),
+                }),
+            }))
+            .await?;
+        let version_2 = owner_node.responder_content()?.unwrap();
+
+        let stale_service = StaticPeerService::new(
+            bbrpc::GetContentRevisionResponse {
+                requester_content: Some(version_1.clone()),
+                requester_remaining_seconds: 0,
+                responder_content: None,
+                requester_latest_known_content: Some(version_2.clone()),
+            },
+            DownloadBehavior::Response(bbrpc::DownloadResponse {
+                total_length: i64::try_from(blob_1.len()).unwrap_or(i64::MAX),
+                sha256: Sha256::digest(&blob_1).to_vec(),
+                section: Some(bbrpc::download_response::Section::RawBytes(
+                    bbrpc::RawBytes {
+                        value: blob_1.clone(),
+                    },
+                )),
+            }),
+        );
+        let (endpoint, server) = spawn_plain_peer_server(stale_service).await?;
+        connector.register_peer(stale_peer_identity.address(), &endpoint);
+
+        let update = recovered_node.recover_content_update().await?;
+        assert_eq!(update.most_recent_content_id, version_2.content_id);
+        assert_eq!(update.freshest_recoverable_content_id, version_1.content_id);
+        assert_eq!(update.num_peers_with_most_recent_version, 1);
+        assert_eq!(update.num_peers_with_freshest_recoverable_version, 1);
+        assert!(!update.recovered_most_recent_version);
+        assert!(update.recovered_fallback_version);
+
+        let recovered_file = recovered_node.with_store(|store| store.get_file("alpha.txt"))?;
+        assert_eq!(recovered_file, b"version-1".to_vec());
+
+        server.abort();
         Ok(())
     }
 
@@ -3671,6 +4016,7 @@ mod tests {
             requester_content: Some(content_info.clone()),
             requester_remaining_seconds: 0,
             responder_content: None,
+            requester_latest_known_content: Some(content_info.clone()),
         };
 
         // The first peer advertises the right revision but serves a corrupt

@@ -425,7 +425,7 @@ async fn get_contracts(addr: &str) -> Result<()> {
     let response = get_contracts_with_client(&mut client).await?;
     for contract in response.contracts {
         println!(
-            "peer={} synced={} their_remaining_seconds={} their_content_length={} online={}",
+            "peer={} synced={} their_remaining_seconds={} their_content_length={} latest_known_id={} latest_known_length={} latest_cached_id={} latest_cached_length={} online={}",
             contract
                 .peer
                 .as_ref()
@@ -434,6 +434,10 @@ async fn get_contracts(addr: &str) -> Result<()> {
             contract.our_content_synced,
             contract.their_remaining_seconds,
             contract.their_content_length,
+            hex::encode(contract.their_latest_known_content_id),
+            contract.their_latest_known_content_length,
+            hex::encode(contract.their_latest_cached_content_id),
+            contract.their_latest_cached_content_length,
             contract.online
         );
     }
@@ -478,13 +482,16 @@ async fn recover_content(addr: &str) -> Result<()> {
     let mut client = connect_client(addr).await?;
     for update in recover_content_with_client(&mut client).await? {
         println!(
-            "most_recent_length={} peers_with_latest={} total_versions={} peers_with_any_versions={} downloaded_bytes={} recovered={}",
+            "most_recent_length={} peers_with_latest={} recoverable_length={} peers_with_recoverable={} total_versions={} peers_with_any_versions={} downloaded_bytes={} recovered={} fallback={}",
             update.most_recent_length,
             update.num_peers_with_most_recent_version,
+            update.freshest_recoverable_length,
+            update.num_peers_with_freshest_recoverable_version,
             update.total_versions_found,
             update.num_peers_with_any_versions,
             update.total_downloaded_bytes,
-            update.recovered_most_recent_version
+            update.recovered_most_recent_version,
+            update.recovered_fallback_version
         );
     }
     Ok(())
