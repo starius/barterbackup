@@ -8,15 +8,16 @@ use anyhow::Result;
 use clock::{Clock, SystemClock, Timestamp};
 use content::CONTENT_ID_LEN;
 use futures::{stream, Stream};
-use std::future::Future;
 use protos::{bbrpc, clirpc};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use storage::{Filesystem, StorageError, Store};
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tonic::{Code, Response, Status};
+use tracing::{info, warn};
 use transport::PeerConnector;
 
 /// PeerIdentity describes the authenticated peer that issued a request.
@@ -55,9 +56,7 @@ fn max_peer_content_bytes_i64() -> i64 {
 /// Validate one peer-visible content identifier.
 fn validate_peer_content_id(content_id: &[u8]) -> Result<(), Status> {
     if content_id.len() != CONTENT_ID_LEN {
-        return Err(Status::invalid_argument(
-            "content id has an invalid length",
-        ));
+        return Err(Status::invalid_argument("content id has an invalid length"));
     }
 
     Ok(())
@@ -74,6 +73,21 @@ fn validate_peer_content_info(content_info: &bbrpc::ContentInfo) -> Result<(), S
     validate_peer_content_id(&content_info.content_id)?;
 
     Ok(())
+}
+
+/// Return one content id as hex for structured logs.
+fn content_id_hex(content_id: &[u8]) -> String {
+    hex::encode(content_id)
+}
+
+/// MirroredBlobState reports whether a cached peer blob is present or needs refresh.
+enum MirroredBlobState {
+    /// Present means the cached mirrored blob is valid and usable.
+    Present,
+    /// Missing means no cached mirrored blob exists yet.
+    Missing,
+    /// Corrupt means a wrapped mirrored blob exists but failed local validation.
+    Corrupt,
 }
 
 impl Node {
@@ -438,13 +452,14 @@ impl Node {
         self.with_store(|store| store.has_mirrored_blob(content_id))
     }
 
-    /// Decide whether a mirrored peer blob needs a fresh download.
-    fn needs_mirrored_blob_download(&self, content_id: &[u8]) -> Result<bool, Status> {
+    /// Report whether a mirrored peer blob is present, missing, or corrupt.
+    fn mirrored_blob_state(&self, content_id: &[u8]) -> Result<MirroredBlobState, Status> {
         self.with_store(|store| match store.has_mirrored_blob(content_id) {
-            Ok(present) => Ok(!present),
+            Ok(true) => Ok(MirroredBlobState::Present),
+            Ok(false) => Ok(MirroredBlobState::Missing),
             Err(StorageError::RecoveryRequired(_)) => {
                 let _ = store.remove_mirrored_blob(content_id);
-                Ok(true)
+                Ok(MirroredBlobState::Corrupt)
             }
             Err(error) => Err(error),
         })
@@ -469,7 +484,22 @@ impl Node {
         match content_info {
             Some(content_info) => {
                 validate_peer_content_info(content_info)?;
-                if self.needs_mirrored_blob_download(&content_info.content_id)? {
+                let content_id = content_id_hex(&content_info.content_id);
+                let mirrored_state = self.mirrored_blob_state(&content_info.content_id)?;
+
+                // Refresh the mirrored blob whenever it is missing or locally
+                // corrupted so the peer cache never depends on stale bytes.
+                if matches!(
+                    mirrored_state,
+                    MirroredBlobState::Missing | MirroredBlobState::Corrupt
+                ) {
+                    if matches!(mirrored_state, MirroredBlobState::Corrupt) {
+                        warn!(
+                            peer = %peer_onion,
+                            content_id = %content_id,
+                            "discarded corrupt mirrored peer blob before refresh"
+                        );
+                    }
                     let blob = self
                         .download_peer_blob(
                             peer_onion,
@@ -480,6 +510,13 @@ impl Node {
                     self.with_store(|store| {
                         store.write_mirrored_blob(&content_info.content_id, &blob)
                     })?;
+                    info!(
+                        peer = %peer_onion,
+                        content_id = %content_id,
+                        content_length = content_info.content_length,
+                        downloaded_bytes = blob.len(),
+                        "refreshed mirrored peer blob"
+                    );
                 }
                 self.with_store(|store| {
                     store.set_peer_content_id(peer_public_key.as_bytes(), &content_info.content_id)
@@ -491,10 +528,19 @@ impl Node {
                 }
             }
             None => {
+                let previous_content_id_hex = previous_content_id
+                    .as_ref()
+                    .map(|content_id| content_id_hex(content_id))
+                    .unwrap_or_default();
                 self.with_store(|store| store.clear_peer_content_id(peer_public_key.as_bytes()))?;
                 if let Some(previous_content_id) = previous_content_id {
                     self.remove_unused_foreign_blob(&previous_content_id)?;
                 }
+                info!(
+                    peer = %peer_onion,
+                    previous_content_id = %previous_content_id_hex,
+                    "cleared mirrored peer content"
+                );
             }
         }
 
@@ -692,13 +738,20 @@ impl Node {
                     our_remaining_seconds = revision.requester_remaining_seconds;
                     our_content_synced =
                         self.our_content_synced_with_peer(revision.requester_content.as_ref())?;
-                    let _ = self
+                    if let Err(error) = self
                         .sync_peer_content_info(
                             &peer_onion,
                             &peer_public_key,
                             revision.responder_content.as_ref(),
                         )
-                        .await;
+                        .await
+                    {
+                        warn!(
+                            peer = %peer_onion,
+                            %error,
+                            "failed to refresh mirrored peer content while building contracts"
+                        );
+                    }
                 }
             }
 
@@ -819,6 +872,15 @@ impl Node {
             our_content_uploaded_bytes: uploaded_our_content,
         });
 
+        info!(
+            peer = %peer_onion,
+            their_content_length,
+            their_content_downloaded_bytes = downloaded_their_content,
+            our_content_length,
+            our_content_uploaded_bytes = uploaded_our_content,
+            "peer contract proposal completed"
+        );
+
         Ok(updates)
     }
 
@@ -864,7 +926,7 @@ impl Node {
         });
 
         let Some(our_content) = self.responder_content()? else {
-            self.update_peer_score(&peer_public_key, true)?;
+            let new_score = self.update_peer_score(&peer_public_key, true)?;
             updates.push(clirpc::CheckContractUpdate {
                 state: clirpc::ContractState::Completed as i32,
                 success: true,
@@ -872,6 +934,12 @@ impl Node {
                 our_content_section_offset: 0,
                 our_content_section_length: 0,
             });
+            info!(
+                peer = %peer_onion,
+                success = true,
+                new_score_seconds = new_score,
+                "peer contract check completed without local content"
+            );
             return Ok(updates);
         };
 
@@ -881,7 +949,7 @@ impl Node {
             .map(|content_info| content_info.content_id.as_slice())
             != Some(our_content.content_id.as_slice())
         {
-            self.update_peer_score(&peer_public_key, false)?;
+            let new_score = self.update_peer_score(&peer_public_key, false)?;
             updates.push(clirpc::CheckContractUpdate {
                 state: clirpc::ContractState::OurContentRevisionMissing as i32,
                 success: false,
@@ -889,6 +957,13 @@ impl Node {
                 our_content_section_offset: 0,
                 our_content_section_length: 0,
             });
+            warn!(
+                peer = %peer_onion,
+                success = false,
+                new_score_seconds = new_score,
+                our_content_length = our_content.content_length,
+                "peer contract check found our revision missing"
+            );
             return Ok(updates);
         }
 
@@ -919,7 +994,7 @@ impl Node {
                         && raw_bytes.value[..section_length]
                             == local_blob[section_offset..section_offset + section_length]
             );
-        self.update_peer_score(&peer_public_key, passed)?;
+        let new_score = self.update_peer_score(&peer_public_key, passed)?;
         updates.push(clirpc::CheckContractUpdate {
             state: if passed {
                 clirpc::ContractState::Completed as i32
@@ -931,6 +1006,28 @@ impl Node {
             our_content_section_offset: i64::try_from(section_offset).unwrap_or(i64::MAX),
             our_content_section_length: i64::try_from(section_length).unwrap_or(i64::MAX),
         });
+
+        if passed {
+            info!(
+                peer = %peer_onion,
+                success = true,
+                new_score_seconds = new_score,
+                our_content_length = our_content.content_length,
+                section_offset,
+                section_length,
+                "peer contract check completed"
+            );
+        } else {
+            warn!(
+                peer = %peer_onion,
+                success = false,
+                new_score_seconds = new_score,
+                our_content_length = our_content.content_length,
+                section_offset,
+                section_length,
+                "peer contract check returned invalid content"
+            );
+        }
 
         Ok(updates)
     }
@@ -1030,9 +1127,23 @@ impl Node {
                             })?;
                             recovered_most_recent_version = true;
                             last_error = None;
+                            info!(
+                                source_peer = %source_peer,
+                                content_id = %content_id_hex(&candidate.content_id),
+                                candidate_peer_count = candidate.peers.len(),
+                                content_length = candidate.content_length,
+                                downloaded_bytes = most_recent_downloaded_bytes,
+                                "recovered latest content from peer"
+                            );
                             break;
                         }
                         Err(error) => {
+                            warn!(
+                                peer = %source_peer,
+                                content_id = %content_id_hex(&candidate.content_id),
+                                %error,
+                                "recovery download from peer failed"
+                            );
                             last_error = Some(error);
                         }
                     }
@@ -1040,6 +1151,15 @@ impl Node {
                 if let Some(error) = last_error {
                     return Err(error);
                 }
+            }
+
+            if already_current {
+                info!(
+                    content_id = %content_id_hex(&candidate.content_id),
+                    candidate_peer_count = candidate.peers.len(),
+                    content_length = candidate.content_length,
+                    "latest recoverable content was already current"
+                );
             }
         }
 
@@ -1656,9 +1776,9 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("unknown peer onion: {peer_onion}"))?;
             let channel = Endpoint::from_shared(endpoint)?.connect().await?;
 
-            Ok(transport::configure_peer_client(transport::PeerClient::new(
-                channel,
-            )))
+            Ok(transport::configure_peer_client(
+                transport::PeerClient::new(channel),
+            ))
         }
     }
 

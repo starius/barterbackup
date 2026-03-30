@@ -797,7 +797,9 @@ where
 async fn run_maintenance_pass(node: &Node, shutdown: &CancellationToken) {
     // Attempt recovery first so the local node restores its newest revision
     // before it starts proposing or checking contracts.
-    let Some(recovery_result) = wait_for_maintenance_step(shutdown, node.recover_content_update()).await else {
+    let Some(recovery_result) =
+        wait_for_maintenance_step(shutdown, node.recover_content_update()).await
+    else {
         return;
     };
     if let Err(error) = recovery_result {
