@@ -19,9 +19,9 @@ These are the product and hardening items that are still unresolved.
   hidden-service keys.
 - Finish the remaining operator-facing hardening around observability and
   resource controls. Structured peer logs, peer I/O bounds, timeout handling,
-  and dedicated fuzz targets are now in place, but the daemon still needs
-  clearer per-peer summaries and a final decision on any future chunking or
-  other operator-facing resource ceilings beyond the current peer cap.
+  dedicated fuzz targets, and clearer CLI peer summaries are now in place, but
+  the daemon still needs a final decision on any future chunking or other
+  operator-facing resource ceilings beyond the current peer cap.
 - Extend storage accounting beyond the fixed 1 GiB peer budget and current
   score-tier policy. Expiration policy, historical visibility, and richer
   operator reporting for mirrored peer storage are still basic.
