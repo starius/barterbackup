@@ -1706,6 +1706,29 @@ mod tests {
         Ok(())
     }
 
+    /// Wait until the public peer runtime is both bootstrapped and reachable.
+    async fn wait_for_public_peer_runtime(
+        service: &DaemonService,
+        timeout: Duration,
+    ) -> Result<()> {
+        wait_for_async(timeout, || {
+            let service = service;
+            async move {
+                let health = service
+                    .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+                    .await?
+                    .into_inner();
+                Ok(
+                    health.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32
+                        && health.self_peer_check_state
+                            == clirpc::SelfPeerCheckState::Healthy as i32,
+                )
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
     /// Poll an async condition until it becomes true or `timeout` elapses.
     async fn wait_for_async<F, Fut>(timeout: Duration, mut condition: F) -> anyhow::Result<()>
     where
@@ -2511,6 +2534,8 @@ mod tests {
 
         init_and_unlock_service(&local_service, "local-manual").await?;
         init_and_unlock_service(&remote_service, "remote-manual").await?;
+        wait_for_public_peer_runtime(&local_service, Duration::from_secs(30)).await?;
+        wait_for_public_peer_runtime(&remote_service, Duration::from_secs(30)).await?;
 
         // Seed the remote peer with one revision and connect it locally.
         remote_service
@@ -2537,7 +2562,7 @@ mod tests {
 
         // One explicit tick mirrors the remote revision into the local store.
         local_tick.notify_one();
-        wait_for_async(Duration::from_secs(10), || {
+        wait_for_async(Duration::from_secs(30), || {
             let local_service = &local_service;
             let remote_onion = remote_onion.clone();
             let remote_v1 = remote_v1.clone();
@@ -2561,6 +2586,7 @@ mod tests {
             restarted_remote_maintenance,
         );
         init_and_unlock_service(&restarted_remote, "remote-manual").await?;
+        wait_for_public_peer_runtime(&restarted_remote, Duration::from_secs(30)).await?;
 
         // Change the remote content after restart. The local mirror should stay
         // stale until the explicit maintenance tick fires.
@@ -2583,7 +2609,7 @@ mod tests {
         );
 
         local_tick.notify_one();
-        wait_for_async(Duration::from_secs(10), || {
+        wait_for_async(Duration::from_secs(30), || {
             let local_service = &local_service;
             let remote_onion = remote_onion.clone();
             let remote_v2 = remote_v2.clone();
@@ -2653,6 +2679,8 @@ mod tests {
         // Unlock two independent nodes over the real Arti transport.
         unlock_for_test(&owner_service, "owner-live-tor").await?;
         unlock_for_test(&peer_service, "peer-live-tor").await?;
+        wait_for_public_peer_runtime(&owner_service, Duration::from_secs(600)).await?;
+        wait_for_public_peer_runtime(&peer_service, Duration::from_secs(600)).await?;
 
         // Write owner content and explicitly mirror it to the peer.
         let owner_onion = unlocked_node(&owner_service).await.address().to_string();
@@ -2729,6 +2757,7 @@ mod tests {
             MaintenanceConfig::with_interval(Duration::from_secs(3600)),
         );
         unlock_for_test(&recovered_service, "owner-live-tor").await?;
+        wait_for_public_peer_runtime(&recovered_service, Duration::from_secs(600)).await?;
         assert!(recovered_service
             .list_files(tonic::Request::new(clirpc::ListFilesRequest {}))
             .await?

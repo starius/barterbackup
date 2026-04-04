@@ -128,6 +128,15 @@ Important current behavior:
   daemon session
 - graceful daemon shutdown removes `<data-dir>/cli-keys` because those session
   keys are no longer valid after exit
+- `<data-dir>/tor` keeps Arti's public network cache state, including
+  directory information such as microdescriptors and related sqlite state
+- the hidden-service identity key is not written to disk; `bbd` re-derives it
+  from the main seed on every unlock and inserts it into Arti's ephemeral
+  keystore for that process only
+- because the hidden-service key is ephemeral but Arti otherwise persists some
+  per-service replay and introduction-point state, startup prunes only the
+  hidden-service-specific `state/hs_ipt*.json` and
+  `hss_iptreplay/replay_barterbackup` paths while keeping the public Tor cache
 - if you use a custom `BBD_DATA_DIR`, point `BBCLI_CLI_KEYS_DIR` at the same
   directory's `cli-keys` subdirectory
 - if `bbd` runs over SSH, you can copy that session `cli-keys` directory to

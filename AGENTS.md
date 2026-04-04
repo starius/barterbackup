@@ -61,6 +61,12 @@ Transport and security
 - Peer traffic runs over Arti onion services plus mutual TLS.
 - TLS policy is TLS 1.3 only with `X25519MLKEM768` enforced.
 - Node identity is the deterministic Ed25519 key derived from the main seed.
+- `<data-dir>/tor` keeps Arti's public network cache state, while the hidden
+  service identity key is inserted into Arti's ephemeral keystore at unlock
+  time and is not persisted to disk.
+- Startup prunes only the hidden-service-specific replay and introduction-point
+  state under `<data-dir>/tor` so restart warnings do not conflict with that
+  ephemeral-key model.
 - Local content and mirrored peer content must remain encrypted at rest.
 - A peer sidecar is the encrypted local metadata record stored alongside one
   mirrored peer blob.

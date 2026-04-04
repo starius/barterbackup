@@ -40,6 +40,7 @@ use tor_rtcompat::PreferredRuntime;
 type TorDataStream = tor_proto::client::stream::DataStream;
 type PeerTlsStream = tokio_rustls::server::TlsStream<OnionStream<TorDataStream>>;
 type PeerIncoming = Pin<Box<dyn Stream<Item = Result<PeerTlsStream, io::Error>> + Send>>;
+const BARTERBACKUP_HS_NICKNAME: &str = "barterbackup";
 
 /// TorTransport is a cloneable handle around one bootstrapped Arti client.
 #[derive(Clone)]
@@ -50,11 +51,7 @@ pub struct TorTransport {
 impl TorTransport {
     /// Bootstrap a Tor client rooted at `state_dir`.
     pub async fn new(state_dir: impl AsRef<Path>) -> Result<Self> {
-        fs::create_dir_all(state_dir.as_ref())
-            .with_context(|| format!("create tor state dir {}", state_dir.as_ref().display()))?;
-        #[cfg(unix)]
-        fs::set_permissions(state_dir.as_ref(), fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("chmod 700 {}", state_dir.as_ref().display()))?;
+        prepare_tor_state_dir(state_dir.as_ref())?;
 
         let mut cfg_builder = TorClientConfig::builder();
         cfg_builder
@@ -75,7 +72,7 @@ impl TorTransport {
 
     /// Publish a deterministic onion service and return a tonic incoming stream.
     pub async fn bind_peer_listener(&self, server_priv: &SecretKey) -> Result<TorPeerListener> {
-        let nickname: HsNickname = "barterbackup"
+        let nickname: HsNickname = BARTERBACKUP_HS_NICKNAME
             .to_string()
             .try_into()
             .map_err(|err| anyhow!("invalid onion service nickname: {err}"))?;
@@ -124,6 +121,54 @@ impl TorTransport {
             _accept_task: accept_task,
         })
     }
+}
+
+/// Create the Tor state root and prune stale per-service hidden-service state.
+fn prepare_tor_state_dir(state_dir: &Path) -> Result<()> {
+    fs::create_dir_all(state_dir)
+        .with_context(|| format!("create tor state dir {}", state_dir.display()))?;
+    #[cfg(unix)]
+    fs::set_permissions(state_dir, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("chmod 700 {}", state_dir.display()))?;
+
+    // Arti stores public directory caches and hidden-service replay state under
+    // the same root. BarterBackup wants to keep the public cache material but
+    // intentionally re-derives the hidden-service identity on every start and
+    // keeps the corresponding Arti keystore ephemeral. Remove only the
+    // persisted hidden-service state that would otherwise make Arti look for
+    // introduction-point keys from the previous process.
+    remove_path_if_exists(
+        &state_dir
+            .join("state")
+            .join(format!("hs_iptpub_{BARTERBACKUP_HS_NICKNAME}.json")),
+    )?;
+    remove_path_if_exists(
+        &state_dir
+            .join("state")
+            .join(format!("hs_ipts_{BARTERBACKUP_HS_NICKNAME}.json")),
+    )?;
+    remove_path_if_exists(
+        &state_dir
+            .join("hss_iptreplay")
+            .join(format!("replay_{BARTERBACKUP_HS_NICKNAME}")),
+    )?;
+
+    Ok(())
+}
+
+/// Remove one file or directory tree if it already exists.
+fn remove_path_if_exists(path: &Path) -> Result<()> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path)
+            .with_context(|| format!("remove stale tor state dir {}", path.display()))?,
+        Ok(_) => fs::remove_file(path)
+            .with_context(|| format!("remove stale tor state file {}", path.display()))?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("stat tor state path {}", path.display()));
+        }
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -303,5 +348,45 @@ mod tests {
         let second = build_ephemeral_state_dir();
 
         assert_ne!(first, second);
+    }
+
+    /// Hidden-service replay and IPT files are cleared while shared directory
+    /// cache state remains available across restarts.
+    #[test]
+    fn prepare_tor_state_dir_prunes_only_hidden_service_state() {
+        let state_dir = build_ephemeral_state_dir();
+        let cache_file = state_dir.join("dir_blobs").join("cached-microdesc");
+        let sqlite_file = state_dir.join("dir.sqlite3");
+        let hidden_service_publication = state_dir
+            .join("state")
+            .join(format!("hs_iptpub_{BARTERBACKUP_HS_NICKNAME}.json"));
+        let hidden_service_intro_points = state_dir
+            .join("state")
+            .join(format!("hs_ipts_{BARTERBACKUP_HS_NICKNAME}.json"));
+        let replay_dir = state_dir
+            .join("hss_iptreplay")
+            .join(format!("replay_{BARTERBACKUP_HS_NICKNAME}"));
+        let unrelated_state = state_dir.join("state").join("other-service.json");
+
+        fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
+        fs::create_dir_all(hidden_service_publication.parent().unwrap()).unwrap();
+        fs::create_dir_all(&replay_dir).unwrap();
+        fs::write(&cache_file, b"cached-public-tor-state").unwrap();
+        fs::write(&sqlite_file, b"sqlite").unwrap();
+        fs::write(&hidden_service_publication, b"iptpub").unwrap();
+        fs::write(&hidden_service_intro_points, b"ipts").unwrap();
+        fs::write(replay_dir.join("lock"), b"lock").unwrap();
+        fs::write(&unrelated_state, b"keep-me").unwrap();
+
+        prepare_tor_state_dir(&state_dir).unwrap();
+
+        assert!(cache_file.exists());
+        assert!(sqlite_file.exists());
+        assert!(unrelated_state.exists());
+        assert!(!hidden_service_publication.exists());
+        assert!(!hidden_service_intro_points.exists());
+        assert!(!replay_dir.exists());
+
+        fs::remove_dir_all(&state_dir).unwrap();
     }
 }
