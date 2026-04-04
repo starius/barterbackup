@@ -5,4 +5,7 @@ target/
 .idea/
 .vscode/
 
-target-static
+target-static/
+target-windows/
+target-sanitize/
+fuzz/target/

@@ -55,13 +55,11 @@
             pkgs.pkg-config
             pkgs.protobuf
             pkgs.sqlite
+            pkgs.pkgsCross.aarch64-multiplatform-musl.stdenv.cc
+            pkgs.pkgsCross.musl64.stdenv.cc
           ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
             pkgs.llvmPackages_latest.compiler-rt
             pkgs.lld
-          ] ++ pkgs.lib.optionals (system == "x86_64-linux") [
-            pkgs.pkgsCross.musl64.stdenv.cc
-          ] ++ pkgs.lib.optionals (system == "aarch64-linux") [
-            pkgs.pkgsCross.aarch64-multiplatform-musl.stdenv.cc
           ];
         in {
           default = pkgs.mkShell {

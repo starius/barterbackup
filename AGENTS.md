@@ -44,6 +44,8 @@ Build and test
   - `make clippy`
   - `make install`
   - `make build-static`
+  - `make build-static-linux-amd64`
+  - `make build-static-linux-arm64`
   - `make build-windows`
   - `make sanitize-address`
 

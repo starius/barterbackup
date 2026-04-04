@@ -72,17 +72,22 @@ Build distributable variants:
 
 ```bash
 make build-static
+make build-static-linux-amd64
+make build-static-linux-arm64
 make build-windows
 make sanitize-address
 ```
 
 `make build-static` produces musl-linked Linux binaries for the current Linux
-host architecture. `make build-windows` uses `cargo-xwin` to produce
-`x86_64-pc-windows-msvc` binaries and requests static CRT linkage; Windows
-system DLLs still remain dynamic as usual, and the first run downloads the
-Microsoft SDK pieces that `cargo-xwin` needs. `make sanitize-address` is a
-Linux-only nightly target that rebuilds the workspace with AddressSanitizer
-instrumentation.
+host architecture. `make build-static-linux-amd64` and
+`make build-static-linux-arm64` always build release musl-linked Linux
+binaries for those targets and are intended to work from any supported
+`nix develop` host by using the cross toolchains from the dev shell.
+`make build-windows` uses `cargo-xwin` to produce `x86_64-pc-windows-msvc`
+binaries and requests static CRT linkage; Windows system DLLs still remain
+dynamic as usual, and the first run downloads the Microsoft SDK pieces that
+`cargo-xwin` needs. `make sanitize-address` is a Linux-only nightly target
+that rebuilds the workspace with AddressSanitizer instrumentation.
 
 ## Test
 
