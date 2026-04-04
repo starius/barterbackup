@@ -2349,6 +2349,19 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         }))
     }
 
+    async fn init(
+        &self,
+        request: tonic::Request<clirpc::InitRequest>,
+    ) -> Result<tonic::Response<clirpc::InitResponse>, tonic::Status> {
+        if request.into_inner().main_password.is_empty() {
+            return Err(Status::invalid_argument("main password is required"));
+        }
+
+        Err(Status::failed_precondition(
+            "initialization is only supported by the daemon",
+        ))
+    }
+
     async fn unlock(
         &self,
         request: tonic::Request<clirpc::UnlockRequest>,

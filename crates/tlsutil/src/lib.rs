@@ -658,6 +658,12 @@ mod tests {
                     + 'static,
             >,
         >;
+        async fn init(
+            &self,
+            _: Request<protos::clirpc::InitRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::InitResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
         async fn unlock(
             &self,
             _: Request<protos::clirpc::UnlockRequest>,

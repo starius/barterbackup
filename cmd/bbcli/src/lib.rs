@@ -16,9 +16,9 @@ use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
 use protos::clirpc::{
     CheckContractRequest, CheckoutRevisionRequest, ConnectPeerRequest, DeleteFileRequest,
     ExportBuiltInPeersRequest, File, GetContractsRequest, GetFileRequest, GetStorageConfigRequest,
-    HealthCheckRequest, ListConflictsRequest, ListFilesRequest, ProposeContractRequest,
-    RecoverContentRequest, ResolveConflictRequest, SetFileRequest, SetStorageConfigRequest,
-    StopRequest, StorageConfig, UnlockRequest,
+    HealthCheckRequest, InitRequest, ListConflictsRequest, ListFilesRequest,
+    ProposeContractRequest, RecoverContentRequest, ResolveConflictRequest, SetFileRequest,
+    SetStorageConfigRequest, StopRequest, StorageConfig, UnlockRequest,
 };
 use tlsutil::{connect_pinned_channel, read_keys};
 use tokio::time::sleep;
@@ -54,6 +54,20 @@ pub struct Args {
 enum Command {
     /// Print server onion and uptime.
     Healthcheck,
+
+    /// Initialize daemon storage with the main password.
+    Init {
+        /// password_stdin reads the main password from standard input.
+        #[arg(long)]
+        password_stdin: bool,
+
+        /// wait_seconds is how long to wait for daemon startup readiness.
+        #[arg(long, default_value_t = DEFAULT_UNLOCK_WAIT_SECS)]
+        wait_seconds: u64,
+
+        /// password is the inline main password or seed string.
+        password: Option<String>,
+    },
 
     /// Send the main password to the daemon unlock path.
     Unlock {
@@ -197,12 +211,25 @@ where
 async fn run_parsed(args: Args) -> Result<()> {
     match args.cmd {
         Command::Healthcheck => healthcheck(&args.daemon_addr).await?,
+        Command::Init {
+            password_stdin,
+            wait_seconds,
+            password,
+        } => {
+            let password = resolve_main_password(password, password_stdin)?;
+            init(
+                &args.daemon_addr,
+                &password,
+                Duration::from_secs(wait_seconds),
+            )
+            .await?
+        }
         Command::Unlock {
             password_stdin,
             wait_seconds,
             password,
         } => {
-            let password = resolve_unlock_password(password, password_stdin)?;
+            let password = resolve_main_password(password, password_stdin)?;
             unlock(
                 &args.daemon_addr,
                 &password,
@@ -247,8 +274,8 @@ async fn run_parsed(args: Args) -> Result<()> {
     Ok(())
 }
 
-/// Read the unlock password from the selected source.
-fn resolve_unlock_password(password: Option<String>, password_stdin: bool) -> Result<String> {
+/// Read one main password from the selected source.
+fn resolve_main_password(password: Option<String>, password_stdin: bool) -> Result<String> {
     if password_stdin {
         if password.is_some() {
             bail!("pass the password either as an argument or via --password-stdin");
@@ -343,6 +370,12 @@ async fn healthcheck(addr: &str) -> Result<()> {
     println!("server_onion: {}", response.server_onion);
     println!("uptime_seconds: {}", response.uptime_seconds);
     Ok(())
+}
+
+/// Initialize daemon storage, waiting briefly if it is still starting up.
+async fn init(addr: &str, password: &str, wait_timeout: Duration) -> Result<()> {
+    let keys_dir = default_keys_dir();
+    init_with_keys_dir(addr, password, &keys_dir, wait_timeout).await
 }
 
 /// Unlock the daemon, waiting briefly if it is still starting up.
@@ -602,6 +635,47 @@ pub async fn connect_client_with_keys_dir(
 }
 
 /// Unlock the daemon using explicit local pinning material and readiness waits.
+pub async fn init_with_keys_dir(
+    addr: &str,
+    password: &str,
+    keys_dir: &Path,
+    wait_timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + wait_timeout;
+    wait_for_cli_keys_until(keys_dir, deadline).await?;
+    let mut last_error = anyhow!("daemon is not ready");
+
+    loop {
+        match connect_client_with_keys_dir(addr, keys_dir).await {
+            Ok(mut client) => match init_with_client(&mut client, password).await {
+                Ok(()) => return Ok(()),
+                Err(error) if is_retryable_unlock_error(&error) && Instant::now() < deadline => {
+                    last_error = error;
+                }
+                Err(error) => return Err(error),
+            },
+            Err(error) if Instant::now() < deadline => {
+                last_error = error;
+            }
+            Err(error) => {
+                return Err(error).context(format!(
+                    "daemon did not become ready within {} seconds",
+                    wait_timeout.as_secs()
+                ));
+            }
+        }
+
+        if Instant::now() >= deadline {
+            return Err(last_error).context(format!(
+                "daemon did not become ready within {} seconds",
+                wait_timeout.as_secs()
+            ));
+        }
+        sleep(UNLOCK_RETRY_INTERVAL).await;
+    }
+}
+
+/// Unlock the daemon using explicit local pinning material and readiness waits.
 pub async fn unlock_with_keys_dir(
     addr: &str,
     password: &str,
@@ -677,6 +751,19 @@ fn is_retryable_unlock_error(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<tonic::Status>()
         .is_some_and(|status| status.code() == Code::Unavailable)
+}
+
+/// Send one init request through an already connected client.
+pub async fn init_with_client(
+    client: &mut BarterBackupClientClient<Channel>,
+    password: &str,
+) -> Result<()> {
+    client
+        .init(InitRequest {
+            main_password: password.to_string(),
+        })
+        .await?;
+    Ok(())
 }
 
 /// Send one unlock request through an already connected client.

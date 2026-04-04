@@ -318,11 +318,21 @@ impl DaemonService {
         }
     }
 
-    /// Verify or create the fingerprint file for the provided password.
-    fn verify_or_create_fingerprint(&self, password: &str) -> Result<bool> {
-        let fingerprint_path = self.data_dir.join("fingerprint.txt");
+    /// Return the path to the daemon password fingerprint file.
+    fn fingerprint_path(&self) -> PathBuf {
+        self.data_dir.join("fingerprint.txt")
+    }
+
+    /// Derive the persisted fingerprint string for one main password.
+    fn fingerprint_for_password(&self, password: &str) -> Result<String> {
         let master = keys::derive_master_priv(password);
-        let fingerprint = hex::encode(keys::derive_key(&master, "fingerprint", 32)?);
+        Ok(hex::encode(keys::derive_key(&master, "fingerprint", 32)?))
+    }
+
+    /// Initialize the fingerprint file for the provided password.
+    fn initialize_fingerprint(&self, password: &str) -> Result<bool> {
+        let fingerprint_path = self.fingerprint_path();
+        let fingerprint = self.fingerprint_for_password(password)?;
 
         match fs::read_to_string(&fingerprint_path) {
             Ok(existing) => {
@@ -333,6 +343,23 @@ impl DaemonService {
                 write_owner_only_file(&fingerprint_path, format!("{fingerprint}\n").as_bytes())?;
                 Ok(true)
             }
+            Err(error) => {
+                Err(error).with_context(|| format!("read {}", fingerprint_path.display()))
+            }
+        }
+    }
+
+    /// Verify the fingerprint file for the provided password without creating it.
+    fn verify_fingerprint(&self, password: &str) -> Result<Option<bool>> {
+        let fingerprint_path = self.fingerprint_path();
+        let fingerprint = self.fingerprint_for_password(password)?;
+
+        match fs::read_to_string(&fingerprint_path) {
+            Ok(existing) => {
+                restrict_owner_only_file(&fingerprint_path)?;
+                Ok(Some(existing.trim() == fingerprint))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => {
                 Err(error).with_context(|| format!("read {}", fingerprint_path.display()))
             }
@@ -427,6 +454,42 @@ impl BarterBackupClient for DaemonService {
         }))
     }
 
+    async fn init(
+        &self,
+        request: tonic::Request<clirpc::InitRequest>,
+    ) -> Result<Response<clirpc::InitResponse>, Status> {
+        let password = request.into_inner().main_password;
+        if password.is_empty() {
+            return Err(Status::invalid_argument("main password is required"));
+        }
+
+        {
+            let node_state = self.node_state.lock().await;
+            match &*node_state {
+                DaemonNodeState::Locked => {}
+                DaemonNodeState::Unlocking => {
+                    return Err(Status::unavailable("unlock already in progress"));
+                }
+                DaemonNodeState::Unlocked(_) => {
+                    return Err(Status::failed_precondition(
+                        "daemon is already initialized and unlocked",
+                    ));
+                }
+            }
+        }
+
+        if !self
+            .initialize_fingerprint(&password)
+            .map_err(|error| Status::internal(error.to_string()))?
+        {
+            return Err(Status::permission_denied(
+                "invalid password for this data directory",
+            ));
+        }
+
+        Ok(Response::new(clirpc::InitResponse {}))
+    }
+
     async fn unlock(
         &self,
         request: tonic::Request<clirpc::UnlockRequest>,
@@ -453,17 +516,25 @@ impl BarterBackupClient for DaemonService {
             }
         }
 
-        // Validate the password against the fingerprint before constructing any
-        // node state. A mismatch means the caller pointed the daemon at an
-        // existing data directory with the wrong seed.
+        // Validate the password against the existing fingerprint before
+        // constructing any node state. Unlock must not implicitly initialize a
+        // fresh data directory.
         let unlock_result = async {
-            if !self
-                .verify_or_create_fingerprint(&password)
+            match self
+                .verify_fingerprint(&password)
                 .map_err(|error| Status::internal(error.to_string()))?
             {
-                return Err(Status::permission_denied(
-                    "invalid password for this data directory",
-                ));
+                Some(true) => {}
+                Some(false) => {
+                    return Err(Status::permission_denied(
+                        "invalid password for this data directory",
+                    ));
+                }
+                None => {
+                    return Err(Status::failed_precondition(
+                        "daemon storage is not initialized; run init first",
+                    ));
+                }
             }
 
             self.build_unlocked_node(&password)
@@ -666,6 +737,13 @@ impl BarterBackupClient for DaemonRpcService {
         request: tonic::Request<clirpc::HealthCheckRequest>,
     ) -> Result<Response<clirpc::HealthCheckResponse>, Status> {
         self.daemon.local_health_check(request).await
+    }
+
+    async fn init(
+        &self,
+        request: tonic::Request<clirpc::InitRequest>,
+    ) -> Result<Response<clirpc::InitResponse>, Status> {
+        self.daemon.init(request).await
     }
 
     async fn unlock(
@@ -1119,8 +1197,8 @@ pub async fn run(config: Config) -> Result<()> {
 mod tests {
     use super::*;
     use bbcli::{
-        connect_client_with_keys_dir, get_file_with_client, list_files_with_client,
-        set_file_with_client, stop_with_client, unlock_with_keys_dir,
+        connect_client_with_keys_dir, get_file_with_client, init_with_keys_dir,
+        list_files_with_client, set_file_with_client, stop_with_client, unlock_with_keys_dir,
     };
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -1264,12 +1342,33 @@ mod tests {
     /// Unlock a daemon service directly so live transport tests keep the full
     /// underlying error chain instead of truncating it into a gRPC status.
     async fn unlock_for_test(service: &DaemonService, password: &str) -> Result<()> {
-        if !service.verify_or_create_fingerprint(password)? {
+        if !service.initialize_fingerprint(password)? {
             bail!("invalid password for test daemon data directory");
         }
         let unlocked = service.build_unlocked_node(password).await?;
         let mut node_state = service.node_state.lock().await;
         *node_state = DaemonNodeState::Unlocked(unlocked);
+        Ok(())
+    }
+
+    /// Initialize a daemon service through its public init RPC.
+    async fn init_service(service: &DaemonService, password: &str) -> Result<()> {
+        service
+            .init(tonic::Request::new(clirpc::InitRequest {
+                main_password: password.to_string(),
+            }))
+            .await?;
+        Ok(())
+    }
+
+    /// Initialize and unlock a daemon service through the public RPCs.
+    async fn init_and_unlock_service(service: &DaemonService, password: &str) -> Result<()> {
+        init_service(service, password).await?;
+        service
+            .unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: password.to_string(),
+            }))
+            .await?;
         Ok(())
     }
 
@@ -1382,6 +1481,13 @@ mod tests {
         });
         let keys_dir = temp_dir.path().join("cli-keys");
 
+        init_with_keys_dir(
+            &daemon_addr,
+            "correct horse battery staple",
+            &keys_dir,
+            Duration::from_secs(5),
+        )
+        .await?;
         unlock_with_keys_dir(
             &daemon_addr,
             "correct horse battery staple",
@@ -1429,6 +1535,13 @@ mod tests {
         });
         let keys_dir = temp_dir.path().join("cli-keys");
 
+        init_with_keys_dir(
+            &daemon_addr,
+            "correct horse battery staple",
+            &keys_dir,
+            Duration::from_secs(5),
+        )
+        .await?;
         unlock_with_keys_dir(
             &daemon_addr,
             "correct horse battery staple",
@@ -1456,11 +1569,7 @@ mod tests {
             .into_inner();
         assert!(locked.server_onion.is_empty());
 
-        service
-            .unlock(tonic::Request::new(clirpc::UnlockRequest {
-                main_password: "password".to_string(),
-            }))
-            .await?;
+        init_and_unlock_service(&service, "password").await?;
         let unlocked = service
             .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
             .await?
@@ -1472,14 +1581,35 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn unlock_rejects_wrong_password_for_existing_data_dir() -> Result<()> {
+    async fn unlock_rejects_uninitialized_storage() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        let first_service = test_service(&temp_dir);
-        first_service
+        let service = test_service(&temp_dir);
+        let error = service
             .unlock(tonic::Request::new(clirpc::UnlockRequest {
                 main_password: "correct horse battery staple".to_string(),
             }))
-            .await?;
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(!service.fingerprint_path().is_file());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn init_is_idempotent_for_same_password() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let service = test_service(&temp_dir);
+        init_service(&service, "correct horse battery staple").await?;
+        init_service(&service, "correct horse battery staple").await?;
+        assert!(service.fingerprint_path().is_file());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unlock_rejects_wrong_password_for_existing_data_dir() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let first_service = test_service(&temp_dir);
+        init_and_unlock_service(&first_service, "correct horse battery staple").await?;
         first_service.shutdown().await?;
 
         let second_service = test_service(&temp_dir);
@@ -1491,6 +1621,23 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::PermissionDenied);
 
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn init_rejects_wrong_password_for_existing_data_dir() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let first_service = test_service(&temp_dir);
+        init_service(&first_service, "correct horse battery staple").await?;
+
+        let second_service = test_service(&temp_dir);
+        let error = second_service
+            .init(tonic::Request::new(clirpc::InitRequest {
+                main_password: "wrong password".to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
         Ok(())
     }
 
@@ -1511,11 +1658,7 @@ mod tests {
     async fn unlocked_daemon_delegates_file_operations() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let service = test_service(&temp_dir);
-        service
-            .unlock(tonic::Request::new(clirpc::UnlockRequest {
-                main_password: "password".to_string(),
-            }))
-            .await?;
+        init_and_unlock_service(&service, "password").await?;
 
         service
             .set_file(tonic::Request::new(clirpc::SetFileRequest {
@@ -1556,16 +1699,8 @@ mod tests {
             maintenance_config,
         );
 
-        local_service
-            .unlock(tonic::Request::new(clirpc::UnlockRequest {
-                main_password: "local-password".to_string(),
-            }))
-            .await?;
-        remote_service
-            .unlock(tonic::Request::new(clirpc::UnlockRequest {
-                main_password: "remote-password".to_string(),
-            }))
-            .await?;
+        init_and_unlock_service(&local_service, "local-password").await?;
+        init_and_unlock_service(&remote_service, "remote-password").await?;
 
         let remote_onion = unlocked_node(&remote_service).await.address().to_string();
         local_service
@@ -1631,16 +1766,8 @@ mod tests {
             maintenance_config.clone(),
         );
 
-        owner_service
-            .unlock(tonic::Request::new(clirpc::UnlockRequest {
-                main_password: "owner-password".to_string(),
-            }))
-            .await?;
-        peer_service
-            .unlock(tonic::Request::new(clirpc::UnlockRequest {
-                main_password: "peer-password".to_string(),
-            }))
-            .await?;
+        init_and_unlock_service(&owner_service, "owner-password").await?;
+        init_and_unlock_service(&peer_service, "peer-password").await?;
 
         let peer_onion = unlocked_node(&peer_service).await.address().to_string();
         owner_service
@@ -1684,6 +1811,26 @@ mod tests {
         })
         .await?;
 
+        let mut check_updates = owner_service
+            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: peer_onion.clone(),
+                }),
+            }))
+            .await?
+            .into_inner();
+        let mut saw_successful_check = false;
+        while let Some(update) = check_updates.next().await {
+            let update = update?;
+            if update.state == clirpc::ContractState::Completed as i32 && update.success {
+                saw_successful_check = true;
+            }
+        }
+        assert!(
+            saw_successful_check,
+            "expected a successful contract check before owner shutdown"
+        );
+
         owner_service.shutdown().await?;
         remove_persisted_content_blobs(&owner_dir.path().join("local"))?;
 
@@ -1694,11 +1841,7 @@ mod tests {
             }),
             maintenance_config,
         );
-        restarted_service
-            .unlock(tonic::Request::new(clirpc::UnlockRequest {
-                main_password: "owner-password".to_string(),
-            }))
-            .await?;
+        init_and_unlock_service(&restarted_service, "owner-password").await?;
 
         let mut recovery = restarted_service
             .recover_content(tonic::Request::new(clirpc::RecoverContentRequest {}))
@@ -1747,16 +1890,8 @@ mod tests {
             maintenance_config,
         );
 
-        local_service
-            .unlock(tonic::Request::new(clirpc::UnlockRequest {
-                main_password: "local-score".to_string(),
-            }))
-            .await?;
-        remote_service
-            .unlock(tonic::Request::new(clirpc::UnlockRequest {
-                main_password: "remote-score".to_string(),
-            }))
-            .await?;
+        init_and_unlock_service(&local_service, "local-score").await?;
+        init_and_unlock_service(&remote_service, "remote-score").await?;
 
         let remote_onion = unlocked_node(&remote_service).await.address().to_string();
         local_service
@@ -1823,16 +1958,8 @@ mod tests {
             remote_maintenance,
         );
 
-        local_service
-            .unlock(tonic::Request::new(clirpc::UnlockRequest {
-                main_password: "local-manual".to_string(),
-            }))
-            .await?;
-        remote_service
-            .unlock(tonic::Request::new(clirpc::UnlockRequest {
-                main_password: "remote-manual".to_string(),
-            }))
-            .await?;
+        init_and_unlock_service(&local_service, "local-manual").await?;
+        init_and_unlock_service(&remote_service, "remote-manual").await?;
 
         // Seed the remote peer with one revision and connect it locally.
         remote_service
@@ -1882,11 +2009,7 @@ mod tests {
             }),
             restarted_remote_maintenance,
         );
-        restarted_remote
-            .unlock(tonic::Request::new(clirpc::UnlockRequest {
-                main_password: "remote-manual".to_string(),
-            }))
-            .await?;
+        init_and_unlock_service(&restarted_remote, "remote-manual").await?;
 
         // Change the remote content after restart. The local mirror should stay
         // stale until the explicit maintenance tick fires.
@@ -1909,7 +2032,7 @@ mod tests {
         );
 
         local_tick.notify_one();
-        wait_for_async(Duration::from_secs(2), || {
+        wait_for_async(Duration::from_secs(10), || {
             let local_service = &local_service;
             let remote_onion = remote_onion.clone();
             let remote_v2 = remote_v2.clone();
@@ -1941,11 +2064,7 @@ mod tests {
             maintenance_config,
         );
 
-        service
-            .unlock(tonic::Request::new(clirpc::UnlockRequest {
-                main_password: "shutdown-maintenance".to_string(),
-            }))
-            .await?;
+        init_and_unlock_service(&service, "shutdown-maintenance").await?;
 
         let stuck_peer = Node::new("stuck-maintenance-peer")?;
         service

@@ -9,6 +9,10 @@ service BarterBackupClient {
     // on the shared Node implementation.
     rpc LocalHealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
 
+    // Init initializes the daemon storage with the main password before the
+    // first unlock.
+    rpc Init(InitRequest) returns (InitResponse);
+
     // Unlock sends the main password to the daemon. The password is used to
     // derive the master secret key from which all other keys are derived,
     // for encryption, onion service private key, and for authentication.
@@ -39,7 +43,8 @@ service BarterBackupClient {
 
     // ResolveConflict chooses the revision that should stay active and archives
     // the remaining conflicting revisions.
-    rpc ResolveConflict(ResolveConflictRequest) returns (ResolveConflictResponse);
+    rpc ResolveConflict(ResolveConflictRequest)
+        returns (ResolveConflictResponse);
 
     // SetFile sends a single file to the daemon. The daemon assembles a
     // single content blob from the current set of files, stores it encrypted
@@ -105,6 +110,13 @@ message HealthCheckResponse {
     // uptime_seconds is the number of seconds since the daemon started.
     int64 uptime_seconds = 2;
 }
+
+message InitRequest {
+    // main_password is the main password used to derive the master secret.
+    string main_password = 1;
+}
+
+message InitResponse {}
 
 message UnlockRequest {
     // main_password is the main password used to derive the master secret.
