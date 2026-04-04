@@ -513,15 +513,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "clitls",
  "crossterm",
  "dirs 5.0.1",
  "futures-util",
+ "hex",
  "netmock",
  "node",
  "protos",
  "storage",
  "tempfile",
+ "tlsutil",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -535,7 +536,6 @@ dependencies = [
  "async-trait",
  "bbcli",
  "clap",
- "clitls",
  "dirs 5.0.1",
  "ed25519-dalek 1.0.1",
  "fs2",
@@ -548,6 +548,7 @@ dependencies = [
  "protos",
  "storage",
  "tempfile",
+ "tlsutil",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
@@ -851,31 +852,6 @@ name = "clap_lex"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b94f61472cee1439c0b966b47e3aca9ae07e45d070759512cd390ea2bebc6675"
-
-[[package]]
-name = "clitls"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ed25519-dalek 1.0.1",
- "futures-util",
- "hyper-util",
- "keys",
- "pem",
- "pkcs8",
- "protos",
- "rand 0.7.3",
- "rcgen",
- "rustls",
- "rustls-post-quantum",
- "tempfile",
- "tokio",
- "tokio-rustls",
- "tokio-stream",
- "tonic",
- "tower",
- "x509-parser",
-]
 
 [[package]]
 name = "clock"
@@ -2581,9 +2557,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "clitls",
  "ed25519-dalek 1.0.1",
  "futures-util",
+ "tlsutil",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
@@ -2598,12 +2574,12 @@ dependencies = [
  "anyhow",
  "arti-client",
  "async-trait",
- "clitls",
  "ed25519-dalek 1.0.1",
  "futures",
  "hyper-util",
  "keys",
  "safelog",
+ "tlsutil",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
@@ -2627,7 +2603,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "clitls",
  "clock",
  "content",
  "ed25519-dalek 1.0.1",
@@ -2638,6 +2613,7 @@ dependencies = [
  "protos",
  "sha2 0.10.9",
  "storage",
+ "tlsutil",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -4526,6 +4502,31 @@ checksum = "be4d6b5f19ff7664e8c98d03e2139cb510db9b0a60b55f8e8709b689d939b6bc"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "tlsutil"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ed25519-dalek 1.0.1",
+ "futures-util",
+ "hyper-util",
+ "keys",
+ "pem",
+ "pkcs8",
+ "protos",
+ "rand 0.7.3",
+ "rcgen",
+ "rustls",
+ "rustls-post-quantum",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tonic",
+ "tower",
+ "x509-parser",
 ]
 
 [[package]]
