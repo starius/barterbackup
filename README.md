@@ -152,9 +152,11 @@ bbd
 Unlock it with the main seed/password. Interactive usage will prompt and mask
 input; non-interactive usage can stream the password through stdin. The unlock
 path trims trailing whitespace-like characters from stdin so simple `echo`
-examples are safe:
+examples are safe. The first start also needs an explicit `init` to bind the
+data directory to the main password:
 
 ```bash
+echo 'correct horse battery staple' | bbcli init --password-stdin
 echo 'correct horse battery staple' | bbcli unlock --password-stdin
 ```
 
@@ -162,6 +164,8 @@ If you use a custom data directory:
 
 ```bash
 BBD_DATA_DIR=/tmp/barterbackup bbd
+echo 'correct horse battery staple' | \
+  BBCLI_CLI_KEYS_DIR=/tmp/barterbackup/cli-keys bbcli init --password-stdin
 echo 'correct horse battery staple' | \
   BBCLI_CLI_KEYS_DIR=/tmp/barterbackup/cli-keys bbcli unlock --password-stdin
 ```
@@ -178,8 +182,20 @@ Manage files:
 bbcli set-file alpha.txt ./alpha.txt
 bbcli list-files
 bbcli get-file alpha.txt ./alpha.out
+bbcli get-file alpha.txt > alpha.out
 bbcli delete-file alpha.txt
 ```
+
+Plaintext file I/O happens on the CLI side:
+
+- `bbcli set-file <name> <path>` reads the plaintext file from the machine
+  where `bbcli` runs, then sends the bytes over local `clirpc`
+- `bbcli get-file <name> <path>` writes the plaintext file on the machine
+  where `bbcli` runs
+- omitting the output path on `bbcli get-file` prints the file to stdout when
+  stdout is piped or when the file is valid UTF-8 text
+- binary output is refused on a terminal unless you pass an output path or
+  explicitly pipe stdout to another program
 
 Inspect contracts and recovery:
 
@@ -248,8 +264,12 @@ non-selected revisions stay archived and can still be checked out later.
 ## Notes
 
 - `bbd` starts locked and only serves local admin RPC until `Unlock`
+- `bbcli init` must be run once per new data directory before the first unlock
 - `bbcli unlock` waits for the daemon to become ready instead of failing on
   early startup races
+- `bbcli unlock` returns once the local encrypted store is open; the public
+  Tor-facing peer runtime may still be starting in the background, and
+  `bbcli healthcheck` reports that readiness explicitly
 - `bbcli` waits briefly for `bbd` to create the session `cli-keys` instead of
   creating that directory on its own
 - protobufs are compiled at build time; there are no checked-in generated Rust

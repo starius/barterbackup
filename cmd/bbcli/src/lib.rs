@@ -103,8 +103,8 @@ enum Command {
         /// name is the stable file name inside the encrypted content set.
         name: String,
 
-        /// out is the output path for the downloaded plaintext file.
-        out: PathBuf,
+        /// out is the optional output path for the downloaded plaintext file.
+        out: Option<PathBuf>,
     },
 
     /// Delete a file from the latest encrypted content blob.
@@ -209,8 +209,8 @@ where
 
 /// Dispatch one parsed CLI invocation.
 async fn run_parsed(args: Args) -> Result<()> {
-    match args.cmd {
-        Command::Healthcheck => healthcheck(&args.daemon_addr).await?,
+    let result = match args.cmd {
+        Command::Healthcheck => healthcheck(&args.daemon_addr).await,
         Command::Init {
             password_stdin,
             wait_seconds,
@@ -222,7 +222,7 @@ async fn run_parsed(args: Args) -> Result<()> {
                 &password,
                 Duration::from_secs(wait_seconds),
             )
-            .await?
+            .await
         }
         Command::Unlock {
             password_stdin,
@@ -235,43 +235,41 @@ async fn run_parsed(args: Args) -> Result<()> {
                 &password,
                 Duration::from_secs(wait_seconds),
             )
-            .await?
+            .await
         }
-        Command::Stop => stop(&args.daemon_addr).await?,
-        Command::ListFiles => list_files(&args.daemon_addr).await?,
-        Command::SetFile { name, path } => set_file(&args.daemon_addr, &name, &path).await?,
-        Command::GetFile { name, out } => get_file(&args.daemon_addr, &name, &out).await?,
-        Command::DeleteFile { name } => delete_file(&args.daemon_addr, &name).await?,
+        Command::Stop => stop(&args.daemon_addr).await,
+        Command::ListFiles => list_files(&args.daemon_addr).await,
+        Command::SetFile { name, path } => set_file(&args.daemon_addr, &name, &path).await,
+        Command::GetFile { name, out } => get_file(&args.daemon_addr, &name, out.as_deref()).await,
+        Command::DeleteFile { name } => delete_file(&args.daemon_addr, &name).await,
         Command::ConnectPeer { onion_service_id } => {
-            connect_peer(&args.daemon_addr, &onion_service_id).await?
+            connect_peer(&args.daemon_addr, &onion_service_id).await
         }
-        Command::ConnectedPeers => connected_peers(&args.daemon_addr).await?,
-        Command::ExportBuiltInPeers => export_built_in_peers(&args.daemon_addr).await?,
-        Command::ListConflicts => list_conflicts(&args.daemon_addr).await?,
+        Command::ConnectedPeers => connected_peers(&args.daemon_addr).await,
+        Command::ExportBuiltInPeers => export_built_in_peers(&args.daemon_addr).await,
+        Command::ListConflicts => list_conflicts(&args.daemon_addr).await,
         Command::CheckoutRevision {
             content_id,
             out_dir,
-        } => checkout_revision(&args.daemon_addr, &content_id, &out_dir).await?,
+        } => checkout_revision(&args.daemon_addr, &content_id, &out_dir).await,
         Command::ResolveConflict { content_id } => {
-            resolve_conflict(&args.daemon_addr, &content_id).await?
+            resolve_conflict(&args.daemon_addr, &content_id).await
         }
         Command::SetStorageConfig {
             allocated_storage_for_peers,
             min_replicas,
-        } => {
-            set_storage_config(&args.daemon_addr, allocated_storage_for_peers, min_replicas).await?
-        }
-        Command::GetStorageConfig => get_storage_config(&args.daemon_addr).await?,
-        Command::GetContracts => get_contracts(&args.daemon_addr).await?,
+        } => set_storage_config(&args.daemon_addr, allocated_storage_for_peers, min_replicas).await,
+        Command::GetStorageConfig => get_storage_config(&args.daemon_addr).await,
+        Command::GetContracts => get_contracts(&args.daemon_addr).await,
         Command::ProposeContract { onion_service_id } => {
-            propose_contract(&args.daemon_addr, &onion_service_id).await?
+            propose_contract(&args.daemon_addr, &onion_service_id).await
         }
         Command::CheckContract { onion_service_id } => {
-            check_contract(&args.daemon_addr, &onion_service_id).await?
+            check_contract(&args.daemon_addr, &onion_service_id).await
         }
-        Command::RecoverContent => recover_content(&args.daemon_addr).await?,
-    }
-    Ok(())
+        Command::RecoverContent => recover_content(&args.daemon_addr).await,
+    };
+    result.map_err(|error| friendly_cli_error(error, &args.daemon_addr))
 }
 
 /// Read one main password from the selected source.
@@ -422,11 +420,30 @@ async fn set_file(addr: &str, name: &str, path: &Path) -> Result<()> {
 }
 
 /// Download one plaintext file.
-async fn get_file(addr: &str, name: &str, out: &Path) -> Result<()> {
+async fn get_file(addr: &str, name: &str, out: Option<&Path>) -> Result<()> {
     let mut client = connect_client(addr).await?;
     let data = get_file_with_client(&mut client, name).await?;
-    fs::write(out, data).with_context(|| format!("write output file {}", out.display()))?;
+    if let Some(out) = out {
+        fs::write(out, data).with_context(|| format!("write output file {}", out.display()))?;
+        return Ok(());
+    }
+
+    let stdout_bytes = get_file_stdout_bytes(data, io::stdout().is_terminal())?;
+    io::stdout()
+        .write_all(&stdout_bytes)
+        .context("write file data to stdout")?;
     Ok(())
+}
+
+/// Decide whether `bbcli get-file` may print a file body directly to stdout.
+fn get_file_stdout_bytes(data: Vec<u8>, stdout_is_terminal: bool) -> Result<Vec<u8>> {
+    if !stdout_is_terminal || std::str::from_utf8(&data).is_ok() {
+        return Ok(data);
+    }
+
+    bail!(
+        "refusing to print binary data to the terminal; pass an output path or pipe to `| cat` or `| less`"
+    )
 }
 
 /// Delete one stored file.
@@ -759,6 +776,51 @@ async fn wait_for_cli_keys_until(keys_dir: &Path, deadline: Instant) -> Result<(
 
         sleep(UNLOCK_RETRY_INTERVAL).await;
     }
+}
+
+/// Rewrite raw transport and daemon failures into user-facing CLI messages.
+fn friendly_cli_error(error: anyhow::Error, daemon_addr: &str) -> anyhow::Error {
+    if let Some(status) = error.downcast_ref::<tonic::Status>() {
+        return match status.code() {
+            Code::FailedPrecondition if status.message() == "daemon is locked" => {
+                anyhow!("daemon is locked; run `bbcli unlock` first")
+            }
+            Code::FailedPrecondition
+                if status.message() == "daemon storage is not initialized; run init first" =>
+            {
+                anyhow!("daemon storage is not initialized; run `bbcli init` first")
+            }
+            Code::Unavailable if status.message() == "unlock already in progress" => {
+                anyhow!("unlock is already in progress; wait for it to finish")
+            }
+            Code::Unavailable if status.message() == "unlock in progress" => {
+                anyhow!("daemon is still unlocking; wait for it to finish")
+            }
+            Code::PermissionDenied
+                if status.message() == "invalid password for this data directory" =>
+            {
+                anyhow!("invalid password for this data directory")
+            }
+            _ => error,
+        };
+    }
+
+    let message = error.to_string();
+    if message.contains("did not create local cli keys") {
+        return anyhow!(
+            "bbd is not running yet or has not created its session cli keys; start `bbd` and retry"
+        );
+    }
+    if message.contains("Connection refused")
+        || message.contains("tcp connect error")
+        || message.contains("error trying to connect")
+    {
+        return anyhow!(
+            "could not reach bbd at {daemon_addr}; make sure the daemon is running and BBCLI_DAEMON_ADDR is correct"
+        );
+    }
+
+    error
 }
 
 /// Report whether an unlock failure should be retried while the daemon starts.
@@ -1100,6 +1162,78 @@ mod tests {
         assert!(checked_checkout_target(out_dir, "nested/alpha.txt").is_err());
         assert!(checked_checkout_target(out_dir, "../alpha.txt").is_err());
         assert!(checked_checkout_target(out_dir, "/tmp/alpha.txt").is_err());
+    }
+
+    #[test]
+    fn get_file_stdout_helper_allows_text_and_pipes() {
+        assert_eq!(
+            get_file_stdout_bytes("hello\n".as_bytes().to_vec(), true).unwrap(),
+            b"hello\n".to_vec()
+        );
+        assert_eq!(
+            get_file_stdout_bytes(vec![0, 159, 146, 150], false).unwrap(),
+            vec![0, 159, 146, 150]
+        );
+    }
+
+    #[test]
+    fn get_file_stdout_helper_rejects_binary_terminal_output() {
+        let error = get_file_stdout_bytes(vec![0, 159, 146, 150], true).unwrap_err();
+
+        assert!(error.to_string().contains("refusing to print binary data"));
+        assert!(error.to_string().contains("| cat"));
+    }
+
+    #[test]
+    fn friendly_cli_error_maps_common_statuses() {
+        let locked = friendly_cli_error(
+            anyhow!(tonic::Status::failed_precondition("daemon is locked")),
+            DEFAULT_DAEMON_ADDR,
+        );
+        assert_eq!(
+            locked.to_string(),
+            "daemon is locked; run `bbcli unlock` first"
+        );
+
+        let uninitialized = friendly_cli_error(
+            anyhow!(tonic::Status::failed_precondition(
+                "daemon storage is not initialized; run init first"
+            )),
+            DEFAULT_DAEMON_ADDR,
+        );
+        assert_eq!(
+            uninitialized.to_string(),
+            "daemon storage is not initialized; run `bbcli init` first"
+        );
+
+        let bad_password = friendly_cli_error(
+            anyhow!(tonic::Status::permission_denied(
+                "invalid password for this data directory"
+            )),
+            DEFAULT_DAEMON_ADDR,
+        );
+        assert_eq!(
+            bad_password.to_string(),
+            "invalid password for this data directory"
+        );
+    }
+
+    #[test]
+    fn friendly_cli_error_maps_missing_daemon_signals() {
+        let missing_keys = friendly_cli_error(
+            anyhow!(
+                "daemon did not create local cli keys in /tmp/x (expected /tmp/x/server.pub and /tmp/x/client.key)"
+            ),
+            DEFAULT_DAEMON_ADDR,
+        );
+        assert!(missing_keys.to_string().contains("bbd is not running yet"));
+
+        let refused = friendly_cli_error(
+            anyhow!("transport error: tcp connect error: Connection refused"),
+            DEFAULT_DAEMON_ADDR,
+        );
+        assert!(refused.to_string().contains("could not reach bbd"));
+        assert!(refused.to_string().contains(DEFAULT_DAEMON_ADDR));
     }
 
     #[tokio::test(flavor = "multi_thread")]
