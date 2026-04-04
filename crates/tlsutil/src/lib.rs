@@ -37,10 +37,10 @@ use rustls::version::TLS13;
 use rustls::{ClientConfig, ServerConfig};
 use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::net::IpAddr;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
 use tokio_rustls::TlsConnector;
@@ -534,11 +534,18 @@ fn spki_der_to_public_key(spki: &[u8]) -> Result<PublicKey> {
 
 /// Create `dir` if needed and tighten it to owner-only permissions.
 fn ensure_owner_only_dir(dir: &Path) -> Result<()> {
-    fs::create_dir_all(dir)?;
-
     #[cfg(unix)]
     {
+        // Create any missing directories with private permissions from the
+        // start, then repair an older existing directory if needed.
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(dir)?;
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(dir)?;
     }
 
     Ok(())
@@ -560,7 +567,22 @@ fn restrict_owner_only_file(path: &Path) -> Result<()> {
 
 /// Write one local admin TLS file with owner-only permissions.
 fn write_owner_only_file(path: &Path, data: &[u8]) -> Result<()> {
-    fs::write(path, data)?;
+    #[cfg(unix)]
+    {
+        // Create the file with private permissions immediately so there is no
+        // window where another local user can open it before chmod lands.
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(data)?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, data)?;
+    }
     restrict_owner_only_file(path)
 }
 

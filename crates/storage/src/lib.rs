@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
@@ -153,9 +153,17 @@ pub struct OsFilesystem {
 impl OsFilesystem {
     /// Create an on-disk filesystem rooted at `root`.
     pub fn new(root: impl AsRef<Path>) -> Result<Self, StorageError> {
-        fs::create_dir_all(root.as_ref())?;
         #[cfg(unix)]
-        fs::set_permissions(root.as_ref(), fs::Permissions::from_mode(0o700))?;
+        {
+            // Create new store directories as private immediately, then repair
+            // older existing ones if they were left with weaker permissions.
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700);
+            builder.create(root.as_ref())?;
+            fs::set_permissions(root.as_ref(), fs::Permissions::from_mode(0o700))?;
+        }
+        #[cfg(not(unix))]
+        fs::create_dir_all(root.as_ref())?;
         Ok(Self {
             root: Arc::new(root.as_ref().to_path_buf()),
         })
@@ -185,8 +193,6 @@ impl Filesystem for OsFilesystem {
         let target = self.root.join(name);
         temp.persist(&target)
             .map_err(|err| StorageError::Io(err.error))?;
-        #[cfg(unix)]
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o600))?;
 
         // Sync the directory entry so the rename survives power loss.
         File::open(self.root.as_ref())?.sync_all()?;

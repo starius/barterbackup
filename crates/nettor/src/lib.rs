@@ -14,7 +14,7 @@ use hyper_util::rt::TokioIo;
 use std::fs;
 use std::io;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -125,11 +125,23 @@ impl TorTransport {
 
 /// Create the Tor state root and prune stale per-service hidden-service state.
 fn prepare_tor_state_dir(state_dir: &Path) -> Result<()> {
-    fs::create_dir_all(state_dir)
-        .with_context(|| format!("create tor state dir {}", state_dir.display()))?;
     #[cfg(unix)]
-    fs::set_permissions(state_dir, fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("chmod 700 {}", state_dir.display()))?;
+    {
+        // Create the Tor state directory as private immediately, then repair
+        // an older existing directory if it was left too wide.
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder
+            .create(state_dir)
+            .with_context(|| format!("create tor state dir {}", state_dir.display()))?;
+        fs::set_permissions(state_dir, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("chmod 700 {}", state_dir.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(state_dir)
+            .with_context(|| format!("create tor state dir {}", state_dir.display()))?;
+    }
 
     // Arti stores public directory caches and hidden-service replay state under
     // the same root. BarterBackup wants to keep the public cache material but
@@ -319,6 +331,8 @@ pub fn build_ephemeral_state_dir() -> PathBuf {
 mod tests {
     use super::*;
     use safelog::DisplayRedacted;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tor_hscrypto::pk::HsIdKey;
 
     /// The Arti hidden-service identity must match the Tor v3 onion hostname
@@ -386,6 +400,11 @@ mod tests {
         assert!(!hidden_service_publication.exists());
         assert!(!hidden_service_intro_points.exists());
         assert!(!replay_dir.exists());
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&state_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
 
         fs::remove_dir_all(&state_dir).unwrap();
     }

@@ -9,8 +9,9 @@ use protos::bbrpc::barter_backup_server_server::BarterBackupServerServer;
 use protos::clirpc;
 use protos::clirpc::barter_backup_client_server::{BarterBackupClient, BarterBackupClientServer};
 use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -1066,13 +1067,17 @@ struct DirLock {
 impl DirLock {
     /// Acquire an exclusive lock for `lock_path`.
     fn acquire(lock_path: &Path) -> Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(lock_path)
-            .with_context(|| format!("open {}", lock_path.display()))?;
+        // Create a new lock file as private from the beginning, then repair an
+        // older existing file if it was left behind with weaker permissions.
+        let file = {
+            let mut options = OpenOptions::new();
+            options.create(true).read(true).write(true).truncate(false);
+            #[cfg(unix)]
+            options.mode(0o600);
+            options
+                .open(lock_path)
+                .with_context(|| format!("open {}", lock_path.display()))?
+        };
         restrict_owner_only_file(lock_path)?;
         file.try_lock_exclusive()
             .with_context(|| format!("lock {}", lock_path.display()))?;
@@ -1117,12 +1122,21 @@ fn prepare_local_cli_tls(data_dir: &Path) -> Result<LocalCliTls> {
 
 /// Create `path` if needed and tighten its directory permissions.
 fn ensure_owner_only_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
-
     #[cfg(unix)]
     {
+        // Create new directories as private immediately, then repair older
+        // existing directories if they were left too wide.
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder
+            .create(path)
+            .with_context(|| format!("create {}", path.display()))?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
             .with_context(|| format!("chmod 700 {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
     }
 
     Ok(())
@@ -1145,7 +1159,22 @@ fn restrict_owner_only_file(path: &Path) -> Result<()> {
 
 /// Write one daemon-private file with owner-only permissions.
 fn write_owner_only_file(path: &Path, data: &[u8]) -> Result<()> {
-    fs::write(path, data).with_context(|| format!("write {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        // Create new private files as 0600 immediately so there is no window
+        // where another local user can open the path before chmod lands.
+        let mut file = OpenOptions::new();
+        file.create(true).truncate(true).write(true).mode(0o600);
+        let mut file = file
+            .open(path)
+            .with_context(|| format!("write {}", path.display()))?;
+        file.write_all(data)
+            .with_context(|| format!("write {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, data).with_context(|| format!("write {}", path.display()))?;
+    }
     restrict_owner_only_file(path)
 }
 
@@ -1748,6 +1777,36 @@ mod tests {
         }
     }
 
+    /// Drive one manual maintenance loop until the expected mirrored content appears.
+    async fn wait_for_mirrored_content_after_manual_tick(
+        service: &DaemonService,
+        tick: &Notify,
+        peer_onion: &str,
+        expected_content_id: &[u8],
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        let start = Instant::now();
+
+        loop {
+            // Manual maintenance uses a one-shot notify. On a loaded builder
+            // the loop may still be between waits when a single tick is sent,
+            // so keep nudging it until the expected mirrored state appears.
+            tick.notify_one();
+
+            let mirrored =
+                mirrored_peer_content_id(unlocked_node(service).await.as_ref(), peer_onion)?;
+            if mirrored == Some(expected_content_id.to_vec()) {
+                return Ok(());
+            }
+
+            if start.elapsed() >= timeout {
+                anyhow::bail!("timed out waiting for mirrored peer content after manual tick");
+            }
+
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     /// Return whether a live peer RPC status is worth retrying while Arti is
     /// still bootstrapping circuits or publishing the onion service.
     fn is_retryable_peer_status(status: &Status) -> bool {
@@ -1792,12 +1851,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn dir_lock_blocks_second_owner() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        let first = DirLock::acquire(&temp_dir.path().join(".lock"))?;
+        let lock_path = temp_dir.path().join(".lock");
+        let first = DirLock::acquire(&lock_path)?;
 
-        assert!(DirLock::acquire(&temp_dir.path().join(".lock")).is_err());
+        assert!(DirLock::acquire(&lock_path).is_err());
 
         drop(first);
-        assert!(DirLock::acquire(&temp_dir.path().join(".lock")).is_ok());
+        assert!(DirLock::acquire(&lock_path).is_ok());
+
+        #[cfg(unix)]
+        assert_eq!(mode(&lock_path), 0o600);
         Ok(())
     }
 
@@ -2561,19 +2624,13 @@ mod tests {
             .await?;
 
         // One explicit tick mirrors the remote revision into the local store.
-        local_tick.notify_one();
-        wait_for_async(Duration::from_secs(30), || {
-            let local_service = &local_service;
-            let remote_onion = remote_onion.clone();
-            let remote_v1 = remote_v1.clone();
-            async move {
-                let mirrored = mirrored_peer_content_id(
-                    unlocked_node(local_service).await.as_ref(),
-                    &remote_onion,
-                )?;
-                Ok(mirrored == Some(remote_v1.clone()))
-            }
-        })
+        wait_for_mirrored_content_after_manual_tick(
+            &local_service,
+            local_tick.as_ref(),
+            &remote_onion,
+            &remote_v1,
+            Duration::from_secs(30),
+        )
         .await?;
 
         remote_service.shutdown().await?;
@@ -2608,19 +2665,13 @@ mod tests {
             Some(remote_v1.clone())
         );
 
-        local_tick.notify_one();
-        wait_for_async(Duration::from_secs(30), || {
-            let local_service = &local_service;
-            let remote_onion = remote_onion.clone();
-            let remote_v2 = remote_v2.clone();
-            async move {
-                let mirrored = mirrored_peer_content_id(
-                    unlocked_node(local_service).await.as_ref(),
-                    &remote_onion,
-                )?;
-                Ok(mirrored == Some(remote_v2.clone()))
-            }
-        })
+        wait_for_mirrored_content_after_manual_tick(
+            &local_service,
+            local_tick.as_ref(),
+            &remote_onion,
+            &remote_v2,
+            Duration::from_secs(30),
+        )
         .await?;
 
         restarted_remote.shutdown().await?;

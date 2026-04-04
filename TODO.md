@@ -29,8 +29,3 @@ These are the product and hardening items that are still unresolved.
 - Extend storage accounting beyond the fixed 1 GiB peer budget and current
   score-tier policy. Expiration policy, historical visibility, and richer
   operator reporting for mirrored peer storage are still basic.
-- Eliminate create-then-chmod races in private path handling. Several private
-  files and directories are still created first and restricted afterward. That
-  leaves a short window where another user can open them before the owner-only
-  permissions are applied. Replace those flows with atomic owner-only creation
-  on platforms that support it.
