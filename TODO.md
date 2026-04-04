@@ -2,6 +2,16 @@ BarterBackup (Rust) - Open work
 
 These are the product and hardening items that are still unresolved.
 
+- Decide the final grouped CLI command layout before renaming the surface.
+  Proposed grouping for review:
+  - `bbcli node healthcheck|init|unlock|stop|connect-peer|connected-peers`
+  - `bbcli file list|get|set|delete`
+  - `bbcli contract list|propose|check`
+  - `bbcli recovery run|list-conflicts|checkout|resolve`
+  - `bbcli storage get-config|set-config`
+- Decide where the configurable local-content size limit belongs and what the
+  default policy should be. `bbcli set-file` should reject changes that exceed
+  that limit once the config surface is fixed.
 - Decide how external Tor and pluggable transports fit into the final product.
   The current implementation uses in-process Arti. Supporting users whose ISPs
   block Tor still needs a product decision and implementation path, including
