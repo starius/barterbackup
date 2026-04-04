@@ -4078,6 +4078,65 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn get_content_revision_hides_other_peers_metadata() -> anyhow::Result<()> {
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage("requester", requester_filesystem)?);
+        let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let responder_node = Arc::new(Node::with_local_storage("responder", responder_filesystem)?);
+        let other_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let other_node = Arc::new(Node::with_local_storage("other", other_filesystem)?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        responder_node.set_peer_connector(connector.clone());
+        other_node.set_peer_connector(connector.clone());
+
+        let requester_cli = CliService::new(requester_node.clone());
+        requester_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let requester_server =
+            spawn_registered_p2p_server(requester_node.clone(), connector.as_ref()).await?;
+        let responder_server =
+            spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
+        let mut requester_to_responder = connect_p2p_client(
+            requester_node.clone(),
+            responder_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
+        let mut other_to_responder = connect_p2p_client(
+            other_node.clone(),
+            responder_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
+
+        let requester_content = requester_node.responder_content()?.unwrap();
+        requester_to_responder
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                requester_content: Some(requester_content.clone()),
+            })
+            .await?;
+
+        let revision = other_to_responder
+            .get_content_revision(bbrpc::GetContentRevisionRequest {})
+            .await?
+            .into_inner();
+        assert_eq!(revision.requester_content, None);
+        assert_eq!(revision.requester_latest_known_content, None);
+
+        requester_server.abort();
+        responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn get_contracts_reports_live_sync_state() -> anyhow::Result<()> {
         let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let requester_node = Arc::new(Node::with_local_storage("requester", requester_filesystem)?);
