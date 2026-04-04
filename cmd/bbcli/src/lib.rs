@@ -368,6 +368,9 @@ async fn healthcheck(addr: &str) -> Result<()> {
     let peer_runtime_state =
         protos::clirpc::PeerRuntimeState::try_from(response.peer_runtime_state)
             .unwrap_or(protos::clirpc::PeerRuntimeState::Unknown);
+    let self_peer_check_state =
+        protos::clirpc::SelfPeerCheckState::try_from(response.self_peer_check_state)
+            .unwrap_or(protos::clirpc::SelfPeerCheckState::Unknown);
     println!("server_onion: {}", response.server_onion);
     println!("uptime_seconds: {}", response.uptime_seconds);
     println!(
@@ -381,6 +384,17 @@ async fn healthcheck(addr: &str) -> Result<()> {
     );
     if !response.peer_runtime_error.is_empty() {
         println!("peer_runtime_error: {}", response.peer_runtime_error);
+    }
+    println!(
+        "self_peer_check_state: {}",
+        match self_peer_check_state {
+            protos::clirpc::SelfPeerCheckState::Unknown => "unknown",
+            protos::clirpc::SelfPeerCheckState::Healthy => "healthy",
+            protos::clirpc::SelfPeerCheckState::Unhealthy => "unhealthy",
+        }
+    );
+    if !response.self_peer_check_error.is_empty() {
+        println!("self_peer_check_error: {}", response.self_peer_check_error);
     }
     Ok(())
 }

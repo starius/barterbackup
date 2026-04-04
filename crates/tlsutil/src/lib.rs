@@ -634,6 +634,8 @@ mod tests {
                 uptime_seconds: 1,
                 peer_runtime_state: protos::clirpc::PeerRuntimeState::Unknown as i32,
                 peer_runtime_error: String::new(),
+                self_peer_check_state: protos::clirpc::SelfPeerCheckState::Unknown as i32,
+                self_peer_check_error: String::new(),
             }))
         }
         type ProposeContractStream = std::pin::Pin<

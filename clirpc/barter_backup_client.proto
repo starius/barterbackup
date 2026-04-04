@@ -111,6 +111,14 @@ enum PeerRuntimeState
     PEER_RUNTIME_STATE_FAILED = 3;
 }
 
+// SelfPeerCheckState reports whether the daemon can reach its own peer RPC.
+enum SelfPeerCheckState
+{
+    SELF_PEER_CHECK_STATE_UNKNOWN = 0;
+    SELF_PEER_CHECK_STATE_HEALTHY = 1;
+    SELF_PEER_CHECK_STATE_UNHEALTHY = 2;
+}
+
 // HealthCheckResponse returns local daemon status information.
 message HealthCheckResponse {
     // server_onion is the Tor onion hostname of the local daemon.
@@ -125,6 +133,13 @@ message HealthCheckResponse {
 
     // peer_runtime_error contains the latest peer runtime failure, if any.
     string peer_runtime_error = 4;
+
+    // self_peer_check_state reports whether the daemon can reach its own
+    // public peer RPC path through the configured transport.
+    SelfPeerCheckState self_peer_check_state = 5;
+
+    // self_peer_check_error contains the latest self-check failure, if any.
+    string self_peer_check_error = 6;
 }
 
 message InitRequest {

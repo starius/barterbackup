@@ -831,6 +831,17 @@ impl Node {
         }
     }
 
+    /// Run a peer health check against the node's own public onion address.
+    pub async fn self_peer_health_check(&self) -> Result<bbrpc::HealthCheckResponse, Status> {
+        let mut client = self.connect_peer_client(self.address()).await?;
+        self.peer_rpc(
+            self.address(),
+            "self peer health check",
+            client.health_check(bbrpc::HealthCheckRequest {}),
+        )
+        .await
+    }
+
     /// Download an encrypted blob from a peer and verify the advertised hash.
     async fn download_peer_blob(
         &self,
@@ -2348,6 +2359,8 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
             uptime_seconds: self.node.uptime_seconds(),
             peer_runtime_state: clirpc::PeerRuntimeState::Unknown as i32,
             peer_runtime_error: String::new(),
+            self_peer_check_state: clirpc::SelfPeerCheckState::Unknown as i32,
+            self_peer_check_error: String::new(),
         }))
     }
 

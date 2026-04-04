@@ -263,10 +263,34 @@ impl PeerRuntimeHealth {
     }
 }
 
+/// SelfCheckHealth reports whether the daemon can reach its own peer RPC path.
+#[derive(Clone)]
+enum SelfCheckHealth {
+    /// Unknown means no self-check has completed yet.
+    Unknown,
+    /// Healthy means the daemon reached its own peer RPC successfully.
+    Healthy,
+    /// Unhealthy means the self-check failed.
+    Unhealthy(String),
+}
+
+impl SelfCheckHealth {
+    /// Convert one self-check status into the protobuf healthcheck fields.
+    fn to_proto_fields(&self) -> (i32, String) {
+        match self {
+            Self::Unknown => (clirpc::SelfPeerCheckState::Unknown as i32, String::new()),
+            Self::Healthy => (clirpc::SelfPeerCheckState::Healthy as i32, String::new()),
+            Self::Unhealthy(error) => (clirpc::SelfPeerCheckState::Unhealthy as i32, error.clone()),
+        }
+    }
+}
+
 /// BackgroundPeerRuntime bootstraps and owns the peer-facing runtime lifecycle.
 struct BackgroundPeerRuntime {
     /// status reports peer runtime readiness or failure to healthcheck.
     status: Arc<StdMutex<PeerRuntimeHealth>>,
+    /// self_check reports whether the daemon can reach its own peer RPC path.
+    self_check: Arc<StdMutex<SelfCheckHealth>>,
     /// shutdown asks the background supervisor to stop.
     shutdown: CancellationToken,
     /// task supervises peer runtime bootstrap and shutdown.
@@ -283,6 +307,8 @@ impl BackgroundPeerRuntime {
     ) -> Self {
         let status = Arc::new(StdMutex::new(PeerRuntimeHealth::Starting));
         let status_for_task = status.clone();
+        let self_check = Arc::new(StdMutex::new(SelfCheckHealth::Unknown));
+        let self_check_for_task = self_check.clone();
         let shutdown = CancellationToken::new();
         let shutdown_signal = shutdown.clone();
         let task = tokio::spawn(async move {
@@ -303,11 +329,19 @@ impl BackgroundPeerRuntime {
             info!(onion = %node.address(), "peer runtime became ready");
 
             // Start maintenance only after outbound peer connectivity is available.
-            let maintenance_runtime =
-                spawn_maintenance_runtime(node.clone(), maintenance_wakeup, maintenance_config);
+            let maintenance_runtime = spawn_maintenance_runtime(
+                node.clone(),
+                maintenance_wakeup,
+                maintenance_config.clone(),
+            );
+            let self_check_runtime =
+                spawn_self_check_runtime(node.clone(), self_check_for_task, maintenance_config);
 
             tokio::select! {
                 _ = shutdown_signal.cancelled() => {
+                    if let Err(error) = self_check_runtime.shutdown().await {
+                        warn!(onion = %node.address(), %error, "self-check shutdown failed");
+                    }
                     if let Err(error) = maintenance_runtime.shutdown().await {
                         warn!(onion = %node.address(), %error, "maintenance shutdown failed");
                     }
@@ -316,6 +350,9 @@ impl BackgroundPeerRuntime {
                     }
                 }
                 result = &mut peer_runtime.task => {
+                    if let Err(error) = self_check_runtime.shutdown().await {
+                        warn!(onion = %node.address(), %error, "self-check shutdown failed after peer runtime exit");
+                    }
                     if let Err(error) = maintenance_runtime.shutdown().await {
                         warn!(onion = %node.address(), %error, "maintenance shutdown failed after peer runtime exit");
                     }
@@ -343,14 +380,18 @@ impl BackgroundPeerRuntime {
 
         Self {
             status,
+            self_check,
             shutdown,
             task,
         }
     }
 
-    /// Return the current peer runtime health snapshot.
-    fn snapshot(&self) -> PeerRuntimeHealth {
-        self.status.lock().unwrap().clone()
+    /// Return the current peer runtime and self-check health snapshots.
+    fn snapshot(&self) -> (PeerRuntimeHealth, SelfCheckHealth) {
+        (
+            self.status.lock().unwrap().clone(),
+            self.self_check.lock().unwrap().clone(),
+        )
     }
 
     /// Stop the background supervisor and wait for it to finish.
@@ -547,21 +588,33 @@ impl BarterBackupClient for DaemonService {
         &self,
         _request: tonic::Request<clirpc::HealthCheckRequest>,
     ) -> Result<Response<clirpc::HealthCheckResponse>, Status> {
-        let (server_onion, peer_runtime_state, peer_runtime_error) = {
+        let (
+            server_onion,
+            peer_runtime_state,
+            peer_runtime_error,
+            self_peer_check_state,
+            self_peer_check_error,
+        ) = {
             let node_state = self.node_state.lock().await;
             match &*node_state {
                 DaemonNodeState::Locked | DaemonNodeState::Unlocking => (
                     String::new(),
                     clirpc::PeerRuntimeState::Unknown as i32,
                     String::new(),
+                    clirpc::SelfPeerCheckState::Unknown as i32,
+                    String::new(),
                 ),
                 DaemonNodeState::Unlocked(unlocked) => {
-                    let (peer_runtime_state, peer_runtime_error) =
-                        unlocked.peer_runtime.snapshot().to_proto_fields();
+                    let (peer_runtime, self_check) = unlocked.peer_runtime.snapshot();
+                    let (peer_runtime_state, peer_runtime_error) = peer_runtime.to_proto_fields();
+                    let (self_peer_check_state, self_peer_check_error) =
+                        self_check.to_proto_fields();
                     (
                         unlocked.node.address().to_string(),
                         peer_runtime_state,
                         peer_runtime_error,
+                        self_peer_check_state,
+                        self_peer_check_error,
                     )
                 }
             }
@@ -572,6 +625,8 @@ impl BarterBackupClient for DaemonService {
             uptime_seconds: i64::try_from(self.started_at.elapsed().as_secs()).unwrap_or(i64::MAX),
             peer_runtime_state,
             peer_runtime_error,
+            self_peer_check_state,
+            self_peer_check_error,
         }))
     }
 
@@ -1207,6 +1262,73 @@ fn spawn_maintenance_runtime(
     StartedTask::new(shutdown, task)
 }
 
+/// Run one self-check through the configured peer transport and record the result.
+async fn run_self_check_pass(
+    node: &Node,
+    self_check: &StdMutex<SelfCheckHealth>,
+    shutdown: &CancellationToken,
+) -> bool {
+    let outcome = match tokio::select! {
+        _ = shutdown.cancelled() => return false,
+        result = node.self_peer_health_check() => result,
+    } {
+        Ok(response)
+            if response.server_onion == node.address()
+                && response.client_onion == node.address() =>
+        {
+            SelfCheckHealth::Healthy
+        }
+        Ok(response) => SelfCheckHealth::Unhealthy(format!(
+            "unexpected self-check onions: client={} server={}",
+            response.client_onion, response.server_onion
+        )),
+        Err(error) => SelfCheckHealth::Unhealthy(error.to_string()),
+    };
+    *self_check.lock().unwrap() = outcome;
+    true
+}
+
+/// Start periodic self-checks for the daemon's own public peer RPC path.
+fn spawn_self_check_runtime(
+    node: Arc<Node>,
+    self_check: Arc<StdMutex<SelfCheckHealth>>,
+    maintenance_config: MaintenanceConfig,
+) -> StartedTask {
+    let shutdown = CancellationToken::new();
+    let shutdown_signal = shutdown.clone();
+    let task = tokio::spawn(async move {
+        if !run_self_check_pass(node.as_ref(), self_check.as_ref(), &shutdown_signal).await {
+            return Ok(());
+        }
+
+        match maintenance_config.mode {
+            MaintenanceMode::Interval => {
+                let mut interval = tokio::time::interval(maintenance_config.interval);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                interval.tick().await;
+                loop {
+                    tokio::select! {
+                        _ = shutdown_signal.cancelled() => break,
+                        _ = interval.tick() => {
+                            if !run_self_check_pass(node.as_ref(), self_check.as_ref(), &shutdown_signal).await {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            #[cfg(test)]
+            MaintenanceMode::Manual(_) => {
+                shutdown_signal.cancelled().await;
+            }
+        }
+
+        Ok(())
+    });
+
+    StartedTask::new(shutdown, task)
+}
+
 /// Wait for the first local shutdown signal.
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
@@ -1784,6 +1906,10 @@ mod tests {
             locked.peer_runtime_state,
             clirpc::PeerRuntimeState::Unknown as i32
         );
+        assert_eq!(
+            locked.self_peer_check_state,
+            clirpc::SelfPeerCheckState::Unknown as i32
+        );
 
         init_and_unlock_service(&service, "password").await?;
         let unlocked = service
@@ -1807,6 +1933,65 @@ mod tests {
             }
         })
         .await?;
+
+        service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mock_runtime_self_check_becomes_healthy() -> Result<()> {
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        let temp_dir = TempDir::new()?;
+        let service = DaemonService::with_maintenance_config(
+            temp_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            MaintenanceConfig::with_interval(Duration::from_millis(50)),
+        );
+        init_and_unlock_service(&service, "self-check-healthy").await?;
+
+        wait_for_async(Duration::from_secs(2), || {
+            let service = &service;
+            async move {
+                let health = service
+                    .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+                    .await?
+                    .into_inner();
+                Ok(health.self_peer_check_state == clirpc::SelfPeerCheckState::Healthy as i32)
+            }
+        })
+        .await?;
+
+        service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn noop_runtime_self_check_becomes_unhealthy() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let service = test_service(&temp_dir);
+        init_and_unlock_service(&service, "self-check-unhealthy").await?;
+
+        wait_for_async(Duration::from_secs(2), || {
+            let service = &service;
+            async move {
+                let health = service
+                    .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+                    .await?
+                    .into_inner();
+                Ok(health.self_peer_check_state == clirpc::SelfPeerCheckState::Unhealthy as i32)
+            }
+        })
+        .await?;
+
+        let health = service
+            .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+            .await?
+            .into_inner();
+        assert!(health
+            .self_peer_check_error
+            .contains("peer connector is not configured"));
 
         service.shutdown().await?;
         Ok(())
