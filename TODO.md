@@ -29,14 +29,6 @@ These are the product and hardening items that are still unresolved.
 - Extend storage accounting beyond the fixed 1 GiB peer budget and current
   score-tier policy. Expiration policy, historical visibility, and richer
   operator reporting for mirrored peer storage are still basic.
-- Add explicit cross-host static Linux build targets:
-  `make build-static-linux-amd64` and `make build-static-linux-arm64`. Both
-  targets should produce release musl-linked Linux binaries and work inside
-  `nix develop` on any supported host, using cross-compilation when needed.
-- Add all generated build-artifact directories created by `make` workflows to
-  `.gitignore`, including existing paths such as `target-static/` and any
-  other target or output directories used by static, Windows, sanitizer, fuzz,
-  or cross-build targets.
 - Eliminate create-then-chmod races in private path handling. Several private
   files and directories are still created first and restricted afterward. That
   leaves a short window where another user can open them before the owner-only
