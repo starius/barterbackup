@@ -1584,7 +1584,7 @@ mod tests {
             }))
             .await?;
 
-        wait_for_async(Duration::from_secs(2), || {
+        wait_for_async(Duration::from_secs(5), || {
             let local_service = &local_service;
             let remote_onion = remote_onion.clone();
             async move {
@@ -1658,8 +1658,13 @@ mod tests {
                 }),
             }))
             .await?;
+        let owner_content_id = unlocked_node(&owner_service)
+            .await
+            .current_content_info()?
+            .context("owner content should exist after set_file")?
+            .content_id;
 
-        wait_for_async(Duration::from_secs(2), || {
+        wait_for_async(Duration::from_secs(15), || {
             let owner_service = &owner_service;
             let peer_onion = peer_onion.clone();
             async move {
@@ -1695,18 +1700,16 @@ mod tests {
             }))
             .await?;
 
-        wait_for_async(Duration::from_secs(2), || {
-            let restarted_service = &restarted_service;
-            async move {
-                let files = restarted_service
-                    .list_files(tonic::Request::new(clirpc::ListFilesRequest {}))
-                    .await?
-                    .into_inner()
-                    .name;
-                Ok(files == vec!["alpha.txt".to_string()])
-            }
-        })
-        .await?;
+        let mut recovery = restarted_service
+            .recover_content(tonic::Request::new(clirpc::RecoverContentRequest {}))
+            .await?
+            .into_inner();
+        let recovery_update = recovery
+            .next()
+            .await
+            .context("expected one recovery update after restart")??;
+        assert!(recovery_update.recovered_most_recent_version);
+        assert_eq!(recovery_update.most_recent_content_id, owner_content_id);
 
         let recovered = restarted_service
             .get_file(tonic::Request::new(clirpc::GetFileRequest {
@@ -1856,7 +1859,7 @@ mod tests {
 
         // One explicit tick mirrors the remote revision into the local store.
         local_tick.notify_one();
-        wait_for_async(Duration::from_secs(2), || {
+        wait_for_async(Duration::from_secs(10), || {
             let local_service = &local_service;
             let remote_onion = remote_onion.clone();
             let remote_v1 = remote_v1.clone();

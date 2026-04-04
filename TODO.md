@@ -2,22 +2,6 @@ BarterBackup (Rust) - Open work
 
 These are the product and hardening items that are still unresolved.
 
-- Bootstrap a fresh node from only the seed plus minimal operator input.
-  Today a restarted node can recover from persisted peer metadata, but a
-  completely fresh machine still needs at least one reachable peer address to
-  begin recovery. We still need a product decision on whether bootstrap should
-  come from manually supplied peer onion IDs, a separately persisted contact
-  list, or a dedicated discovery mechanism.
-- Decide the local `clirpc` mTLS key lifecycle. The daemon currently generates
-  fresh local admin TLS keys on every start. We still need a product decision
-  on whether to keep that behavior or persist and reuse the local admin keys,
-  and if we persist them, whether the client key lives on the host or stays on
-  the operator machine.
-- Surface divergent sibling timelines during recovery. Recovery currently picks
-  the newest revision by decrypted timestamp, but the daemon and CLI still need
-  RPCs and UX to show conflicting branches, warn about later-discovered
-  revisions from sibling timelines, and let the operator inspect or switch
-  them.
 - Decide how external Tor and pluggable transports fit into the final product.
   The current implementation uses in-process Arti. Supporting users whose ISPs
   block Tor still needs a product decision and implementation path, including
@@ -30,18 +14,11 @@ These are the product and hardening items that are still unresolved.
 - Finish the remaining operator-facing hardening around observability and
   resource controls. Structured peer logs, peer I/O bounds, timeout handling,
   and dedicated fuzz targets are now in place, but the daemon still needs
-  clearer per-peer summaries and a product decision on the remaining resource
-  ceilings such as connection-count policy and any future chunking limits.
-- Flesh out storage accounting and contract policy beyond the current scoring
-  and sync model. Storage quotas, expiration policy, and operator-facing
-  visibility are still basic.
-- Split peer revision tracking into latest-known and latest-cached states. When
-  storage pressure prevents caching the newest advertised peer blob locally, the
-  node should still report both the newest known peer revision and the newest
-  locally cached revision that can actually be served or recovered.
-- Raise the default peer-storage budget from 64 MiB to 1 GiB so the default
-  node can retain roughly 256 full 4 MiB peer blobs before best-effort
-  eviction pressure begins.
+  clearer per-peer summaries and a final decision on any future chunking or
+  other operator-facing resource ceilings beyond the current peer cap.
+- Extend storage accounting beyond the fixed 1 GiB peer budget and current
+  score-tier policy. Expiration policy, historical visibility, and richer
+  operator reporting for mirrored peer storage are still basic.
 - Add explicit cross-host static Linux build targets:
   `make build-static-linux-amd64` and `make build-static-linux-arm64`. Both
   targets should produce release musl-linked Linux binaries and work inside
@@ -55,7 +32,3 @@ These are the product and hardening items that are still unresolved.
   leaves a short window where another user can open them before the owner-only
   permissions are applied. Replace those flows with atomic owner-only creation
   on platforms that support it.
-- Bring the `clitls` crate name, module comments, and README wording into sync
-  with reality. The crate currently contains both local CLI↔daemon TLS helpers
-  and peer-to-peer TLS helpers, so either the package should be renamed to
-  reflect both roles or the peer/local TLS pieces should be split cleanly.

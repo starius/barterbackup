@@ -672,6 +672,10 @@ mod tests {
             score_seconds: 9,
             score_measured_at: 77,
             content_id: b"cid".to_vec(),
+            latest_known_content: None,
+            latest_cached_content: None,
+            origin: storedpb::PeerOrigin::Discovered as i32,
+            first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
         }];
         let encoded = codec
             .encode(sample_seed(7), &sample_files(), &peers)

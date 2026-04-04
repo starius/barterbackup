@@ -191,6 +191,47 @@ bbcli recover-content
 bbcli stop
 ```
 
+Bootstrap peers:
+
+- the binary carries a compiled built-in peer list from
+  [`crates/node/src/builtin_peers.rs`](crates/node/src/builtin_peers.rs)
+- that list is intentionally empty in the repository by default
+- operators can regenerate a new source file from a live node with the hidden
+  `bbcli export-built-in-peers` command
+- the export merges the already built-in peers with currently connected live
+  peers, deduplicates them, and prints the full Rust source file so it can be
+  dropped back into the tree directly
+
+For example:
+
+```bash
+bbcli export-built-in-peers > crates/node/src/builtin_peers.rs
+```
+
+Recovery and conflicts:
+
+- `bbcli get-contracts` reports both the newest revision the daemon knows a
+  peer has and the newest revision it has cached locally for that peer
+- recovery chooses the freshest revision that is actually recoverable across
+  all peers
+- if the freshest known revision is unavailable everywhere, recovery falls back
+  to the freshest available cached revision and reports both states
+- if recovery discovers divergent revisions, `bbd` stores every recoverable
+  branch locally, logs the conflict, and blocks normal file commands until the
+  operator resolves it
+
+Conflict workflow:
+
+```bash
+bbcli list-conflicts
+bbcli checkout-revision <content-id> ./inspect-one
+bbcli checkout-revision <content-id> ./inspect-two
+bbcli resolve-conflict <content-id>
+```
+
+After resolution the selected revision becomes active again, while the
+non-selected revisions stay archived and can still be checked out later.
+
 ## Security model
 
 - the main seed/password is stretched with Argon2id
@@ -199,7 +240,8 @@ bbcli stop
 - peer transport uses Arti onion services plus mutual TLS
 - TLS is restricted to TLS 1.3 with `X25519MLKEM768`
 - user data is stored only in encrypted content blobs
-- peer metadata is stored only in encrypted peer sidecars
+- peer metadata and mirrored-peer revision state are stored only in encrypted
+  peer sidecars
 - daemon-private paths are tightened to owner-only permissions when the host
   OS provides that notion
 

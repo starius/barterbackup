@@ -614,7 +614,7 @@ impl Store {
 
     /// Decode one revision blob into plaintext files without reading from disk.
     pub fn decode_revision_files(&self, blob: &[u8]) -> Result<Vec<PlainFile>, StorageError> {
-        let decoded = self.codec.decode(&blob)?;
+        let decoded = self.codec.decode(blob)?;
         Ok(decoded
             .files
             .into_iter()
