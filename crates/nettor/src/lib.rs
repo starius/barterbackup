@@ -239,8 +239,22 @@ impl TorPeerListener {
     }
 
     /// Consume the listener into a tonic-compatible incoming stream.
-    pub fn into_incoming(self) -> PeerIncoming {
-        self.incoming
+    pub fn into_incoming(self) -> Self {
+        self
+    }
+}
+
+impl Stream for TorPeerListener {
+    type Item = Result<PeerTlsStream, io::Error>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        // Keep the running onion service and accept task alive for as long as
+        // tonic holds the incoming stream. Dropping them would tear down the
+        // service immediately after startup.
+        self.as_mut().get_mut().incoming.as_mut().poll_next(cx)
     }
 }
 

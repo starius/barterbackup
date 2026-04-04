@@ -25,6 +25,8 @@ use tokio_util::sync::CancellationToken;
 use tonic::{Response, Status};
 use tracing::{error, info, warn};
 
+const SELF_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Config configures the BarterBackup daemon process.
 #[derive(Clone, Debug, Parser)]
 #[command(name = "bbd", about = "BarterBackup daemon")]
@@ -1332,7 +1334,11 @@ fn spawn_self_check_runtime(
 
         match maintenance_config.mode {
             MaintenanceMode::Interval => {
-                let mut interval = tokio::time::interval(maintenance_config.interval);
+                // Health monitoring needs its own retry cadence. Tying it to
+                // the maintenance interval would leave the public runtime
+                // marked unhealthy for hours on deployments that run
+                // maintenance rarely.
+                let mut interval = tokio::time::interval(SELF_CHECK_INTERVAL);
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 interval.tick().await;
                 loop {
@@ -1668,6 +1674,47 @@ mod tests {
         }
     }
 
+    /// DelayedSelfCheckRuntimeFactory starts a mock peer server but registers
+    /// the self-dial endpoint only after a short delay.
+    struct DelayedSelfCheckRuntimeFactory {
+        connector: Arc<netmock::MockPeerConnector>,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl PeerRuntimeFactory for DelayedSelfCheckRuntimeFactory {
+        async fn start(&self, node: Arc<Node>) -> Result<StartedTask> {
+            node.set_peer_connector(self.connector.clone());
+            let listener = netmock::bind_peer_listener(&node.ed25519_keypair().secret).await?;
+            let endpoint = listener.endpoint().to_string();
+            let connector = self.connector.clone();
+            let peer_onion = node.address().to_string();
+            let register_delay = self.delay;
+            tokio::spawn(async move {
+                tokio::time::sleep(register_delay).await;
+                connector.register_peer(&peer_onion, &endpoint);
+            });
+
+            let shutdown = CancellationToken::new();
+            let shutdown_signal = shutdown.clone();
+            let task = tokio::spawn(async move {
+                tonic::transport::Server::builder()
+                    .add_service(
+                        BarterBackupServerServer::new(P2pService::new(node))
+                            .max_decoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES)
+                            .max_encoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES),
+                    )
+                    .serve_with_incoming_shutdown(listener.into_incoming(), async move {
+                        shutdown_signal.cancelled().await;
+                    })
+                    .await
+                    .map_err(anyhow::Error::from)
+            });
+
+            Ok(StartedTask::new(shutdown, task))
+        }
+    }
+
     /// Spawn a direct mock p2p server and register its endpoint in the connector.
     async fn spawn_registered_mock_peer_server(
         node: Arc<Node>,
@@ -1740,22 +1787,55 @@ mod tests {
         service: &DaemonService,
         timeout: Duration,
     ) -> Result<()> {
-        wait_for_async(timeout, || {
-            let service = service;
-            async move {
-                let health = service
-                    .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
-                    .await?
-                    .into_inner();
-                Ok(
-                    health.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32
-                        && health.self_peer_check_state
-                            == clirpc::SelfPeerCheckState::Healthy as i32,
-                )
+        let start = Instant::now();
+        let mut last_snapshot = None;
+
+        loop {
+            let health = service
+                .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+                .await?
+                .into_inner();
+            let peer_state = clirpc::PeerRuntimeState::try_from(health.peer_runtime_state)
+                .map(|state| state.as_str_name())
+                .unwrap_or("PEER_RUNTIME_STATE_INVALID")
+                .to_string();
+            let self_check_state =
+                clirpc::SelfPeerCheckState::try_from(health.self_peer_check_state)
+                    .map(|state| state.as_str_name())
+                    .unwrap_or("SELF_PEER_CHECK_STATE_INVALID")
+                    .to_string();
+            let snapshot = (
+                health.server_onion.clone(),
+                peer_state,
+                health.peer_runtime_error.clone(),
+                self_check_state,
+                health.self_peer_check_error.clone(),
+            );
+
+            if last_snapshot.as_ref() != Some(&snapshot) {
+                eprintln!(
+                    "public runtime health: onion={} peer_state={} peer_error={:?} self_state={} self_error={:?}",
+                    snapshot.0,
+                    snapshot.1,
+                    snapshot.2,
+                    snapshot.3,
+                    snapshot.4,
+                );
+                last_snapshot = Some(snapshot.clone());
             }
-        })
-        .await?;
-        Ok(())
+
+            if health.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32
+                && health.self_peer_check_state == clirpc::SelfPeerCheckState::Healthy as i32
+            {
+                return Ok(());
+            }
+
+            if start.elapsed() >= timeout {
+                anyhow::bail!("timed out waiting for public peer runtime");
+            }
+
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
     }
 
     /// Poll an async condition until it becomes true or `timeout` elapses.
@@ -2045,6 +2125,40 @@ mod tests {
                     .await?
                     .into_inner();
                 Ok(health.self_peer_check_state == clirpc::SelfPeerCheckState::Healthy as i32)
+            }
+        })
+        .await?;
+
+        service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn self_check_retries_even_with_long_maintenance_interval() -> Result<()> {
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        let temp_dir = TempDir::new()?;
+        let service = DaemonService::with_maintenance_config(
+            temp_dir.path().to_path_buf(),
+            Arc::new(DelayedSelfCheckRuntimeFactory {
+                connector,
+                delay: Duration::from_secs(1),
+            }),
+            MaintenanceConfig::with_interval(Duration::from_secs(3600)),
+        );
+
+        init_and_unlock_service(&service, "retry-self-check").await?;
+        wait_for_async(Duration::from_secs(35), || {
+            let service = &service;
+            async move {
+                let health = service
+                    .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+                    .await?
+                    .into_inner();
+                Ok(
+                    health.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32
+                        && health.self_peer_check_state
+                            == clirpc::SelfPeerCheckState::Healthy as i32,
+                )
             }
         })
         .await?;
@@ -2713,179 +2827,196 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "requires live Tor bootstrap"]
     async fn live_tor_recovery_round_trip() -> Result<()> {
-        let owner_dir = TempDir::new()?;
-        let peer_dir = TempDir::new()?;
-        let recovered_dir = TempDir::new()?;
-        let owner_service = DaemonService::with_maintenance_config(
-            owner_dir.path().to_path_buf(),
-            Arc::new(TorPeerRuntimeFactory::new(owner_dir.path().join("tor"))),
-            MaintenanceConfig::with_interval(Duration::from_secs(3600)),
-        );
-        let peer_service = DaemonService::with_maintenance_config(
-            peer_dir.path().to_path_buf(),
-            Arc::new(TorPeerRuntimeFactory::new(peer_dir.path().join("tor"))),
-            MaintenanceConfig::with_interval(Duration::from_secs(3600)),
-        );
+        tokio::time::timeout(Duration::from_secs(1800), async move {
+            let owner_dir = TempDir::new()?;
+            let peer_dir = TempDir::new()?;
+            let recovered_dir = TempDir::new()?;
+            let owner_service = DaemonService::with_maintenance_config(
+                owner_dir.path().to_path_buf(),
+                Arc::new(TorPeerRuntimeFactory::new(owner_dir.path().join("tor"))),
+                MaintenanceConfig::with_interval(Duration::from_secs(3600)),
+            );
+            let peer_service = DaemonService::with_maintenance_config(
+                peer_dir.path().to_path_buf(),
+                Arc::new(TorPeerRuntimeFactory::new(peer_dir.path().join("tor"))),
+                MaintenanceConfig::with_interval(Duration::from_secs(3600)),
+            );
 
-        // Unlock two independent nodes over the real Arti transport.
-        unlock_for_test(&owner_service, "owner-live-tor").await?;
-        unlock_for_test(&peer_service, "peer-live-tor").await?;
-        wait_for_public_peer_runtime(&owner_service, Duration::from_secs(600)).await?;
-        wait_for_public_peer_runtime(&peer_service, Duration::from_secs(600)).await?;
+            // Unlock two independent nodes over the real Arti transport.
+            eprintln!("live Tor: unlocking owner and peer nodes");
+            unlock_for_test(&owner_service, "owner-live-tor").await?;
+            unlock_for_test(&peer_service, "peer-live-tor").await?;
+            eprintln!("live Tor: waiting for owner onion runtime");
+            wait_for_public_peer_runtime(&owner_service, Duration::from_secs(600)).await?;
+            eprintln!("live Tor: waiting for peer onion runtime");
+            wait_for_public_peer_runtime(&peer_service, Duration::from_secs(600)).await?;
 
-        // Write owner content and explicitly mirror it to the peer.
-        let owner_onion = unlocked_node(&owner_service).await.address().to_string();
-        let peer_onion = unlocked_node(&peer_service).await.address().to_string();
-        owner_service
-            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
-                peer: Some(clirpc::Peer {
-                    onion_service_id: peer_onion.clone(),
-                }),
-            }))
-            .await?;
-        owner_service
-            .set_file(tonic::Request::new(clirpc::SetFileRequest {
-                file: Some(clirpc::File {
-                    name: "alpha.txt".to_string(),
-                    data: b"alpha-live-body".to_vec(),
-                }),
-            }))
-            .await?;
-        let owner_content_id = unlocked_node(&owner_service)
-            .await
-            .current_content_info()?
-            .context("owner content info should exist after SetFile")?
-            .content_id;
-        wait_for_async(Duration::from_secs(600), || {
-            let owner_service = &owner_service;
-            let peer_onion = peer_onion.clone();
-            async move {
-                let response = match owner_service
-                    .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
-                        peer: Some(clirpc::Peer {
-                            onion_service_id: peer_onion.clone(),
-                        }),
-                    }))
-                    .await
-                {
-                    Ok(response) => response,
-                    Err(status) if is_retryable_peer_status(&status) => return Ok(false),
-                    Err(status) => return Err(anyhow!("propose contract failed: {status}")),
-                };
-                let mut updates = response.into_inner();
-                let mut last_update = None;
-                while let Some(update) = updates.next().await {
-                    last_update = Some(update?);
-                }
-                Ok(last_update.is_some_and(|update| update.success))
-            }
-        })
-        .await
-        .context("wait for live Tor contract proposal")?;
-
-        // Wait until the peer has persisted the mirrored owner blob.
-        wait_for_async(Duration::from_secs(300), || {
-            let peer_service = &peer_service;
-            let owner_onion = owner_onion.clone();
-            let owner_content_id = owner_content_id.clone();
-            async move {
-                let mirrored = mirrored_peer_content_id(
-                    unlocked_node(peer_service).await.as_ref(),
-                    &owner_onion,
-                )?;
-                Ok(mirrored == Some(owner_content_id.clone()))
-            }
-        })
-        .await
-        .context("wait for mirrored live Tor content")?;
-
-        // Recreate the owner in a fresh data directory and verify there is no
-        // local content or peer state to recover from yet.
-        owner_service.shutdown().await?;
-        let recovered_service = DaemonService::with_maintenance_config(
-            recovered_dir.path().to_path_buf(),
-            Arc::new(TorPeerRuntimeFactory::new(recovered_dir.path().join("tor"))),
-            MaintenanceConfig::with_interval(Duration::from_secs(3600)),
-        );
-        unlock_for_test(&recovered_service, "owner-live-tor").await?;
-        wait_for_public_peer_runtime(&recovered_service, Duration::from_secs(600)).await?;
-        assert!(recovered_service
-            .list_files(tonic::Request::new(clirpc::ListFilesRequest {}))
-            .await?
-            .into_inner()
-            .name
-            .is_empty());
-        let mut empty_recovery = recovered_service
-            .recover_content(tonic::Request::new(clirpc::RecoverContentRequest {}))
-            .await?
-            .into_inner();
-        let mut last_empty_recovery = None;
-        while let Some(update) = empty_recovery.next().await {
-            last_empty_recovery = Some(update?);
-        }
-        let last_empty_recovery =
-            last_empty_recovery.context("expected one recovery update without peers")?;
-        assert_eq!(last_empty_recovery.total_versions_found, 0);
-        assert!(!last_empty_recovery.recovered_most_recent_version);
-        assert!(recovered_service
-            .list_files(tonic::Request::new(clirpc::ListFilesRequest {}))
-            .await?
-            .into_inner()
-            .name
-            .is_empty());
-
-        // Reconnect the recreated owner to the peer and recover the latest
-        // mirrored revision over the live Tor transport.
-        recovered_service
-            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
-                peer: Some(clirpc::Peer {
-                    onion_service_id: peer_onion,
-                }),
-            }))
-            .await?;
-        wait_for_async(Duration::from_secs(600), || {
-            let recovered_service = &recovered_service;
-            let owner_content_id = owner_content_id.clone();
-            async move {
-                let response = match recovered_service
-                    .recover_content(tonic::Request::new(clirpc::RecoverContentRequest {}))
-                    .await
-                {
-                    Ok(response) => response,
-                    Err(status) if is_retryable_peer_status(&status) => return Ok(false),
-                    Err(status) => return Err(anyhow!("recover content failed: {status}")),
-                };
-                let mut recovery = response.into_inner();
-                let mut last_recovery = None;
-                while let Some(update) = recovery.next().await {
-                    last_recovery = Some(update?);
-                }
-                let Some(last_recovery) = last_recovery else {
-                    return Ok(false);
-                };
-                if !last_recovery.recovered_most_recent_version
-                    || last_recovery.most_recent_content_id != owner_content_id
-                    || last_recovery.num_peers_with_most_recent_version != 1
-                {
-                    return Ok(false);
-                }
-
-                let recovered_file = recovered_service
-                    .get_file(tonic::Request::new(clirpc::GetFileRequest {
+            // Write owner content and explicitly mirror it to the peer.
+            let owner_onion = unlocked_node(&owner_service).await.address().to_string();
+            let peer_onion = unlocked_node(&peer_service).await.address().to_string();
+            eprintln!("live Tor: connecting owner to peer {peer_onion}");
+            owner_service
+                .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                    peer: Some(clirpc::Peer {
+                        onion_service_id: peer_onion.clone(),
+                    }),
+                }))
+                .await?;
+            eprintln!("live Tor: writing owner content");
+            owner_service
+                .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                    file: Some(clirpc::File {
                         name: "alpha.txt".to_string(),
-                    }))
-                    .await?
-                    .into_inner()
-                    .file
-                    .context("recovered file should exist")?;
-                Ok(recovered_file.data == b"alpha-live-body".to_vec())
+                        data: b"alpha-live-body".to_vec(),
+                    }),
+                }))
+                .await?;
+            let owner_content_id = unlocked_node(&owner_service)
+                .await
+                .current_content_info()?
+                .context("owner content info should exist after SetFile")?
+                .content_id;
+            eprintln!("live Tor: proposing owner contract to peer");
+            wait_for_async(Duration::from_secs(600), || {
+                let owner_service = &owner_service;
+                let peer_onion = peer_onion.clone();
+                async move {
+                    let response = match owner_service
+                        .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+                            peer: Some(clirpc::Peer {
+                                onion_service_id: peer_onion.clone(),
+                            }),
+                        }))
+                        .await
+                    {
+                        Ok(response) => response,
+                        Err(status) if is_retryable_peer_status(&status) => return Ok(false),
+                        Err(status) => return Err(anyhow!("propose contract failed: {status}")),
+                    };
+                    let mut updates = response.into_inner();
+                    let mut last_update = None;
+                    while let Some(update) = updates.next().await {
+                        last_update = Some(update?);
+                    }
+                    Ok(last_update.is_some_and(|update| update.success))
+                }
+            })
+            .await
+            .context("wait for live Tor contract proposal")?;
+
+            // Wait until the peer has persisted the mirrored owner blob.
+            eprintln!("live Tor: waiting for mirrored owner blob at peer");
+            wait_for_async(Duration::from_secs(300), || {
+                let peer_service = &peer_service;
+                let owner_onion = owner_onion.clone();
+                let owner_content_id = owner_content_id.clone();
+                async move {
+                    let mirrored = mirrored_peer_content_id(
+                        unlocked_node(peer_service).await.as_ref(),
+                        &owner_onion,
+                    )?;
+                    Ok(mirrored == Some(owner_content_id.clone()))
+                }
+            })
+            .await
+            .context("wait for mirrored live Tor content")?;
+
+            // Recreate the owner in a fresh data directory and verify there is no
+            // local content or peer state to recover from yet.
+            eprintln!("live Tor: recreating owner in a fresh data directory");
+            owner_service.shutdown().await?;
+            let recovered_service = DaemonService::with_maintenance_config(
+                recovered_dir.path().to_path_buf(),
+                Arc::new(TorPeerRuntimeFactory::new(recovered_dir.path().join("tor"))),
+                MaintenanceConfig::with_interval(Duration::from_secs(3600)),
+            );
+            unlock_for_test(&recovered_service, "owner-live-tor").await?;
+            eprintln!("live Tor: waiting for recreated owner onion runtime");
+            wait_for_public_peer_runtime(&recovered_service, Duration::from_secs(600)).await?;
+            assert!(recovered_service
+                .list_files(tonic::Request::new(clirpc::ListFilesRequest {}))
+                .await?
+                .into_inner()
+                .name
+                .is_empty());
+            eprintln!("live Tor: verifying empty recovery before reconnect");
+            let mut empty_recovery = recovered_service
+                .recover_content(tonic::Request::new(clirpc::RecoverContentRequest {}))
+                .await?
+                .into_inner();
+            let mut last_empty_recovery = None;
+            while let Some(update) = empty_recovery.next().await {
+                last_empty_recovery = Some(update?);
             }
+            let last_empty_recovery =
+                last_empty_recovery.context("expected one recovery update without peers")?;
+            assert_eq!(last_empty_recovery.total_versions_found, 0);
+            assert!(!last_empty_recovery.recovered_most_recent_version);
+            assert!(recovered_service
+                .list_files(tonic::Request::new(clirpc::ListFilesRequest {}))
+                .await?
+                .into_inner()
+                .name
+                .is_empty());
+
+            // Reconnect the recreated owner to the peer and recover the latest
+            // mirrored revision over the live Tor transport.
+            eprintln!("live Tor: reconnecting recreated owner to peer");
+            recovered_service
+                .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                    peer: Some(clirpc::Peer {
+                        onion_service_id: peer_onion,
+                    }),
+                }))
+                .await?;
+            eprintln!("live Tor: waiting for recovery after reconnect");
+            wait_for_async(Duration::from_secs(600), || {
+                let recovered_service = &recovered_service;
+                let owner_content_id = owner_content_id.clone();
+                async move {
+                    let response = match recovered_service
+                        .recover_content(tonic::Request::new(clirpc::RecoverContentRequest {}))
+                        .await
+                    {
+                        Ok(response) => response,
+                        Err(status) if is_retryable_peer_status(&status) => return Ok(false),
+                        Err(status) => return Err(anyhow!("recover content failed: {status}")),
+                    };
+                    let mut recovery = response.into_inner();
+                    let mut last_recovery = None;
+                    while let Some(update) = recovery.next().await {
+                        last_recovery = Some(update?);
+                    }
+                    let Some(last_recovery) = last_recovery else {
+                        return Ok(false);
+                    };
+                    if !last_recovery.recovered_most_recent_version
+                        || last_recovery.most_recent_content_id != owner_content_id
+                        || last_recovery.num_peers_with_most_recent_version != 1
+                    {
+                        return Ok(false);
+                    }
+
+                    let recovered_file = recovered_service
+                        .get_file(tonic::Request::new(clirpc::GetFileRequest {
+                            name: "alpha.txt".to_string(),
+                        }))
+                        .await?
+                        .into_inner()
+                        .file
+                        .context("recovered file should exist")?;
+                    Ok(recovered_file.data == b"alpha-live-body".to_vec())
+                }
+            })
+            .await
+            .context("wait for live Tor recovery after peer reconnect")?;
+
+            eprintln!("live Tor: shutting down recreated owner and peer");
+            recovered_service.shutdown().await?;
+            peer_service.shutdown().await?;
+            Ok(())
         })
         .await
-        .context("wait for live Tor recovery after peer reconnect")?;
-
-        recovered_service.shutdown().await?;
-        peer_service.shutdown().await?;
-        Ok(())
+        .context("live Tor recovery round trip timed out after 30 minutes")?
     }
 }

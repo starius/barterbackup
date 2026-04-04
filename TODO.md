@@ -17,10 +17,6 @@ These are the product and hardening items that are still unresolved.
   block Tor still needs a product decision and implementation path, including
   whether to support external Tor, pluggable transports, or operator-managed
   hidden-service keys.
-- Finish the real-Tor end-to-end validation story. The ignored
-  `live_tor_recovery_round_trip` test exists, but it still needs a longer soak
-  run or a better validation environment to prove the full two-node public-Tor
-  recovery path end to end.
 - Finish the remaining operator-facing hardening around observability and
   resource controls. Structured peer logs, peer I/O bounds, timeout handling,
   and dedicated fuzz targets are now in place, but the daemon still needs
