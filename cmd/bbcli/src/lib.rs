@@ -367,8 +367,23 @@ async fn healthcheck(addr: &str) -> Result<()> {
         .local_health_check(HealthCheckRequest {})
         .await?
         .into_inner();
+    let peer_runtime_state =
+        protos::clirpc::PeerRuntimeState::try_from(response.peer_runtime_state)
+            .unwrap_or(protos::clirpc::PeerRuntimeState::Unknown);
     println!("server_onion: {}", response.server_onion);
     println!("uptime_seconds: {}", response.uptime_seconds);
+    println!(
+        "peer_runtime_state: {}",
+        match peer_runtime_state {
+            protos::clirpc::PeerRuntimeState::Unknown => "unknown",
+            protos::clirpc::PeerRuntimeState::Starting => "starting",
+            protos::clirpc::PeerRuntimeState::Ready => "ready",
+            protos::clirpc::PeerRuntimeState::Failed => "failed",
+        }
+    );
+    if !response.peer_runtime_error.is_empty() {
+        println!("peer_runtime_error: {}", response.peer_runtime_error);
+    }
     Ok(())
 }
 

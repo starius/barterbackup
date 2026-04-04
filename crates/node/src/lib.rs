@@ -2346,6 +2346,8 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         Ok(Response::new(clirpc::HealthCheckResponse {
             server_onion: self.node.address().to_string(),
             uptime_seconds: self.node.uptime_seconds(),
+            peer_runtime_state: clirpc::PeerRuntimeState::Unknown as i32,
+            peer_runtime_error: String::new(),
         }))
     }
 

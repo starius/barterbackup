@@ -632,6 +632,8 @@ mod tests {
             Ok(tonic::Response::new(protos::clirpc::HealthCheckResponse {
                 server_onion: "".into(),
                 uptime_seconds: 1,
+                peer_runtime_state: protos::clirpc::PeerRuntimeState::Unknown as i32,
+                peer_runtime_error: String::new(),
             }))
         }
         type ProposeContractStream = std::pin::Pin<

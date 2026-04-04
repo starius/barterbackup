@@ -102,6 +102,15 @@ service BarterBackupClient {
 // HealthCheckRequest is an empty health check request.
 message HealthCheckRequest {}
 
+// PeerRuntimeState reports whether the public peer runtime is ready yet.
+enum PeerRuntimeState
+{
+    PEER_RUNTIME_STATE_UNKNOWN = 0;
+    PEER_RUNTIME_STATE_STARTING = 1;
+    PEER_RUNTIME_STATE_READY = 2;
+    PEER_RUNTIME_STATE_FAILED = 3;
+}
+
 // HealthCheckResponse returns local daemon status information.
 message HealthCheckResponse {
     // server_onion is the Tor onion hostname of the local daemon.
@@ -109,6 +118,13 @@ message HealthCheckResponse {
 
     // uptime_seconds is the number of seconds since the daemon started.
     int64 uptime_seconds = 2;
+
+    // peer_runtime_state reports whether the public peer runtime is still
+    // starting, ready, or failed after unlock.
+    PeerRuntimeState peer_runtime_state = 3;
+
+    // peer_runtime_error contains the latest peer runtime failure, if any.
+    string peer_runtime_error = 4;
 }
 
 message InitRequest {

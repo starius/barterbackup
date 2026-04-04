@@ -12,7 +12,7 @@ use std::fs::{self, File, OpenOptions};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use storage::OsFilesystem;
 use tlsutil::{build_server_tls, generate_ed25519, write_keys};
@@ -241,14 +241,144 @@ enum DaemonNodeState {
     Unlocked(UnlockedNode),
 }
 
+/// PeerRuntimeHealth reports the peer runtime status visible through healthcheck.
+#[derive(Clone)]
+enum PeerRuntimeHealth {
+    /// Starting means the peer runtime is still bootstrapping in the background.
+    Starting,
+    /// Ready means the public peer runtime is accepting traffic.
+    Ready,
+    /// Failed means peer runtime startup or execution failed.
+    Failed(String),
+}
+
+impl PeerRuntimeHealth {
+    /// Convert one runtime status into the protobuf healthcheck fields.
+    fn to_proto_fields(&self) -> (i32, String) {
+        match self {
+            Self::Starting => (clirpc::PeerRuntimeState::Starting as i32, String::new()),
+            Self::Ready => (clirpc::PeerRuntimeState::Ready as i32, String::new()),
+            Self::Failed(error) => (clirpc::PeerRuntimeState::Failed as i32, error.clone()),
+        }
+    }
+}
+
+/// BackgroundPeerRuntime bootstraps and owns the peer-facing runtime lifecycle.
+struct BackgroundPeerRuntime {
+    /// status reports peer runtime readiness or failure to healthcheck.
+    status: Arc<StdMutex<PeerRuntimeHealth>>,
+    /// shutdown asks the background supervisor to stop.
+    shutdown: CancellationToken,
+    /// task supervises peer runtime bootstrap and shutdown.
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl BackgroundPeerRuntime {
+    /// Start peer bootstrap in the background and return its supervisor handle.
+    fn start(
+        node: Arc<Node>,
+        peer_runtime_factory: Arc<dyn PeerRuntimeFactory>,
+        maintenance_wakeup: Arc<Notify>,
+        maintenance_config: MaintenanceConfig,
+    ) -> Self {
+        let status = Arc::new(StdMutex::new(PeerRuntimeHealth::Starting));
+        let status_for_task = status.clone();
+        let shutdown = CancellationToken::new();
+        let shutdown_signal = shutdown.clone();
+        let task = tokio::spawn(async move {
+            let mut peer_runtime = match tokio::select! {
+                _ = shutdown_signal.cancelled() => return,
+                result = peer_runtime_factory.start(node.clone()) => result,
+            } {
+                Ok(peer_runtime) => peer_runtime,
+                Err(error) => {
+                    let error_message = error.to_string();
+                    *status_for_task.lock().unwrap() = PeerRuntimeHealth::Failed(error_message);
+                    warn!(onion = %node.address(), %error, "peer runtime startup failed");
+                    return;
+                }
+            };
+
+            *status_for_task.lock().unwrap() = PeerRuntimeHealth::Ready;
+            info!(onion = %node.address(), "peer runtime became ready");
+
+            // Start maintenance only after outbound peer connectivity is available.
+            let maintenance_runtime =
+                spawn_maintenance_runtime(node.clone(), maintenance_wakeup, maintenance_config);
+
+            tokio::select! {
+                _ = shutdown_signal.cancelled() => {
+                    if let Err(error) = maintenance_runtime.shutdown().await {
+                        warn!(onion = %node.address(), %error, "maintenance shutdown failed");
+                    }
+                    if let Err(error) = peer_runtime.shutdown().await {
+                        warn!(onion = %node.address(), %error, "peer runtime shutdown failed");
+                    }
+                }
+                result = &mut peer_runtime.task => {
+                    if let Err(error) = maintenance_runtime.shutdown().await {
+                        warn!(onion = %node.address(), %error, "maintenance shutdown failed after peer runtime exit");
+                    }
+
+                    let error_message = match result {
+                        Ok(Ok(())) => {
+                            "peer runtime stopped unexpectedly".to_string()
+                        }
+                        Ok(Err(error)) => error.to_string(),
+                        Err(error) if error.is_cancelled() => {
+                            return;
+                        }
+                        Err(error) => anyhow!(error).to_string(),
+                    };
+                    *status_for_task.lock().unwrap() =
+                        PeerRuntimeHealth::Failed(error_message.clone());
+                    warn!(
+                        onion = %node.address(),
+                        peer_runtime_error = %error_message,
+                        "peer runtime is no longer healthy"
+                    );
+                }
+            }
+        });
+
+        Self {
+            status,
+            shutdown,
+            task,
+        }
+    }
+
+    /// Return the current peer runtime health snapshot.
+    fn snapshot(&self) -> PeerRuntimeHealth {
+        self.status.lock().unwrap().clone()
+    }
+
+    /// Stop the background supervisor and wait for it to finish.
+    async fn shutdown(self) -> Result<()> {
+        self.shutdown.cancel();
+        let mut task = self.task;
+        match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) if error.is_cancelled() => Ok(()),
+            Ok(Err(error)) => Err(anyhow!(error)),
+            Err(_) => {
+                task.abort();
+                match task.await {
+                    Err(error) if error.is_cancelled() => Ok(()),
+                    Err(error) => Err(anyhow!(error)),
+                    Ok(()) => Ok(()),
+                }
+            }
+        }
+    }
+}
+
 /// UnlockedNode owns the running node and peer runtime after unlock.
 struct UnlockedNode {
     /// node is the in-memory BarterBackup node backing local RPCs.
     node: Arc<Node>,
-    /// peer_runtime runs the public peer-to-peer gRPC server.
-    peer_runtime: StartedTask,
-    /// maintenance_runtime runs periodic recovery and contract checks.
-    maintenance_runtime: StartedTask,
+    /// peer_runtime bootstraps and supervises the public peer runtime.
+    peer_runtime: BackgroundPeerRuntime,
 }
 
 /// DaemonService implements the local CLI RPC surface and daemon lifecycle.
@@ -309,15 +439,6 @@ impl DaemonService {
         }
     }
 
-    /// Return the node onion if the daemon is already unlocked.
-    async fn unlocked_onion(&self) -> Option<String> {
-        let node_state = self.node_state.lock().await;
-        match &*node_state {
-            DaemonNodeState::Unlocked(unlocked) => Some(unlocked.node.address().to_string()),
-            DaemonNodeState::Locked | DaemonNodeState::Unlocking => None,
-        }
-    }
-
     /// Return the path to the daemon password fingerprint file.
     fn fingerprint_path(&self) -> PathBuf {
         self.data_dir.join("fingerprint.txt")
@@ -375,36 +496,17 @@ impl DaemonService {
         let node = Arc::new(Node::with_local_storage(password, filesystem)?);
         node.mark_started();
 
-        // Start the peer runtime and the maintenance loop only after the node
-        // has been constructed.
-        let peer_runtime = self.peer_runtime_factory.start(node.clone()).await?;
-        let maintenance_runtime = self.start_maintenance_runtime(node.clone());
+        // Start peer bootstrap in the background so unlock returns before
+        // Arti finishes bootstrapping and publishing the onion service.
+        let peer_runtime = BackgroundPeerRuntime::start(
+            node.clone(),
+            self.peer_runtime_factory.clone(),
+            self.maintenance_wakeup.clone(),
+            self.maintenance_config.clone(),
+        );
         info!(onion = %node.address(), data_dir = %self.data_dir.display(), "node unlocked");
 
-        Ok(UnlockedNode {
-            node,
-            peer_runtime,
-            maintenance_runtime,
-        })
-    }
-
-    /// Start the background maintenance loop for an unlocked node.
-    fn start_maintenance_runtime(&self, node: Arc<Node>) -> StartedTask {
-        let shutdown = CancellationToken::new();
-        let shutdown_signal = shutdown.clone();
-        let maintenance_wakeup = self.maintenance_wakeup.clone();
-        let maintenance_config = self.maintenance_config.clone();
-        let task = tokio::spawn(async move {
-            run_maintenance_loop(
-                node,
-                maintenance_wakeup,
-                shutdown_signal,
-                maintenance_config,
-            )
-            .await
-        });
-
-        StartedTask::new(shutdown, task)
+        Ok(UnlockedNode { node, peer_runtime })
     }
 
     /// Shut down the peer runtime if the daemon is currently unlocked.
@@ -414,10 +516,7 @@ impl DaemonService {
             std::mem::replace(&mut *node_state, DaemonNodeState::Locked)
         };
         match previous_state {
-            DaemonNodeState::Unlocked(unlocked) => {
-                unlocked.maintenance_runtime.shutdown().await?;
-                unlocked.peer_runtime.shutdown().await
-            }
+            DaemonNodeState::Unlocked(unlocked) => unlocked.peer_runtime.shutdown().await,
             DaemonNodeState::Locked | DaemonNodeState::Unlocking => Ok(()),
         }
     }
@@ -448,9 +547,31 @@ impl BarterBackupClient for DaemonService {
         &self,
         _request: tonic::Request<clirpc::HealthCheckRequest>,
     ) -> Result<Response<clirpc::HealthCheckResponse>, Status> {
+        let (server_onion, peer_runtime_state, peer_runtime_error) = {
+            let node_state = self.node_state.lock().await;
+            match &*node_state {
+                DaemonNodeState::Locked | DaemonNodeState::Unlocking => (
+                    String::new(),
+                    clirpc::PeerRuntimeState::Unknown as i32,
+                    String::new(),
+                ),
+                DaemonNodeState::Unlocked(unlocked) => {
+                    let (peer_runtime_state, peer_runtime_error) =
+                        unlocked.peer_runtime.snapshot().to_proto_fields();
+                    (
+                        unlocked.node.address().to_string(),
+                        peer_runtime_state,
+                        peer_runtime_error,
+                    )
+                }
+            }
+        };
+
         Ok(Response::new(clirpc::HealthCheckResponse {
-            server_onion: self.unlocked_onion().await.unwrap_or_default(),
+            server_onion,
             uptime_seconds: i64::try_from(self.started_at.elapsed().as_secs()).unwrap_or(i64::MAX),
+            peer_runtime_state,
+            peer_runtime_error,
         }))
     }
 
@@ -1065,6 +1186,27 @@ async fn run_maintenance_loop(
     Ok(())
 }
 
+/// Start the background maintenance loop for one unlocked node.
+fn spawn_maintenance_runtime(
+    node: Arc<Node>,
+    maintenance_wakeup: Arc<Notify>,
+    maintenance_config: MaintenanceConfig,
+) -> StartedTask {
+    let shutdown = CancellationToken::new();
+    let shutdown_signal = shutdown.clone();
+    let task = tokio::spawn(async move {
+        run_maintenance_loop(
+            node,
+            maintenance_wakeup,
+            shutdown_signal,
+            maintenance_config,
+        )
+        .await
+    });
+
+    StartedTask::new(shutdown, task)
+}
+
 /// Wait for the first local shutdown signal.
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
@@ -1225,6 +1367,53 @@ mod tests {
         }
     }
 
+    /// DelayedPeerRuntimeFactory blocks startup until released by the test.
+    #[derive(Default)]
+    struct DelayedPeerRuntimeFactory {
+        started: AtomicBool,
+        started_notify: Notify,
+        release: Notify,
+    }
+
+    impl DelayedPeerRuntimeFactory {
+        /// Wait until the delayed runtime has started bootstrapping.
+        async fn wait_started(&self, timeout: Duration) -> Result<()> {
+            if self.started.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+
+            tokio::time::timeout(timeout, self.started_notify.notified())
+                .await
+                .context("wait for delayed peer runtime start")?;
+            Ok(())
+        }
+
+        /// Allow the delayed runtime to finish starting.
+        fn release(&self) {
+            self.release.notify_waiters();
+        }
+    }
+
+    #[async_trait]
+    impl PeerRuntimeFactory for DelayedPeerRuntimeFactory {
+        async fn start(&self, node: Arc<Node>) -> Result<StartedTask> {
+            self.started.store(true, Ordering::SeqCst);
+            self.started_notify.notify_waiters();
+            self.release.notified().await;
+            NoopPeerRuntimeFactory.start(node).await
+        }
+    }
+
+    /// FailingPeerRuntimeFactory reports a deterministic peer runtime failure.
+    struct FailingPeerRuntimeFactory;
+
+    #[async_trait]
+    impl PeerRuntimeFactory for FailingPeerRuntimeFactory {
+        async fn start(&self, _node: Arc<Node>) -> Result<StartedTask> {
+            bail!("simulated peer runtime failure");
+        }
+    }
+
     /// HangingPeerConnector never completes peer dials and signals when one starts.
     #[derive(Default)]
     struct HangingPeerConnector {
@@ -1326,6 +1515,29 @@ mod tests {
 
             Ok(StartedTask::new(shutdown, task))
         }
+    }
+
+    /// Spawn a direct mock p2p server and register its endpoint in the connector.
+    async fn spawn_registered_mock_peer_server(
+        node: Arc<Node>,
+        connector: Arc<netmock::MockPeerConnector>,
+    ) -> Result<tokio::task::JoinHandle<Result<(), anyhow::Error>>> {
+        node.set_peer_connector(connector.clone());
+        let listener = netmock::bind_peer_listener(&node.ed25519_keypair().secret).await?;
+        let endpoint = listener.endpoint().to_string();
+        connector.register_peer(node.address(), &endpoint);
+
+        Ok(tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(
+                    BarterBackupServerServer::new(P2pService::new(node))
+                        .max_decoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES)
+                        .max_encoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES),
+                )
+                .serve_with_incoming(listener.into_incoming())
+                .await
+                .map_err(anyhow::Error::from)
+        }))
     }
 
     /// Return the unlocked node owned by a daemon service.
@@ -1568,6 +1780,10 @@ mod tests {
             .await?
             .into_inner();
         assert!(locked.server_onion.is_empty());
+        assert_eq!(
+            locked.peer_runtime_state,
+            clirpc::PeerRuntimeState::Unknown as i32
+        );
 
         init_and_unlock_service(&service, "password").await?;
         let unlocked = service
@@ -1575,6 +1791,142 @@ mod tests {
             .await?
             .into_inner();
         assert!(!unlocked.server_onion.is_empty());
+        assert!(matches!(
+            clirpc::PeerRuntimeState::try_from(unlocked.peer_runtime_state),
+            Ok(clirpc::PeerRuntimeState::Starting | clirpc::PeerRuntimeState::Ready)
+        ));
+        assert!(unlocked.peer_runtime_error.is_empty());
+        wait_for_async(Duration::from_secs(2), || {
+            let service = &service;
+            async move {
+                let health = service
+                    .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+                    .await?
+                    .into_inner();
+                Ok(health.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32)
+            }
+        })
+        .await?;
+
+        service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unlock_returns_before_peer_runtime_is_ready() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let runtime_factory = Arc::new(DelayedPeerRuntimeFactory::default());
+        let service = DaemonService::with_maintenance_config(
+            temp_dir.path().to_path_buf(),
+            runtime_factory.clone(),
+            MaintenanceConfig::with_interval(Duration::from_secs(60)),
+        );
+        init_service(&service, "delayed-runtime").await?;
+
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            service.unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: "delayed-runtime".to_string(),
+            })),
+        )
+        .await
+        .context("unlock should not wait for peer runtime readiness")??;
+
+        runtime_factory.wait_started(Duration::from_secs(1)).await?;
+        let health = service
+            .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+            .await?
+            .into_inner();
+        assert_eq!(
+            health.peer_runtime_state,
+            clirpc::PeerRuntimeState::Starting as i32
+        );
+        assert!(health.peer_runtime_error.is_empty());
+
+        service
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+        let listed = service
+            .list_files(tonic::Request::new(clirpc::ListFilesRequest {}))
+            .await?
+            .into_inner();
+        assert_eq!(listed.name, vec!["alpha.txt".to_string()]);
+
+        runtime_factory.release();
+        wait_for_async(Duration::from_secs(2), || {
+            let service = &service;
+            async move {
+                let health = service
+                    .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+                    .await?
+                    .into_inner();
+                Ok(health.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32)
+            }
+        })
+        .await?;
+
+        service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_runtime_failure_is_reported_after_unlock() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let service = DaemonService::with_maintenance_config(
+            temp_dir.path().to_path_buf(),
+            Arc::new(FailingPeerRuntimeFactory),
+            MaintenanceConfig::with_interval(Duration::from_secs(60)),
+        );
+        init_service(&service, "failing-runtime").await?;
+
+        service
+            .unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: "failing-runtime".to_string(),
+            }))
+            .await?;
+
+        wait_for_async(Duration::from_secs(2), || {
+            let service = &service;
+            async move {
+                let health = service
+                    .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+                    .await?
+                    .into_inner();
+                Ok(health.peer_runtime_state == clirpc::PeerRuntimeState::Failed as i32)
+            }
+        })
+        .await?;
+
+        let health = service
+            .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+            .await?
+            .into_inner();
+        assert!(health
+            .peer_runtime_error
+            .contains("simulated peer runtime failure"));
+
+        service
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+        let fetched = service
+            .get_file(tonic::Request::new(clirpc::GetFileRequest {
+                name: "alpha.txt".to_string(),
+            }))
+            .await?
+            .into_inner()
+            .file
+            .context("expected fetched file")?;
+        assert_eq!(fetched.data, b"alpha-body".to_vec());
 
         service.shutdown().await?;
         Ok(())
@@ -1748,9 +2100,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn restarted_daemon_recovers_from_persisted_peers() -> Result<()> {
         let connector = Arc::new(netmock::MockPeerConnector::new());
-        let maintenance_config = MaintenanceConfig::with_interval(Duration::from_millis(50));
+        let maintenance_config = MaintenanceConfig::with_interval(Duration::from_secs(3600));
         let owner_dir = TempDir::new()?;
-        let peer_dir = TempDir::new()?;
         let owner_service = DaemonService::with_maintenance_config(
             owner_dir.path().to_path_buf(),
             Arc::new(MockPeerRuntimeFactory {
@@ -1758,18 +2109,15 @@ mod tests {
             }),
             maintenance_config.clone(),
         );
-        let peer_service = DaemonService::with_maintenance_config(
-            peer_dir.path().to_path_buf(),
-            Arc::new(MockPeerRuntimeFactory {
-                connector: connector.clone(),
-            }),
-            maintenance_config.clone(),
-        );
+        let peer_filesystem: Arc<dyn storage::Filesystem> =
+            Arc::new(storage::MemoryFilesystem::new());
+        let peer_node = Arc::new(Node::with_local_storage("peer-password", peer_filesystem)?);
+        let peer_server =
+            spawn_registered_mock_peer_server(peer_node.clone(), connector.clone()).await?;
 
         init_and_unlock_service(&owner_service, "owner-password").await?;
-        init_and_unlock_service(&peer_service, "peer-password").await?;
 
-        let peer_onion = unlocked_node(&peer_service).await.address().to_string();
+        let peer_onion = peer_node.address().to_string();
         owner_service
             .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
                 peer: Some(clirpc::Peer {
@@ -1791,25 +2139,25 @@ mod tests {
             .context("owner content should exist after set_file")?
             .content_id;
 
-        wait_for_async(Duration::from_secs(15), || {
-            let owner_service = &owner_service;
-            let peer_onion = peer_onion.clone();
-            async move {
-                let contracts = owner_service
-                    .get_contracts(tonic::Request::new(clirpc::GetContractsRequest {}))
-                    .await?
-                    .into_inner()
-                    .contracts;
-                Ok(contracts.into_iter().any(|contract| {
-                    contract
-                        .peer
-                        .as_ref()
-                        .is_some_and(|peer| peer.onion_service_id == peer_onion)
-                        && contract.our_content_synced
-                }))
+        let mut proposal_updates = owner_service
+            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: peer_onion.clone(),
+                }),
+            }))
+            .await?
+            .into_inner();
+        let mut saw_successful_proposal = false;
+        while let Some(update) = proposal_updates.next().await {
+            let update = update?;
+            if update.state == clirpc::ContractState::Completed as i32 && update.success {
+                saw_successful_proposal = true;
             }
-        })
-        .await?;
+        }
+        assert!(
+            saw_successful_proposal,
+            "expected a successful contract proposal before owner shutdown"
+        );
 
         let mut check_updates = owner_service
             .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
@@ -1842,17 +2190,35 @@ mod tests {
             maintenance_config,
         );
         init_and_unlock_service(&restarted_service, "owner-password").await?;
+        wait_for_async(Duration::from_secs(2), || {
+            let restarted_service = &restarted_service;
+            async move {
+                let health = restarted_service
+                    .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+                    .await?
+                    .into_inner();
+                Ok(health.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32)
+            }
+        })
+        .await?;
 
-        let mut recovery = restarted_service
-            .recover_content(tonic::Request::new(clirpc::RecoverContentRequest {}))
-            .await?
-            .into_inner();
-        let recovery_update = recovery
-            .next()
-            .await
-            .context("expected one recovery update after restart")??;
-        assert!(recovery_update.recovered_most_recent_version);
-        assert_eq!(recovery_update.most_recent_content_id, owner_content_id);
+        wait_for_async(Duration::from_secs(5), || {
+            let restarted_service = &restarted_service;
+            let owner_content_id = owner_content_id.clone();
+            async move {
+                let mut recovery = restarted_service
+                    .recover_content(tonic::Request::new(clirpc::RecoverContentRequest {}))
+                    .await?
+                    .into_inner();
+                let recovery_update = recovery
+                    .next()
+                    .await
+                    .context("expected one recovery update after restart")??;
+                Ok(recovery_update.recovered_most_recent_version
+                    && recovery_update.most_recent_content_id == owner_content_id)
+            }
+        })
+        .await?;
 
         let recovered = restarted_service
             .get_file(tonic::Request::new(clirpc::GetFileRequest {
@@ -1865,7 +2231,7 @@ mod tests {
         assert_eq!(recovered.data, b"alpha-body".to_vec());
 
         restarted_service.shutdown().await?;
-        peer_service.shutdown().await?;
+        peer_server.abort();
         Ok(())
     }
 
