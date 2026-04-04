@@ -475,8 +475,10 @@ async fn connect_peer(addr: &str, onion_service_id: &str) -> Result<()> {
 /// Print the current configured peers.
 async fn connected_peers(addr: &str) -> Result<()> {
     let mut client = connect_client(addr).await?;
-    for peer in connected_peers_with_client(&mut client).await? {
-        println!("{peer}");
+    for line in
+        format_connected_peers_response(&connected_peers_response_with_client(&mut client).await?)
+    {
+        println!("{line}");
     }
     Ok(())
 }
@@ -557,30 +559,9 @@ async fn set_storage_config(
 async fn get_storage_config(addr: &str) -> Result<()> {
     let mut client = connect_client(addr).await?;
     let response = get_storage_config_with_client(&mut client).await?;
-    println!(
-        "allocated_storage_for_peers: {}",
-        response
-            .config
-            .as_ref()
-            .map(|config| config.allocated_storage_for_peers)
-            .unwrap_or_default()
-    );
-    println!(
-        "min_replicas: {}",
-        response
-            .config
-            .as_ref()
-            .map(|config| config.min_replicas)
-            .unwrap_or_default()
-    );
-    println!(
-        "our_content_bytes: {}",
-        response
-            .info
-            .as_ref()
-            .map(|info| info.our_content_bytes)
-            .unwrap_or_default()
-    );
+    for line in format_storage_config_response(&response) {
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -588,25 +569,115 @@ async fn get_storage_config(addr: &str) -> Result<()> {
 async fn get_contracts(addr: &str) -> Result<()> {
     let mut client = connect_client(addr).await?;
     let response = get_contracts_with_client(&mut client).await?;
-    for contract in response.contracts {
-        println!(
-            "peer={} synced={} their_remaining_seconds={} their_content_length={} latest_known_id={} latest_known_length={} latest_cached_id={} latest_cached_length={} online={}",
-            contract
+    for line in format_contracts_response(&response) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Format one connected-peer response for CLI output.
+fn format_connected_peers_response(
+    response: &protos::clirpc::ConnectedPeersResponse,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    push_peer_group_lines(&mut lines, "connected", &response.connected_peers);
+    push_peer_group_lines(
+        &mut lines,
+        "online_not_connected",
+        &response.online_not_connected_peers,
+    );
+    push_peer_group_lines(&mut lines, "offline", &response.offline_peers);
+    lines
+}
+
+/// Append one labeled peer group to the CLI output.
+fn push_peer_group_lines(lines: &mut Vec<String>, label: &str, peers: &[protos::clirpc::Peer]) {
+    lines.push(format!("{label}: {}", peers.len()));
+    if peers.is_empty() {
+        lines.push("  (none)".to_string());
+        return;
+    }
+
+    for peer in peers {
+        lines.push(format!("  {}", peer.onion_service_id));
+    }
+}
+
+/// Format one storage-config response for CLI output.
+fn format_storage_config_response(
+    response: &protos::clirpc::GetStorageConfigResponse,
+) -> Vec<String> {
+    let config = response.config.as_ref();
+    let info = response.info.as_ref();
+    vec![
+        format!(
+            "allocated_storage_for_peers: {}",
+            config
+                .map(|config| config.allocated_storage_for_peers)
+                .unwrap_or_default()
+        ),
+        format!(
+            "min_replicas: {}",
+            config.map(|config| config.min_replicas).unwrap_or_default()
+        ),
+        format!(
+            "online_peers_storage_obligations_bytes: {}",
+            info.map(|info| info.online_peers_storage_obligations_bytes)
+                .unwrap_or_default()
+        ),
+        format!(
+            "offline_peers_storage_obligations_bytes: {}",
+            info.map(|info| info.offline_peers_storage_obligations_bytes)
+                .unwrap_or_default()
+        ),
+        format!(
+            "expired_offline_peers_storage_obligations_bytes: {}",
+            info.map(|info| info.expired_offline_peers_storage_obligations_bytes)
+                .unwrap_or_default()
+        ),
+        format!(
+            "our_content_bytes: {}",
+            info.map(|info| info.our_content_bytes).unwrap_or_default()
+        ),
+        format!(
+            "maximum_peer_content_accepted_bytes: {}",
+            info.map(|info| info.maximum_peer_content_accepted_bytes)
+                .unwrap_or_default()
+        ),
+    ]
+}
+
+/// Format one contracts response for CLI output.
+fn format_contracts_response(response: &protos::clirpc::GetContractsResponse) -> Vec<String> {
+    response
+        .contracts
+        .iter()
+        .map(|contract| {
+            let peer = contract
                 .peer
                 .as_ref()
                 .map(|peer| peer.onion_service_id.as_str())
-                .unwrap_or(""),
-            contract.our_content_synced,
-            contract.their_remaining_seconds,
-            contract.their_content_length,
-            hex::encode(contract.their_latest_known_content_id),
-            contract.their_latest_known_content_length,
-            hex::encode(contract.their_latest_cached_content_id),
-            contract.their_latest_cached_content_length,
-            contract.online
-        );
-    }
-    Ok(())
+                .unwrap_or("");
+            let latest_known_id = hex::encode(&contract.their_latest_known_content_id);
+            let latest_cached_id = hex::encode(&contract.their_latest_cached_content_id);
+            let cache_is_stale = contract.their_latest_known_content_id
+                != contract.their_latest_cached_content_id;
+            format!(
+                "peer={} online={} synced={} our_remaining_seconds={} their_remaining_seconds={} their_content_length={} latest_known_id={} latest_known_length={} latest_cached_id={} latest_cached_length={} stale_cache={}",
+                peer,
+                contract.online,
+                contract.our_content_synced,
+                contract.our_remaining_seconds,
+                contract.their_remaining_seconds,
+                contract.their_content_length,
+                latest_known_id,
+                contract.their_latest_known_content_length,
+                latest_cached_id,
+                contract.their_latest_cached_content_length,
+                cache_is_stale
+            )
+        })
+        .collect()
 }
 
 /// Print the streamed updates for one contract proposal.
@@ -945,13 +1016,20 @@ pub async fn connect_peer_with_client(
 }
 
 /// Query the configured peer list through an already connected client.
+pub async fn connected_peers_response_with_client(
+    client: &mut BarterBackupClientClient<Channel>,
+) -> Result<protos::clirpc::ConnectedPeersResponse> {
+    Ok(client
+        .connected_peers(protos::clirpc::ConnectedPeersRequest {})
+        .await?
+        .into_inner())
+}
+
+/// Query the configured connected-peer onion list through an already connected client.
 pub async fn connected_peers_with_client(
     client: &mut BarterBackupClientClient<Channel>,
 ) -> Result<Vec<String>> {
-    let response = client
-        .connected_peers(protos::clirpc::ConnectedPeersRequest {})
-        .await?
-        .into_inner();
+    let response = connected_peers_response_with_client(client).await?;
     Ok(response
         .connected_peers
         .into_iter()
@@ -1353,6 +1431,95 @@ mod tests {
         peer_a_server.abort();
         peer_b_server.abort();
         Ok(())
+    }
+
+    #[test]
+    fn connected_peer_output_includes_all_groups() {
+        let response = protos::clirpc::ConnectedPeersResponse {
+            connected_peers: vec![protos::clirpc::Peer {
+                onion_service_id: "connected.onion".to_string(),
+            }],
+            online_not_connected_peers: vec![protos::clirpc::Peer {
+                onion_service_id: "online.onion".to_string(),
+            }],
+            offline_peers: Vec::new(),
+        };
+
+        let lines = format_connected_peers_response(&response);
+
+        assert_eq!(lines[0], "connected: 1");
+        assert!(lines.iter().any(|line| line == "  connected.onion"));
+        assert!(lines.iter().any(|line| line == "online_not_connected: 1"));
+        assert!(lines.iter().any(|line| line == "  online.onion"));
+        assert!(lines.iter().any(|line| line == "offline: 0"));
+        assert!(lines.iter().any(|line| line == "  (none)"));
+    }
+
+    #[test]
+    fn storage_config_output_includes_derived_usage() {
+        let response = protos::clirpc::GetStorageConfigResponse {
+            config: Some(protos::clirpc::StorageConfig {
+                allocated_storage_for_peers: 1024,
+                min_replicas: 3,
+            }),
+            info: Some(protos::clirpc::StorageInfo {
+                online_peers_storage_obligations_bytes: 10,
+                offline_peers_storage_obligations_bytes: 20,
+                expired_offline_peers_storage_obligations_bytes: 5,
+                our_content_bytes: 30,
+                maximum_peer_content_accepted_bytes: 40,
+            }),
+        };
+
+        let lines = format_storage_config_response(&response);
+
+        assert!(lines
+            .iter()
+            .any(|line| line == "allocated_storage_for_peers: 1024"));
+        assert!(lines.iter().any(|line| line == "min_replicas: 3"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "online_peers_storage_obligations_bytes: 10"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "offline_peers_storage_obligations_bytes: 20"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "expired_offline_peers_storage_obligations_bytes: 5"));
+        assert!(lines.iter().any(|line| line == "our_content_bytes: 30"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "maximum_peer_content_accepted_bytes: 40"));
+    }
+
+    #[test]
+    fn contract_output_includes_both_known_and_cached_versions() {
+        let response = protos::clirpc::GetContractsResponse {
+            contracts: vec![protos::clirpc::ContractInfo {
+                peer: Some(protos::clirpc::Peer {
+                    onion_service_id: "peer.onion".to_string(),
+                }),
+                our_content_synced: true,
+                our_remaining_seconds: 11,
+                their_remaining_seconds: 22,
+                their_content_length: 33,
+                online: true,
+                their_latest_known_content_id: vec![0xaa],
+                their_latest_known_content_length: 44,
+                their_latest_cached_content_id: vec![0xbb],
+                their_latest_cached_content_length: 55,
+            }],
+        };
+
+        let lines = format_contracts_response(&response);
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("peer=peer.onion"));
+        assert!(lines[0].contains("our_remaining_seconds=11"));
+        assert!(lines[0].contains("their_remaining_seconds=22"));
+        assert!(lines[0].contains("latest_known_id=aa"));
+        assert!(lines[0].contains("latest_cached_id=bb"));
+        assert!(lines[0].contains("stale_cache=true"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
