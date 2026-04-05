@@ -1888,16 +1888,6 @@ mod tests {
         }
     }
 
-    /// Return whether a live peer RPC status is worth retrying while Arti is
-    /// still bootstrapping circuits or publishing the onion service.
-    fn is_retryable_peer_status(status: &Status) -> bool {
-        matches!(
-            status.code(),
-            tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::DeadlineExceeded
-        ) || status.message().contains("transport error")
-            || status.message().contains("timed out")
-    }
-
     /// Reserve a loopback port and return its address string for the daemon.
     fn reserve_loopback_addr() -> Result<String> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -2891,7 +2881,9 @@ mod tests {
                         .await
                     {
                         Ok(response) => response,
-                        Err(status) if is_retryable_peer_status(&status) => return Ok(false),
+                        Err(status) if transport::is_retryable_peer_status(&status) => {
+                            return Ok(false);
+                        }
                         Err(status) => return Err(anyhow!("propose contract failed: {status}")),
                     };
                     let mut updates = response.into_inner();
@@ -2980,7 +2972,9 @@ mod tests {
                         .await
                     {
                         Ok(response) => response,
-                        Err(status) if is_retryable_peer_status(&status) => return Ok(false),
+                        Err(status) if transport::is_retryable_peer_status(&status) => {
+                            return Ok(false);
+                        }
                         Err(status) => return Err(anyhow!("recover content failed: {status}")),
                     };
                     let mut recovery = response.into_inner();
