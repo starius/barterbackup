@@ -355,12 +355,14 @@ struct RecoveryCandidate {
 impl Node {
     /// Create a node identity without attaching a local encrypted store.
     pub fn new(seed: &str) -> Result<Self> {
-        Self::build(seed, None, Arc::new(SystemClock))
+        let master = keys::derive_master_priv(seed);
+        Self::build_from_master(&master, None, Arc::new(SystemClock))
     }
 
     /// Create a node identity with a local encrypted store.
     pub fn with_local_storage(seed: &str, filesystem: Arc<dyn Filesystem>) -> Result<Self> {
-        Self::build(seed, Some(filesystem), Arc::new(SystemClock))
+        let master = keys::derive_master_priv(seed);
+        Self::build_from_master(&master, Some(filesystem), Arc::new(SystemClock))
     }
 
     /// Create a node identity with a local encrypted store and explicit clock.
@@ -369,7 +371,8 @@ impl Node {
         filesystem: Arc<dyn Filesystem>,
         clock: Arc<dyn Clock>,
     ) -> Result<Self> {
-        Self::build(seed, Some(filesystem), clock)
+        let master = keys::derive_master_priv(seed);
+        Self::build_from_master(&master, Some(filesystem), clock)
     }
 
     /// Return the node onion hostname.
@@ -387,17 +390,25 @@ impl Node {
         &self.ed25519_keypair
     }
 
+    /// Create a node identity from already-derived master material in tests.
+    #[cfg(test)]
+    fn new_for_tests_from_master(master_priv: &[u8]) -> Result<Self> {
+        Self::build_from_master(master_priv, None, Arc::new(SystemClock))
+    }
+
     /// Build a node, optionally attaching an encrypted local store.
-    fn build(
-        seed: &str,
+    fn build_from_master(
+        master_priv: &[u8],
         filesystem: Option<Arc<dyn Filesystem>>,
         clock: Arc<dyn Clock>,
     ) -> Result<Self> {
-        let master = keys::derive_master_priv(seed);
-        let (keypair, public_key) = keys::derive_ed25519_from_master(&master, "tor/onion/v3")?;
+        let (keypair, public_key) =
+            keys::derive_ed25519_from_master(master_priv, "tor/onion/v3")?;
         let onion_address = keys::onion_hostname_from_public_key(&public_key);
         let store = filesystem
-            .map(|filesystem| Store::new_with_time_source(filesystem, &master, clock.clone()))
+            .map(|filesystem| {
+                Store::new_with_time_source(filesystem, master_priv, clock.clone())
+            })
             .transpose()?
             .map(Mutex::new);
         let built_in_peer_list = built_in_peers();
@@ -3246,6 +3257,21 @@ mod tests {
         assert!(source.contains("pub const BUILTIN_PEERS"));
         assert!(source.contains("\"alpha.onion\""));
         assert!(source.contains("\"beta.onion\""));
+    }
+
+    #[test]
+    fn master_constructor_matches_seed_constructor() -> anyhow::Result<()> {
+        let seed = "test-master-constructor";
+        let master = keys::derive_master_priv(seed);
+        let from_seed = Node::new(seed)?;
+        let from_master = Node::new_for_tests_from_master(&master)?;
+
+        assert_eq!(from_master.address(), from_seed.address());
+        assert_eq!(
+            from_master.ed25519_keypair().public,
+            from_seed.ed25519_keypair().public
+        );
+        Ok(())
     }
 
     /// Build one stored peer entry for priority-policy tests.
