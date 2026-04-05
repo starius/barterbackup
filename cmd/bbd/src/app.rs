@@ -9,6 +9,7 @@ use protos::bbrpc::barter_backup_server_server::BarterBackupServerServer;
 use protos::clirpc;
 use protos::clirpc::barter_backup_client_server::{BarterBackupClient, BarterBackupClientServer};
 use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};

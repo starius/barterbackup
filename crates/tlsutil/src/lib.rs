@@ -37,7 +37,9 @@ use rustls::version::TLS13;
 use rustls::{ClientConfig, ServerConfig};
 use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use std::fs;
-use std::io::{self, Write};
+use std::io;
+#[cfg(unix)]
+use std::io::Write;
 use std::net::IpAddr;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
