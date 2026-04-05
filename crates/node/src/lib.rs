@@ -963,6 +963,28 @@ impl Node {
         .await
     }
 
+    /// Probe one peer for recovery metadata with reconnect-and-retry.
+    async fn recovery_revision_from_peer(
+        &self,
+        peer_onion: &str,
+    ) -> Result<bbrpc::GetContentRevisionResponse, Status> {
+        let policy =
+            transport::PeerRetryPolicy::for_operation(transport::PeerOperation::RecoveryProbe);
+        self.retry_peer_operation(peer_onion, policy, || async move {
+            let mut client = self
+                .connect_peer_client_with_timeout(peer_onion, policy.connect_timeout)
+                .await?;
+            self.peer_rpc_with_timeout(
+                peer_onion,
+                "get content revision",
+                policy.rpc_timeout,
+                client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
+            )
+            .await
+        })
+        .await
+    }
+
     /// Download an encrypted blob from a peer and verify the advertised hash.
     async fn download_peer_blob(
         &self,
@@ -1029,6 +1051,22 @@ impl Node {
         }
 
         Ok(raw_bytes)
+    }
+
+    /// Download one peer blob under the shared recovery retry policy.
+    async fn download_recoverable_peer_blob(
+        &self,
+        peer_onion: &str,
+        content_id: &[u8],
+        expected_length: i64,
+    ) -> Result<Vec<u8>, Status> {
+        let content_id = content_id.to_vec();
+        self.retry_peer_operation(
+            peer_onion,
+            transport::PeerRetryPolicy::for_operation(transport::PeerOperation::RecoveryDownload),
+            || self.download_peer_blob(peer_onion, &content_id, expected_length),
+        )
+        .await
     }
 
     /// Remove an unreferenced foreign blob once no peer metadata points to it.
@@ -2274,18 +2312,7 @@ impl Node {
             if self.is_our_onion(&peer_onion) {
                 continue;
             }
-            let mut client = match self.connect_peer_client(&peer_onion).await {
-                Ok(client) => client,
-                Err(_) => continue,
-            };
-            let revision = match self
-                .peer_rpc(
-                    &peer_onion,
-                    "get content revision",
-                    client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
-                )
-                .await
-            {
+            let revision = match self.recovery_revision_from_peer(&peer_onion).await {
                 Ok(revision) => revision,
                 Err(_) => continue,
             };
@@ -2383,7 +2410,7 @@ impl Node {
                     let mut last_error = None;
                     for source_peer in &candidate.peers {
                         match self
-                            .download_peer_blob(
+                            .download_recoverable_peer_blob(
                                 source_peer,
                                 &candidate.content_id,
                                 candidate.content_length,
@@ -5525,6 +5552,116 @@ mod tests {
         assert_eq!(updates.last().map(|update| update.success), Some(true));
         assert_eq!(service_state.set_call_count(), 1);
         assert_eq!(service_state.requester_content(), node.responder_content()?,);
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recover_content_retries_transient_probe_failures() -> anyhow::Result<()> {
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner_node = Arc::new(Node::with_local_storage(
+            "recover-retry-owner",
+            owner_filesystem,
+        )?);
+        let peer_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer_node = Arc::new(Node::with_local_storage(
+            "recover-retry-peer",
+            peer_filesystem,
+        )?);
+        let recovered_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let recovered_node = Arc::new(Node::with_local_storage(
+            "recover-retry-owner",
+            recovered_filesystem,
+        )?);
+        let base_connector = Arc::new(netmock::MockPeerConnector::new());
+        let flaky_connector = Arc::new(FlakyPeerConnector::new(base_connector.clone(), 2));
+        owner_node.set_peer_connector(base_connector.clone());
+        peer_node.set_peer_connector(base_connector.clone());
+        recovered_node.set_peer_connector(flaky_connector.clone());
+        recovered_node.add_known_peer(peer_node.address())?;
+
+        let owner_cli = CliService::new(owner_node.clone());
+        owner_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let owner_server =
+            spawn_registered_p2p_server(owner_node.clone(), base_connector.as_ref()).await?;
+        let peer_server =
+            spawn_registered_p2p_server(peer_node.clone(), base_connector.as_ref()).await?;
+        let mut owner_to_peer = connect_p2p_client(
+            owner_node.clone(),
+            peer_node.clone(),
+            base_connector.as_ref(),
+        )
+        .await?;
+        owner_to_peer
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                requester_content: Some(owner_node.responder_content()?.unwrap()),
+            })
+            .await?;
+
+        let update = recovered_node.recover_content_update().await?;
+        assert!(update.recovered_most_recent_version);
+        assert!(flaky_connector.dial_count() >= 4);
+        assert_eq!(
+            recovered_node.with_store(|store| store.get_file("alpha.txt"))?,
+            b"alpha-body".to_vec()
+        );
+
+        owner_server.abort();
+        peer_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recover_content_retries_transient_download_failure() -> anyhow::Result<()> {
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner_node = Arc::new(Node::with_local_storage(
+            "recover-download-owner",
+            owner_filesystem,
+        )?);
+        let recovered_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let recovered_node = Arc::new(Node::with_local_storage(
+            "recover-download-owner",
+            recovered_filesystem,
+        )?);
+        let peer_identity = Node::new("recover-download-peer")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        recovered_node.set_peer_connector(connector.clone());
+        recovered_node.add_known_peer(peer_identity.address())?;
+
+        let owner_cli = CliService::new(owner_node.clone());
+        owner_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let owner_content = owner_node.responder_content()?.unwrap();
+        let owner_blob = owner_node.with_store(|store| store.current_blob())?;
+        let service_state = Arc::new(TransientDownloadState::new(owner_content, owner_blob));
+        let (endpoint, server) =
+            spawn_plain_peer_server(TransientDownloadPeerService::new(service_state.clone()))
+                .await?;
+        connector.register_peer(peer_identity.address(), &endpoint);
+
+        let update = recovered_node.recover_content_update().await?;
+        assert!(update.recovered_most_recent_version);
+        assert_eq!(service_state.download_call_count(), 2);
+        assert_eq!(
+            recovered_node.with_store(|store| store.get_file("alpha.txt"))?,
+            b"alpha-body".to_vec()
+        );
 
         server.abort();
         Ok(())
