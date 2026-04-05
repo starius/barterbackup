@@ -2097,6 +2097,20 @@ impl Node {
         &self,
         peer_onion: &str,
     ) -> Result<Vec<clirpc::CheckContractUpdate>, Status> {
+        self.retry_peer_operation(
+            peer_onion,
+            transport::PeerRetryPolicy::for_operation(transport::PeerOperation::Check),
+            || self.check_contract_updates_once(peer_onion),
+        )
+        .await
+    }
+
+    /// Perform one contract-check attempt against a peer without any outer
+    /// retry loop.
+    async fn check_contract_updates_once(
+        &self,
+        peer_onion: &str,
+    ) -> Result<Vec<clirpc::CheckContractUpdate>, Status> {
         if self.is_our_onion(peer_onion) {
             return Err(self.self_peer_error());
         }
@@ -2112,11 +2126,15 @@ impl Node {
 
         // Refresh the peer's advertised content before validating their copy of
         // our own revision.
-        let mut client = self.connect_peer_client(peer_onion).await?;
+        let policy = transport::PeerRetryPolicy::for_operation(transport::PeerOperation::Check);
+        let mut client = self
+            .connect_peer_client_with_timeout(peer_onion, policy.connect_timeout)
+            .await?;
         let revision = self
-            .peer_rpc(
+            .peer_rpc_with_timeout(
                 peer_onion,
                 "get content revision",
+                policy.rpc_timeout,
                 client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
             )
             .await?;
@@ -2183,9 +2201,10 @@ impl Node {
         let (section_offset, section_length) =
             self.sample_section(&peer_public_key, &our_content.content_id, local_blob.len());
         let download = self
-            .peer_rpc(
+            .peer_rpc_with_timeout(
                 peer_onion,
                 "download sampled section",
+                policy.rpc_timeout,
                 client.download(bbrpc::DownloadRequest {
                     content_id: our_content.content_id.clone(),
                     offset: i64::try_from(section_offset).unwrap_or(i64::MAX),
@@ -3311,6 +3330,123 @@ mod tests {
             _request: Request<bbrpc::DownloadRequest>,
         ) -> std::result::Result<Response<bbrpc::DownloadResponse>, Status> {
             Err(Status::unimplemented("download is not used in this test"))
+        }
+    }
+
+    /// TransientDownloadState controls one peer that fails the first sampled
+    /// download before returning valid content.
+    struct TransientDownloadState {
+        /// fail_first_download flips the first sampled download into a retryable error.
+        fail_first_download: AtomicBool,
+        /// download_call_count records how many sampled downloads were attempted.
+        download_call_count: AtomicUsize,
+        /// requester_content is the local revision the peer claims to store.
+        requester_content: bbrpc::ContentInfo,
+        /// blob is the exact encrypted content returned after the transient failure.
+        blob: Vec<u8>,
+    }
+
+    impl TransientDownloadState {
+        /// Create download state for one requester content revision and blob.
+        fn new(requester_content: bbrpc::ContentInfo, blob: Vec<u8>) -> Self {
+            Self {
+                fail_first_download: AtomicBool::new(true),
+                download_call_count: AtomicUsize::new(0),
+                requester_content,
+                blob,
+            }
+        }
+
+        /// Report how many sampled downloads the peer observed.
+        fn download_call_count(&self) -> usize {
+            self.download_call_count.load(Ordering::SeqCst)
+        }
+    }
+
+    /// TransientDownloadPeerService fails the first sampled download with a
+    /// retryable error and succeeds on the next attempt.
+    #[derive(Clone)]
+    struct TransientDownloadPeerService {
+        /// state stores the advertised revision and transient download behavior.
+        state: Arc<TransientDownloadState>,
+    }
+
+    impl TransientDownloadPeerService {
+        /// Create a service backed by shared transient download state.
+        fn new(state: Arc<TransientDownloadState>) -> Self {
+            Self { state }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl bbrpc::barter_backup_server_server::BarterBackupServer for TransientDownloadPeerService {
+        async fn health_check(
+            &self,
+            _request: Request<bbrpc::HealthCheckRequest>,
+        ) -> std::result::Result<Response<bbrpc::HealthCheckResponse>, Status> {
+            Ok(Response::new(bbrpc::HealthCheckResponse::default()))
+        }
+
+        async fn peer_exchange(
+            &self,
+            _request: Request<bbrpc::PeerExchangeRequest>,
+        ) -> std::result::Result<Response<bbrpc::PeerExchangeResponse>, Status> {
+            Err(Status::unimplemented(
+                "peer exchange is not used in this test",
+            ))
+        }
+
+        async fn get_content_revision(
+            &self,
+            _request: Request<bbrpc::GetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::GetContentRevisionResponse>, Status> {
+            Ok(Response::new(bbrpc::GetContentRevisionResponse {
+                requester_content: Some(self.state.requester_content.clone()),
+                requester_remaining_seconds: 0,
+                responder_content: None,
+                requester_latest_known_content: Some(self.state.requester_content.clone()),
+            }))
+        }
+
+        async fn set_content_revision(
+            &self,
+            _request: Request<bbrpc::SetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::SetContentRevisionResponse>, Status> {
+            Err(Status::unimplemented(
+                "set content revision is not used in this test",
+            ))
+        }
+
+        async fn download(
+            &self,
+            request: Request<bbrpc::DownloadRequest>,
+        ) -> std::result::Result<Response<bbrpc::DownloadResponse>, Status> {
+            self.state
+                .download_call_count
+                .fetch_add(1, Ordering::SeqCst);
+            if self.state.fail_first_download.swap(false, Ordering::SeqCst) {
+                return Err(Status::unavailable("transient sampled download failure"));
+            }
+            let request = request.into_inner();
+            if request.offset < 0 {
+                return Err(Status::invalid_argument("offset must be non-negative"));
+            }
+            let offset = usize::try_from(request.offset)
+                .map_err(|_| Status::invalid_argument("offset is too large"))?;
+            let sampled = self
+                .state
+                .blob
+                .get(offset..)
+                .ok_or_else(|| Status::invalid_argument("offset is too large"))?
+                .to_vec();
+
+            Ok(Response::new(bbrpc::DownloadResponse {
+                total_length: i64::try_from(self.state.blob.len()).unwrap_or(i64::MAX),
+                sha256: Sha256::digest(&self.state.blob).to_vec(),
+                section: Some(bbrpc::download_response::Section::RawBytes(
+                    bbrpc::RawBytes { value: sampled },
+                )),
+            }))
         }
     }
 
@@ -5013,6 +5149,66 @@ mod tests {
 
         requester_server.abort();
         responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_contract_retries_transient_download_without_double_scoring() -> anyhow::Result<()>
+    {
+        let requester_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage_and_clock(
+            "requester-check-retry",
+            requester_filesystem,
+            requester_clock.clone(),
+        )?);
+        let peer_identity = Node::new("check-retry-peer")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        requester_node.add_known_peer(peer_identity.address())?;
+
+        let requester_cli = CliService::new(requester_node.clone());
+        requester_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let requester_content = requester_node.responder_content()?.unwrap();
+        let requester_blob = requester_node.with_store(|store| store.current_blob())?;
+        let service_state = Arc::new(TransientDownloadState::new(
+            requester_content.clone(),
+            requester_blob,
+        ));
+        let (endpoint, server) =
+            spawn_plain_peer_server(TransientDownloadPeerService::new(service_state.clone()))
+                .await?;
+        connector.register_peer(peer_identity.address(), &endpoint);
+
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_identity.address())?;
+        requester_node.with_store(|store| {
+            store.set_peer_score(
+                peer_public_key.as_bytes(),
+                0,
+                i64::try_from(requester_clock.now().secs).unwrap_or(i64::MAX),
+            )
+        })?;
+
+        requester_clock.advance(Duration::from_secs(3_600));
+        let updates = requester_node
+            .check_contract_updates(peer_identity.address())
+            .await?;
+        assert_eq!(updates.last().map(|update| update.success), Some(true));
+        assert_eq!(service_state.download_call_count(), 2);
+        assert_eq!(
+            peer_score_seconds(requester_node.as_ref(), peer_identity.address())?,
+            3_600
+        );
+
+        server.abort();
         Ok(())
     }
 
