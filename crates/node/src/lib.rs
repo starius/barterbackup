@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use storage::{Filesystem, StorageError, Store};
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tonic::{Code, Response, Status};
@@ -846,6 +847,17 @@ impl Node {
 
     /// Connect to another peer using the configured outbound transport.
     async fn connect_peer_client(&self, peer_onion: &str) -> Result<transport::PeerClient, Status> {
+        self.connect_peer_client_with_timeout(peer_onion, transport::PEER_CONNECT_TIMEOUT)
+            .await
+    }
+
+    /// Connect to another peer using the configured outbound transport and one
+    /// explicit dial timeout.
+    async fn connect_peer_client_with_timeout(
+        &self,
+        peer_onion: &str,
+        connect_timeout: Duration,
+    ) -> Result<transport::PeerClient, Status> {
         let connector = self
             .peer_connector
             .lock()
@@ -853,7 +865,7 @@ impl Node {
             .clone()
             .ok_or_else(|| Status::failed_precondition("peer connector is not configured"))?;
         let client = tokio::time::timeout(
-            transport::PEER_CONNECT_TIMEOUT,
+            connect_timeout,
             connector.connect(peer_onion, &self.ed25519_keypair.secret),
         )
         .await
@@ -882,7 +894,22 @@ impl Node {
     where
         F: Future<Output = Result<Response<T>, tonic::Status>>,
     {
-        match tokio::time::timeout(transport::PEER_RPC_TIMEOUT, future).await {
+        self.peer_rpc_with_timeout(peer_onion, operation, transport::PEER_RPC_TIMEOUT, future)
+            .await
+    }
+
+    /// Run one peer RPC under one explicit timeout budget.
+    async fn peer_rpc_with_timeout<T, F>(
+        &self,
+        peer_onion: &str,
+        operation: &'static str,
+        rpc_timeout: Duration,
+        future: F,
+    ) -> Result<T, Status>
+    where
+        F: Future<Output = Result<Response<T>, tonic::Status>>,
+    {
+        match tokio::time::timeout(rpc_timeout, future).await {
             Ok(Ok(response)) => Ok(response.into_inner()),
             Ok(Err(error)) => Err(Status::new(
                 error.code(),
@@ -891,6 +918,37 @@ impl Node {
             Err(_) => Err(Status::deadline_exceeded(format!(
                 "{operation} from {peer_onion} timed out"
             ))),
+        }
+    }
+
+    /// Run one whole peer workflow with reconnect-and-retry under a shared
+    /// operation budget.
+    async fn retry_peer_operation<T, F, Fut>(
+        &self,
+        _peer_onion: &str,
+        policy: transport::PeerRetryPolicy,
+        mut operation: F,
+    ) -> Result<T, Status>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, Status>>,
+    {
+        let started_at = tokio::time::Instant::now();
+        let mut retry_attempt = 0u32;
+
+        loop {
+            match operation().await {
+                Ok(result) => return Ok(result),
+                Err(error) if transport::is_retryable_peer_status(&error) => {
+                    retry_attempt = retry_attempt.saturating_add(1);
+                    let backoff = policy.backoff_for_attempt(retry_attempt);
+                    if started_at.elapsed().saturating_add(backoff) > policy.total_budget {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(backoff).await;
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
 
@@ -1903,6 +1961,20 @@ impl Node {
         &self,
         peer_onion: &str,
     ) -> Result<Vec<clirpc::ProposeContractUpdate>, Status> {
+        self.retry_peer_operation(
+            peer_onion,
+            transport::PeerRetryPolicy::for_operation(transport::PeerOperation::Proposal),
+            || self.propose_contract_updates_once(peer_onion),
+        )
+        .await
+    }
+
+    /// Perform one proposal attempt against a peer without any outer retry
+    /// loop.
+    async fn propose_contract_updates_once(
+        &self,
+        peer_onion: &str,
+    ) -> Result<Vec<clirpc::ProposeContractUpdate>, Status> {
         if self.is_our_onion(peer_onion) {
             return Err(self.self_peer_error());
         }
@@ -1919,11 +1991,15 @@ impl Node {
 
         // Query the peer's live contract state before deciding what needs to
         // be synchronized in either direction.
-        let mut client = self.connect_peer_client(peer_onion).await?;
+        let policy = transport::PeerRetryPolicy::for_operation(transport::PeerOperation::Proposal);
+        let mut client = self
+            .connect_peer_client_with_timeout(peer_onion, policy.connect_timeout)
+            .await?;
         let revision = self
-            .peer_rpc(
+            .peer_rpc_with_timeout(
                 peer_onion,
                 "get content revision",
+                policy.rpc_timeout,
                 client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
             )
             .await?;
@@ -1974,9 +2050,10 @@ impl Node {
             .as_ref()
             .map(|content_info| content_info.content_id.clone());
         if peer_has_our_content != desired_content_id {
-            self.peer_rpc(
+            self.peer_rpc_with_timeout(
                 peer_onion,
                 "set content revision",
+                policy.rpc_timeout,
                 client.set_content_revision(bbrpc::SetContentRevisionRequest {
                     requester_content: our_content.clone(),
                 }),
@@ -2924,8 +3001,8 @@ mod tests {
         BarterBackupClient, BarterBackupClientServer,
     };
     use std::collections::BTreeMap;
-    use std::sync::Arc;
-    use std::sync::RwLock;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, RwLock};
     use std::time::Duration;
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::transport::Endpoint;
@@ -3089,6 +3166,151 @@ mod tests {
             Ok(transport::configure_peer_client(
                 transport::PeerClient::new(channel),
             ))
+        }
+    }
+
+    /// FlakyPeerConnector fails the first few dials before delegating to a real
+    /// connector.
+    struct FlakyPeerConnector {
+        /// delegate handles successful connections once the injected failures end.
+        delegate: Arc<dyn PeerConnector>,
+        /// remaining_failures counts how many dial attempts should still fail.
+        remaining_failures: AtomicUsize,
+        /// dial_count records how many total dial attempts were made.
+        dial_count: AtomicUsize,
+    }
+
+    impl FlakyPeerConnector {
+        /// Create a connector that fails `remaining_failures` dial attempts.
+        fn new(delegate: Arc<dyn PeerConnector>, remaining_failures: usize) -> Self {
+            Self {
+                delegate,
+                remaining_failures: AtomicUsize::new(remaining_failures),
+                dial_count: AtomicUsize::new(0),
+            }
+        }
+
+        /// Report how many total dial attempts were made.
+        fn dial_count(&self) -> usize {
+            self.dial_count.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl PeerConnector for FlakyPeerConnector {
+        async fn connect(
+            &self,
+            peer_onion: &str,
+            client_private_key: &ed25519_dalek::SecretKey,
+        ) -> anyhow::Result<transport::PeerClient> {
+            self.dial_count.fetch_add(1, Ordering::SeqCst);
+            let remaining = self.remaining_failures.load(Ordering::SeqCst);
+            if remaining > 0 {
+                self.remaining_failures.fetch_sub(1, Ordering::SeqCst);
+                anyhow::bail!("temporary transport error");
+            }
+
+            self.delegate.connect(peer_onion, client_private_key).await
+        }
+    }
+
+    /// TransientSetAckState tracks one peer's requester-content state for
+    /// ambiguous `SetContentRevision` retries.
+    #[derive(Default)]
+    struct TransientSetAckState {
+        /// requester_content records the latest requester content accepted.
+        requester_content: Mutex<Option<bbrpc::ContentInfo>>,
+        /// fail_first_set flips one applied set operation into a retryable error.
+        fail_first_set: AtomicBool,
+        /// set_call_count records how many set requests the service observed.
+        set_call_count: AtomicUsize,
+    }
+
+    impl TransientSetAckState {
+        /// Create state that fails the first set request after applying it.
+        fn new() -> Self {
+            Self {
+                requester_content: Mutex::new(None),
+                fail_first_set: AtomicBool::new(true),
+                set_call_count: AtomicUsize::new(0),
+            }
+        }
+
+        /// Return how many set requests the service observed.
+        fn set_call_count(&self) -> usize {
+            self.set_call_count.load(Ordering::SeqCst)
+        }
+
+        /// Return the latest requester content accepted by the service.
+        fn requester_content(&self) -> Option<bbrpc::ContentInfo> {
+            self.requester_content.lock().unwrap().clone()
+        }
+    }
+
+    /// TransientSetAckPeerService applies the first set request but returns a
+    /// retryable error so the caller must refresh live peer state.
+    #[derive(Clone)]
+    struct TransientSetAckPeerService {
+        /// state stores the applied requester revision and call counters.
+        state: Arc<TransientSetAckState>,
+    }
+
+    impl TransientSetAckPeerService {
+        /// Create a service backed by shared retry state.
+        fn new(state: Arc<TransientSetAckState>) -> Self {
+            Self { state }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl bbrpc::barter_backup_server_server::BarterBackupServer for TransientSetAckPeerService {
+        async fn health_check(
+            &self,
+            _request: Request<bbrpc::HealthCheckRequest>,
+        ) -> std::result::Result<Response<bbrpc::HealthCheckResponse>, Status> {
+            Ok(Response::new(bbrpc::HealthCheckResponse::default()))
+        }
+
+        async fn peer_exchange(
+            &self,
+            _request: Request<bbrpc::PeerExchangeRequest>,
+        ) -> std::result::Result<Response<bbrpc::PeerExchangeResponse>, Status> {
+            Err(Status::unimplemented(
+                "peer exchange is not used in this test",
+            ))
+        }
+
+        async fn get_content_revision(
+            &self,
+            _request: Request<bbrpc::GetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::GetContentRevisionResponse>, Status> {
+            Ok(Response::new(bbrpc::GetContentRevisionResponse {
+                requester_content: self.state.requester_content(),
+                requester_remaining_seconds: 0,
+                responder_content: None,
+                requester_latest_known_content: self.state.requester_content(),
+            }))
+        }
+
+        async fn set_content_revision(
+            &self,
+            request: Request<bbrpc::SetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::SetContentRevisionResponse>, Status> {
+            self.state.set_call_count.fetch_add(1, Ordering::SeqCst);
+            *self.state.requester_content.lock().unwrap() = request.into_inner().requester_content;
+
+            if self.state.fail_first_set.swap(false, Ordering::SeqCst) {
+                return Err(Status::unavailable("transient after apply"));
+            }
+
+            Ok(Response::new(bbrpc::SetContentRevisionResponse {}))
+        }
+
+        async fn download(
+            &self,
+            _request: Request<bbrpc::DownloadRequest>,
+        ) -> std::result::Result<Response<bbrpc::DownloadResponse>, Status> {
+            Err(Status::unimplemented("download is not used in this test"))
         }
     }
 
@@ -5025,6 +5247,90 @@ mod tests {
 
         left_server.abort();
         right_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn propose_contract_retries_after_transient_connect_failures() -> anyhow::Result<()> {
+        let left_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let left_node = Arc::new(Node::with_local_storage("left-retry", left_filesystem)?);
+        let right_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let right_node = Arc::new(Node::with_local_storage("right-retry", right_filesystem)?);
+        let base_connector = Arc::new(netmock::MockPeerConnector::new());
+        let flaky_connector = Arc::new(FlakyPeerConnector::new(base_connector.clone(), 2));
+        left_node.set_peer_connector(flaky_connector.clone());
+        right_node.set_peer_connector(base_connector.clone());
+
+        let left_cli = CliService::new(left_node.clone());
+        left_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "left.txt".to_string(),
+                    data: b"left-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let left_server =
+            spawn_registered_p2p_server(left_node.clone(), base_connector.as_ref()).await?;
+        let right_server =
+            spawn_registered_p2p_server(right_node.clone(), base_connector.as_ref()).await?;
+
+        let updates = left_node
+            .propose_contract_updates(right_node.address())
+            .await?;
+        assert_eq!(updates.last().map(|update| update.success), Some(true));
+        assert_eq!(flaky_connector.dial_count(), 3);
+
+        let left_content = left_node.responder_content()?.unwrap();
+        let left_public_key = keys::public_key_from_onion_hostname(left_node.address())?;
+        let right_peer_entry = right_node.with_store(|store| {
+            Ok(store
+                .peers()
+                .into_iter()
+                .find(|peer| peer.onion_pubkey.as_slice() == left_public_key.as_bytes()))
+        })?;
+        assert_eq!(
+            right_peer_entry
+                .and_then(|peer| peer.latest_cached_content.map(|content| content.content_id)),
+            Some(left_content.content_id)
+        );
+
+        left_server.abort();
+        right_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn propose_contract_refreshes_state_after_ambiguous_set_error() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage("proposal-refresh", filesystem)?);
+        let peer_identity = Node::new("proposal-refresh-peer")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        node.set_peer_connector(connector.clone());
+
+        let cli = CliService::new(node.clone());
+        cli.set_file(tonic::Request::new(clirpc::SetFileRequest {
+            file: Some(clirpc::File {
+                name: "alpha.txt".to_string(),
+                data: b"alpha-body".to_vec(),
+            }),
+        }))
+        .await?;
+
+        let service_state = Arc::new(TransientSetAckState::new());
+        let (endpoint, server) =
+            spawn_plain_peer_server(TransientSetAckPeerService::new(service_state.clone())).await?;
+        connector.register_peer(peer_identity.address(), &endpoint);
+
+        let updates = node
+            .propose_contract_updates(peer_identity.address())
+            .await?;
+        assert_eq!(updates.last().map(|update| update.success), Some(true));
+        assert_eq!(service_state.set_call_count(), 1);
+        assert_eq!(service_state.requester_content(), node.responder_content()?,);
+
+        server.abort();
         Ok(())
     }
 
