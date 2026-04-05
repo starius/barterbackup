@@ -355,6 +355,15 @@ fn ensure_matching_passwords(password: String, confirmation: String) -> Result<S
     Ok(password)
 }
 
+/// Finish one raw-mode password prompt with an explicit CRLF.
+fn finish_password_prompt_line(writer: &mut impl Write) -> Result<()> {
+    writer
+        .write_all(b"\r\n")
+        .context("finish password prompt")?;
+    writer.flush().context("flush password prompt")?;
+    Ok(())
+}
+
 /// Prompt for one password on a real terminal while masking input with `*`.
 fn prompt_password_with_prompt(prompt: &str) -> Result<String> {
     let mut stderr = io::stderr().lock();
@@ -375,7 +384,7 @@ fn prompt_password_with_prompt(prompt: &str) -> Result<String> {
 
         match key.code {
             KeyCode::Enter => {
-                writeln!(stderr).context("finish password prompt")?;
+                finish_password_prompt_line(&mut stderr)?;
                 break;
             }
             KeyCode::Backspace if password.pop().is_some() => {
@@ -383,7 +392,7 @@ fn prompt_password_with_prompt(prompt: &str) -> Result<String> {
                 stderr.flush().context("flush password erase")?;
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                writeln!(stderr).context("finish cancelled password prompt")?;
+                finish_password_prompt_line(&mut stderr)?;
                 bail!("password entry cancelled");
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1301,6 +1310,14 @@ mod tests {
             ensure_matching_passwords("seed phrase".to_string(), "other".to_string()).unwrap_err();
 
         assert_eq!(error.to_string(), "passwords do not match");
+    }
+
+    #[test]
+    fn password_prompt_line_finish_uses_crlf() {
+        let mut output = Vec::new();
+        finish_password_prompt_line(&mut output).unwrap();
+
+        assert_eq!(output, b"\r\n");
     }
 
     #[test]
