@@ -884,9 +884,10 @@ impl Node {
     {
         match tokio::time::timeout(transport::PEER_RPC_TIMEOUT, future).await {
             Ok(Ok(response)) => Ok(response.into_inner()),
-            Ok(Err(error)) => Err(Status::unavailable(format!(
-                "{operation} from {peer_onion}: {error}"
-            ))),
+            Ok(Err(error)) => Err(Status::new(
+                error.code(),
+                format!("{operation} from {peer_onion}: {}", error.message()),
+            )),
             Err(_) => Err(Status::deadline_exceeded(format!(
                 "{operation} from {peer_onion} timed out"
             ))),
@@ -4219,9 +4220,70 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(error.code(), Code::Unavailable);
+        assert_eq!(error.code(), Code::OutOfRange);
 
         server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_rpc_preserves_terminal_status_codes() -> anyhow::Result<()> {
+        let node = Arc::new(Node::new("peer-rpc-status-codes")?);
+
+        let not_found = node
+            .peer_rpc(
+                "peer.example.onion",
+                "download peer content",
+                std::future::ready(Err::<Response<bbrpc::HealthCheckResponse>, Status>(
+                    Status::not_found("content missing"),
+                )),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(not_found.code(), Code::NotFound);
+        assert_eq!(
+            not_found.message(),
+            "download peer content from peer.example.onion: content missing"
+        );
+
+        let invalid_argument = node
+            .peer_rpc(
+                "peer.example.onion",
+                "get content revision",
+                std::future::ready(Err::<Response<bbrpc::HealthCheckResponse>, Status>(
+                    Status::invalid_argument("bad request"),
+                )),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(invalid_argument.code(), Code::InvalidArgument);
+        assert_eq!(
+            invalid_argument.message(),
+            "get content revision from peer.example.onion: bad request"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_rpc_timeout_remains_deadline_exceeded() -> anyhow::Result<()> {
+        let node = Arc::new(Node::new("peer-rpc-timeout")?);
+
+        let error = node
+            .peer_rpc("peer.example.onion", "check contract", async move {
+                tokio::time::sleep(transport::PEER_RPC_TIMEOUT + Duration::from_millis(25)).await;
+                Ok::<Response<bbrpc::HealthCheckResponse>, Status>(Response::new(
+                    bbrpc::HealthCheckResponse::default(),
+                ))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::DeadlineExceeded);
+        assert_eq!(
+            error.message(),
+            "check contract from peer.example.onion timed out"
+        );
+
         Ok(())
     }
 
