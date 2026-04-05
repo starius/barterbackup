@@ -8,6 +8,7 @@ use node::{CliService, Node, P2pService};
 use protos::bbrpc::barter_backup_server_server::BarterBackupServerServer;
 use protos::clirpc;
 use protos::clirpc::barter_backup_client_server::{BarterBackupClient, BarterBackupClientServer};
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 #[cfg(unix)]
 use std::io::Write;
@@ -27,6 +28,7 @@ use tonic::{Response, Status};
 use tracing::{error, info, warn};
 
 const SELF_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+const BACKGROUND_FAILURE_MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
 
 /// Config configures the BarterBackup daemon process.
 #[derive(Clone, Debug, Parser)]
@@ -128,6 +130,77 @@ impl Default for MaintenanceConfig {
     fn default() -> Self {
         Self::with_interval(Duration::from_secs(60))
     }
+}
+
+/// BackgroundPeerFailure records one peer's background maintenance failure streak.
+#[derive(Clone)]
+struct BackgroundPeerFailure {
+    /// consecutive_failures is the current failure streak length.
+    consecutive_failures: u32,
+    /// next_retry_at is the earliest time background maintenance should retry.
+    next_retry_at: Instant,
+}
+
+/// BackgroundPeerFailures tracks per-peer backoff for background maintenance.
+#[derive(Clone, Default)]
+struct BackgroundPeerFailures {
+    /// peers stores one failure record per tracked peer onion.
+    peers: Arc<StdMutex<BTreeMap<String, BackgroundPeerFailure>>>,
+}
+
+impl BackgroundPeerFailures {
+    /// Return whether one peer is eligible for a background attempt at `now`.
+    fn should_attempt(&self, peer_onion: &str, now: Instant) -> bool {
+        self.peers
+            .lock()
+            .unwrap()
+            .get(peer_onion)
+            .is_none_or(|failure| now >= failure.next_retry_at)
+    }
+
+    /// Record one failed background attempt and return the new streak and backoff.
+    fn record_failure(
+        &self,
+        peer_onion: &str,
+        now: Instant,
+        maintenance_interval: Duration,
+    ) -> (u32, Duration) {
+        let mut peers = self.peers.lock().unwrap();
+        let failure = peers
+            .entry(peer_onion.to_string())
+            .or_insert(BackgroundPeerFailure {
+                consecutive_failures: 0,
+                next_retry_at: now,
+            });
+        failure.consecutive_failures = failure.consecutive_failures.saturating_add(1);
+        let backoff =
+            background_failure_backoff(maintenance_interval, failure.consecutive_failures);
+        failure.next_retry_at = now + backoff;
+        (failure.consecutive_failures, backoff)
+    }
+
+    /// Clear one peer's failure streak and return the cleared count, if any.
+    fn record_success(&self, peer_onion: &str) -> Option<u32> {
+        self.peers
+            .lock()
+            .unwrap()
+            .remove(peer_onion)
+            .map(|failure| failure.consecutive_failures)
+    }
+}
+
+/// Compute one exponential background retry delay from the maintenance interval.
+fn background_failure_backoff(
+    maintenance_interval: Duration,
+    consecutive_failures: u32,
+) -> Duration {
+    let base = maintenance_interval.max(Duration::from_millis(100));
+    let multiplier = 1u32
+        .checked_shl(consecutive_failures.saturating_sub(1))
+        .unwrap_or(u32::MAX);
+    base.checked_mul(multiplier)
+        .unwrap_or(BACKGROUND_FAILURE_MAX_BACKOFF)
+        .min(BACKGROUND_FAILURE_MAX_BACKOFF)
 }
 
 /// MaintenanceSchedule owns the live wait state for one maintenance loop.
@@ -1210,7 +1283,12 @@ where
 }
 
 /// Run one background maintenance pass for `node`.
-async fn run_maintenance_pass(node: &Node, shutdown: &CancellationToken) {
+async fn run_maintenance_pass(
+    node: &Node,
+    peer_failures: &BackgroundPeerFailures,
+    maintenance_interval: Duration,
+    shutdown: &CancellationToken,
+) {
     // Attempt recovery first so the local node restores its newest revision
     // before it starts proposing or checking contracts.
     let Some(recovery_result) =
@@ -1224,6 +1302,11 @@ async fn run_maintenance_pass(node: &Node, shutdown: &CancellationToken) {
 
     // Then refresh, propose, and check contracts for every known peer.
     for peer_onion in node.known_peers() {
+        let started_at = Instant::now();
+        if !peer_failures.should_attempt(&peer_onion, started_at) {
+            continue;
+        }
+
         let Some(proposal_result) =
             wait_for_maintenance_step(shutdown, node.propose_contract_updates(&peer_onion)).await
         else {
@@ -1232,7 +1315,15 @@ async fn run_maintenance_pass(node: &Node, shutdown: &CancellationToken) {
         match proposal_result {
             Ok(_) => {}
             Err(error) => {
-                warn!(peer = %peer_onion, %error, "background contract proposal failed");
+                let (consecutive_failures, retry_after) =
+                    peer_failures.record_failure(&peer_onion, started_at, maintenance_interval);
+                warn!(
+                    peer = %peer_onion,
+                    %error,
+                    consecutive_failures,
+                    retry_after_ms = retry_after.as_millis(),
+                    "background contract proposal failed"
+                );
                 continue;
             }
         }
@@ -1243,7 +1334,24 @@ async fn run_maintenance_pass(node: &Node, shutdown: &CancellationToken) {
             break;
         };
         if let Err(error) = check_result {
-            warn!(peer = %peer_onion, %error, "background contract check failed");
+            let (consecutive_failures, retry_after) =
+                peer_failures.record_failure(&peer_onion, started_at, maintenance_interval);
+            warn!(
+                peer = %peer_onion,
+                %error,
+                consecutive_failures,
+                retry_after_ms = retry_after.as_millis(),
+                "background contract check failed"
+            );
+            continue;
+        }
+
+        if let Some(cleared_failures) = peer_failures.record_success(&peer_onion) {
+            info!(
+                peer = %peer_onion,
+                cleared_failures,
+                "background peer maintenance recovered"
+            );
         }
     }
 }
@@ -1258,6 +1366,7 @@ async fn run_maintenance_loop(
     // Use one schedule for both recovery and contract maintenance for now.
     // The loop also wakes immediately after local mutations.
     let mut schedule = MaintenanceSchedule::new(&maintenance_config);
+    let peer_failures = BackgroundPeerFailures::default();
 
     loop {
         if !schedule
@@ -1267,7 +1376,13 @@ async fn run_maintenance_loop(
             break;
         }
 
-        run_maintenance_pass(node.as_ref(), &shutdown).await;
+        run_maintenance_pass(
+            node.as_ref(),
+            &peer_failures,
+            maintenance_config.interval,
+            &shutdown,
+        )
+        .await;
     }
 
     Ok(())
@@ -1951,6 +2066,60 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn background_failure_backoff_grows_and_caps() {
+        assert_eq!(
+            background_failure_backoff(Duration::from_millis(50), 1),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            background_failure_backoff(Duration::from_secs(5), 1),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            background_failure_backoff(Duration::from_secs(5), 2),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            background_failure_backoff(Duration::from_secs(5), 3),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            background_failure_backoff(Duration::from_secs(600), 10),
+            BACKGROUND_FAILURE_MAX_BACKOFF
+        );
+    }
+
+    #[test]
+    fn background_peer_failures_delay_retries_until_success() {
+        let failures = BackgroundPeerFailures::default();
+        let peer = "peer.onion";
+        let started_at = Instant::now();
+
+        assert!(failures.should_attempt(peer, started_at));
+
+        let (first_streak, first_backoff) =
+            failures.record_failure(peer, started_at, Duration::from_secs(5));
+        assert_eq!(first_streak, 1);
+        assert_eq!(first_backoff, Duration::from_secs(5));
+        assert!(!failures.should_attempt(peer, started_at + Duration::from_secs(4)));
+        assert!(failures.should_attempt(peer, started_at + Duration::from_secs(5)));
+
+        let (second_streak, second_backoff) = failures.record_failure(
+            peer,
+            started_at + Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+        assert_eq!(second_streak, 2);
+        assert_eq!(second_backoff, Duration::from_secs(10));
+        assert!(!failures.should_attempt(peer, started_at + Duration::from_secs(14)));
+        assert!(failures.should_attempt(peer, started_at + Duration::from_secs(15)));
+
+        assert_eq!(failures.record_success(peer), Some(2));
+        assert!(failures.should_attempt(peer, started_at));
+        assert_eq!(failures.record_success(peer), None);
     }
 
     #[tokio::test(flavor = "multi_thread")]
