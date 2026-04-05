@@ -3274,6 +3274,16 @@ mod tests {
         Ok(())
     }
 
+    /// Build deterministic master material for synthetic node tests.
+    fn test_master_priv(label: &str) -> [u8; 64] {
+        let first = Sha256::digest(format!("test-master:first:{label}").as_bytes());
+        let second = Sha256::digest(format!("test-master:second:{label}").as_bytes());
+        let mut master = [0u8; 64];
+        master[..32].copy_from_slice(first.as_slice());
+        master[32..].copy_from_slice(second.as_slice());
+        master
+    }
+
     /// Build one stored peer entry for priority-policy tests.
     fn test_peer(
         seed: &str,
@@ -3281,7 +3291,8 @@ mod tests {
         score_seconds: i64,
         first_contact_direction: i32,
     ) -> storedpb::Peer {
-        let identity = Node::new(seed).unwrap();
+        let master = test_master_priv(seed);
+        let identity = Node::new_for_tests_from_master(&master).unwrap();
 
         storedpb::Peer {
             onion_pubkey: identity.ed25519_keypair().public.to_bytes().to_vec(),
@@ -3431,7 +3442,8 @@ mod tests {
         let capacity = 8;
 
         for index in 0..capacity {
-            let inbound = Node::new(&format!("manual-capacity-inbound-{index}"))?;
+            let master = test_master_priv(&format!("manual-capacity-inbound-{index}"));
+            let inbound = Node::new_for_tests_from_master(&master)?;
             let inbound_public_key = keys::public_key_from_onion_hostname(inbound.address())?;
             node.track_peer_identity_with_capacity(
                 &inbound_public_key,
@@ -3442,7 +3454,8 @@ mod tests {
         }
         assert_eq!(node.known_peers().len(), capacity);
 
-        let manual_peer = Node::new("manual-capacity-good")?;
+        let manual_master = test_master_priv("manual-capacity-good");
+        let manual_peer = Node::new_for_tests_from_master(&manual_master)?;
         let manual_public_key = keys::public_key_from_onion_hostname(manual_peer.address())?;
         node.track_peer_identity_with_capacity(
             &manual_public_key,
@@ -3463,7 +3476,8 @@ mod tests {
         let node = Node::with_local_storage("eclipse-owner", filesystem)?;
         let capacity = 16;
 
-        let manual_peer = Node::new("eclipse-manual")?;
+        let manual_master = test_master_priv("eclipse-manual");
+        let manual_peer = Node::new_for_tests_from_master(&manual_master)?;
         let manual_public_key = keys::public_key_from_onion_hostname(manual_peer.address())?;
         node.track_peer_identity_with_capacity(
             &manual_public_key,
@@ -3472,7 +3486,8 @@ mod tests {
             capacity,
         )?;
 
-        let reserved_peer = Node::new("eclipse-reserved")?;
+        let reserved_master = test_master_priv("eclipse-reserved");
+        let reserved_peer = Node::new_for_tests_from_master(&reserved_master)?;
         let reserved_public_key = keys::public_key_from_onion_hostname(reserved_peer.address())?;
         node.track_peer_identity_with_capacity(
             &reserved_public_key,
@@ -3482,7 +3497,8 @@ mod tests {
         )?;
         node.with_store(|store| store.set_peer_score(reserved_public_key.as_bytes(), 100, 1))?;
 
-        let built_in_peer = Node::new("eclipse-built-in")?;
+        let built_in_master = test_master_priv("eclipse-built-in");
+        let built_in_peer = Node::new_for_tests_from_master(&built_in_master)?;
         let built_in_public_key = keys::public_key_from_onion_hostname(built_in_peer.address())?;
         node.track_peer_identity_with_capacity(
             &built_in_public_key,
@@ -3491,7 +3507,8 @@ mod tests {
             capacity,
         )?;
 
-        let outbound_peer = Node::new("eclipse-outbound")?;
+        let outbound_master = test_master_priv("eclipse-outbound");
+        let outbound_peer = Node::new_for_tests_from_master(&outbound_master)?;
         let outbound_public_key = keys::public_key_from_onion_hostname(outbound_peer.address())?;
         node.track_peer_identity_with_capacity(
             &outbound_public_key,
@@ -3501,7 +3518,8 @@ mod tests {
         )?;
 
         for index in 0..(capacity - 4) {
-            let inbound = Node::new(&format!("eclipse-inbound-{index}"))?;
+            let master = test_master_priv(&format!("eclipse-inbound-{index}"));
+            let inbound = Node::new_for_tests_from_master(&master)?;
             let inbound_public_key = keys::public_key_from_onion_hostname(inbound.address())?;
             node.track_peer_identity_with_capacity(
                 &inbound_public_key,
@@ -3513,7 +3531,8 @@ mod tests {
         assert_eq!(node.known_peers().len(), capacity);
 
         for index in 0..32 {
-            let inbound = Node::new(&format!("eclipse-extra-{index}"))?;
+            let master = test_master_priv(&format!("eclipse-extra-{index}"));
+            let inbound = Node::new_for_tests_from_master(&master)?;
             let inbound_public_key = keys::public_key_from_onion_hostname(inbound.address())?;
             let error = node
                 .track_peer_identity_with_capacity(
