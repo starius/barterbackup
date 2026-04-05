@@ -402,13 +402,10 @@ impl Node {
         filesystem: Option<Arc<dyn Filesystem>>,
         clock: Arc<dyn Clock>,
     ) -> Result<Self> {
-        let (keypair, public_key) =
-            keys::derive_ed25519_from_master(master_priv, "tor/onion/v3")?;
+        let (keypair, public_key) = keys::derive_ed25519_from_master(master_priv, "tor/onion/v3")?;
         let onion_address = keys::onion_hostname_from_public_key(&public_key);
         let store = filesystem
-            .map(|filesystem| {
-                Store::new_with_time_source(filesystem, master_priv, clock.clone())
-            })
+            .map(|filesystem| Store::new_with_time_source(filesystem, master_priv, clock.clone()))
             .transpose()?
             .map(Mutex::new);
         let built_in_peer_list = built_in_peers();
@@ -425,6 +422,7 @@ impl Node {
 
         if node.store.is_some() {
             node.trim_tracked_peers_to_capacity()?;
+            node.purge_self_peer_metadata()?;
             node.refresh_known_peers_from_store()?;
             for peer_onion in built_in_peer_list {
                 if let Err(error) =
@@ -470,6 +468,21 @@ impl Node {
         Ok(keys::onion_hostname_from_public_key(&public_key))
     }
 
+    /// Report whether `peer_onion` identifies the local node itself.
+    fn is_our_onion(&self, peer_onion: &str) -> bool {
+        peer_onion == self.address()
+    }
+
+    /// Report whether `peer_public_key` belongs to the local node itself.
+    fn is_our_public_key(&self, peer_public_key: &ed25519_dalek::PublicKey) -> bool {
+        peer_public_key == &self.ed25519_keypair.public
+    }
+
+    /// Return one clear error for self-peer contract attempts.
+    fn self_peer_error(&self) -> Status {
+        Status::failed_precondition("local node cannot act as its own peer")
+    }
+
     /// Return the tracked peer metadata currently persisted in the store.
     fn tracked_peers(&self) -> Result<Vec<storedpb::Peer>, Status> {
         self.with_store(|store| Ok(store.peers()))
@@ -489,8 +502,41 @@ impl Node {
         let known_peers = tracked_peers
             .into_iter()
             .filter_map(|peer| self.onion_from_public_key_bytes(&peer.onion_pubkey).ok())
+            .filter(|peer_onion| !self.is_our_onion(peer_onion))
             .collect::<BTreeSet<_>>();
         *self.known_peers.lock().unwrap() = known_peers;
+        Ok(())
+    }
+
+    /// Remove any stale persisted self-peer metadata left by older versions.
+    fn purge_self_peer_metadata(&self) -> Result<(), Status> {
+        let Some(store_mutex) = self.store.as_ref() else {
+            return Ok(());
+        };
+        let self_public_key = self.ed25519_keypair.public.to_bytes().to_vec();
+
+        let evicted_cached_content_id = {
+            let mut store = store_mutex.lock().unwrap();
+            let peers = store.peers();
+            let Some(peer) = peers
+                .into_iter()
+                .find(|peer| peer.onion_pubkey == self_public_key)
+            else {
+                return Ok(());
+            };
+
+            let evicted_cached_content_id =
+                peer_latest_cached_content(&peer).map(|content| content.content_id);
+            store
+                .remove_peer(&self_public_key)
+                .map_err(map_storage_error)?;
+            evicted_cached_content_id
+        };
+
+        if let Some(content_id) = evicted_cached_content_id {
+            self.remove_unused_foreign_blob(&content_id)?;
+        }
+
         Ok(())
     }
 
@@ -654,6 +700,9 @@ impl Node {
 
     /// Add a peer onion hostname to the configured peer set with an explicit origin.
     fn add_known_peer_with_origin(&self, peer_onion: &str, origin: i32) -> Result<(), Status> {
+        if self.is_our_onion(peer_onion) {
+            return Err(self.self_peer_error());
+        }
         let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
             .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
         self.track_peer_identity(
@@ -810,13 +859,15 @@ impl Node {
         .await
         .map_err(|_| Status::deadline_exceeded("connect peer timed out"))?
         .map_err(|error| Status::unavailable(format!("connect peer: {error}")))?;
-        let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
-            .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
-        self.track_peer_identity(
-            &peer_public_key,
-            peer_origin_code(false, false),
-            storedpb::FirstContactDirection::Outbound as i32,
-        )?;
+        if !self.is_our_onion(peer_onion) {
+            let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
+                .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+            self.track_peer_identity(
+                &peer_public_key,
+                peer_origin_code(false, false),
+                storedpb::FirstContactDirection::Outbound as i32,
+            )?;
+        }
 
         Ok(transport::configure_peer_client(client))
     }
@@ -1699,6 +1750,9 @@ impl Node {
         let mut offline_peers = Vec::new();
 
         for peer_onion in self.known_peers() {
+            if self.is_our_onion(&peer_onion) {
+                continue;
+            }
             let is_online = match self.connect_peer_client(&peer_onion).await {
                 Ok(mut client) => client
                     .health_check(bbrpc::HealthCheckRequest {})
@@ -1728,6 +1782,9 @@ impl Node {
         let mut contracts = Vec::new();
 
         for peer_onion in self.known_peers() {
+            if self.is_our_onion(&peer_onion) {
+                continue;
+            }
             let peer_public_key = match keys::public_key_from_onion_hostname(&peer_onion) {
                 Ok(peer_public_key) => peer_public_key,
                 Err(_) => continue,
@@ -1845,6 +1902,9 @@ impl Node {
         &self,
         peer_onion: &str,
     ) -> Result<Vec<clirpc::ProposeContractUpdate>, Status> {
+        if self.is_our_onion(peer_onion) {
+            return Err(self.self_peer_error());
+        }
         let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
             .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
         let mut updates = vec![clirpc::ProposeContractUpdate {
@@ -1959,6 +2019,9 @@ impl Node {
         &self,
         peer_onion: &str,
     ) -> Result<Vec<clirpc::CheckContractUpdate>, Status> {
+        if self.is_our_onion(peer_onion) {
+            return Err(self.self_peer_error());
+        }
         let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
             .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
         let mut updates = vec![clirpc::CheckContractUpdate {
@@ -2111,6 +2174,9 @@ impl Node {
         // Ask every known peer which version of our content it knows about and
         // which version it can actually serve right now.
         for peer_onion in self.known_peers() {
+            if self.is_our_onion(&peer_onion) {
+                continue;
+            }
             let mut client = match self.connect_peer_client(&peer_onion).await {
                 Ok(client) => client,
                 Err(_) => continue,
@@ -2656,6 +2722,9 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         request: tonic::Request<bbrpc::PeerExchangeRequest>,
     ) -> Result<tonic::Response<bbrpc::PeerExchangeResponse>, tonic::Status> {
         let peer_identity = self.node.peer_identity_from_request(&request)?;
+        if self.node.is_our_public_key(&peer_identity.public_key) {
+            return Err(self.node.self_peer_error());
+        }
         self.node.track_peer_identity(
             &peer_identity.public_key,
             peer_origin_code(false, false),
@@ -2698,6 +2767,9 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
     ) -> Result<tonic::Response<bbrpc::GetContentRevisionResponse>, tonic::Status> {
         let peer_identity = self.node.peer_identity_from_request(&request).ok();
         if let Some(peer_identity) = peer_identity.as_ref() {
+            if self.node.is_our_public_key(&peer_identity.public_key) {
+                return Err(self.node.self_peer_error());
+            }
             self.node.track_peer_identity(
                 &peer_identity.public_key,
                 peer_origin_code(false, false),
@@ -2730,6 +2802,9 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         request: tonic::Request<bbrpc::SetContentRevisionRequest>,
     ) -> Result<tonic::Response<bbrpc::SetContentRevisionResponse>, tonic::Status> {
         let peer_identity = self.node.peer_identity_from_request(&request)?;
+        if self.node.is_our_public_key(&peer_identity.public_key) {
+            return Err(self.node.self_peer_error());
+        }
         self.node.track_peer_identity(
             &peer_identity.public_key,
             peer_origin_code(false, false),
@@ -2757,6 +2832,9 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
     ) -> Result<tonic::Response<bbrpc::DownloadResponse>, tonic::Status> {
         let peer_identity = self.node.peer_identity_from_request(&request).ok();
         if let Some(peer_identity) = peer_identity.as_ref() {
+            if self.node.is_our_public_key(&peer_identity.public_key) {
+                return Err(self.node.self_peer_error());
+            }
             self.node.track_peer_identity(
                 &peer_identity.public_key,
                 peer_origin_code(false, false),
@@ -3146,6 +3224,23 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn self_health_check_does_not_track_the_local_node() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage("self-health", filesystem)?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        node.set_peer_connector(connector.clone());
+        let server = spawn_registered_p2p_server(node.clone(), connector.as_ref()).await?;
+
+        let response = node.self_peer_health_check().await?;
+        assert_eq!(response.client_onion, node.address());
+        assert_eq!(response.server_onion, node.address());
+        assert!(node.known_peers().is_empty());
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn local_file_rpc_round_trip_uses_encrypted_store() -> anyhow::Result<()> {
         let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let node = Arc::new(Node::with_local_storage("password", filesystem)?);
@@ -3235,6 +3330,53 @@ mod tests {
             persisted_peer.map(|peer| peer.origin),
             Some(storedpb::PeerOrigin::Manual as i32)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn add_known_peer_rejects_our_own_onion() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Node::with_local_storage("self-peer", filesystem)?;
+        let error = node.add_known_peer(node.address()).unwrap_err();
+
+        assert_eq!(error.code(), Code::FailedPrecondition);
+        assert_eq!(error.message(), "local node cannot act as its own peer");
+        Ok(())
+    }
+
+    #[test]
+    fn restart_prunes_stale_self_peer_metadata() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let first = Node::with_local_storage("self-prune", filesystem.clone())?;
+        let self_public_key = first.ed25519_keypair().public.to_bytes().to_vec();
+        first.with_store(|store| {
+            store.ensure_peer_with_origin(&self_public_key, storedpb::PeerOrigin::Manual as i32)?;
+            Ok(())
+        })?;
+
+        let reloaded = Node::with_local_storage("self-prune", filesystem)?;
+        assert!(reloaded.known_peers().is_empty());
+        let persisted_self = reloaded.with_store(|store| {
+            Ok(store
+                .peers()
+                .into_iter()
+                .find(|peer| peer.onion_pubkey == self_public_key))
+        })?;
+        assert!(persisted_self.is_none());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn propose_contract_rejects_the_local_node_as_peer() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Node::with_local_storage("self-propose", filesystem)?;
+        let error = node
+            .propose_contract_updates(node.address())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), Code::FailedPrecondition);
+        assert_eq!(error.message(), "local node cannot act as its own peer");
         Ok(())
     }
 
@@ -3847,6 +3989,28 @@ mod tests {
 
         requester_server.abort();
         responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_content_revision_rejects_the_local_node_as_peer() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage("self-set-content", filesystem)?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        node.set_peer_connector(connector.clone());
+        let server = spawn_registered_p2p_server(node.clone(), connector.as_ref()).await?;
+        let mut client = connect_p2p_client(node.clone(), node.clone(), connector.as_ref()).await?;
+
+        let error = client
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                requester_content: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::FailedPrecondition);
+        assert_eq!(error.message(), "local node cannot act as its own peer");
+
+        server.abort();
         Ok(())
     }
 
