@@ -6,9 +6,9 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use dirs::home_dir;
 use futures_util::TryStreamExt;
@@ -22,8 +22,8 @@ use protos::clirpc::{
 };
 use tlsutil::{connect_pinned_channel, read_keys};
 use tokio::time::sleep;
-use tonic::transport::Channel;
 use tonic::Code;
+use tonic::transport::Channel;
 
 /// DEFAULT_DAEMON_ADDR is the default local daemon address.
 pub const DEFAULT_DAEMON_ADDR: &str = "https://127.0.0.1:9911";
@@ -216,7 +216,7 @@ async fn run_parsed(args: Args) -> Result<()> {
             wait_seconds,
             password,
         } => {
-            let password = resolve_main_password(password, password_stdin)?;
+            let password = resolve_init_password(password, password_stdin)?;
             init(
                 &args.daemon_addr,
                 &password,
@@ -292,6 +292,26 @@ fn resolve_main_password(password: Option<String>, password_stdin: bool) -> Resu
     bail!("main password is required; use --password-stdin when piping it")
 }
 
+/// Read one init password from the selected source, confirming terminal input.
+fn resolve_init_password(password: Option<String>, password_stdin: bool) -> Result<String> {
+    if password_stdin {
+        if password.is_some() {
+            bail!("pass the password either as an argument or via --password-stdin");
+        }
+        return read_password_from_reader(&mut io::stdin());
+    }
+
+    if let Some(password) = password {
+        return normalize_main_password(password);
+    }
+
+    if io::stdin().is_terminal() {
+        return prompt_new_password_from_terminal();
+    }
+
+    bail!("main password is required; use --password-stdin when piping it")
+}
+
 /// Normalize one main-password input by trimming trailing whitespace.
 fn normalize_main_password(password: String) -> Result<String> {
     let password = password.trim_end_matches(char::is_whitespace).to_string();
@@ -317,8 +337,28 @@ fn decode_content_id_hex(content_id: &str) -> Result<Vec<u8>> {
 
 /// Prompt for a password on a real terminal while masking input with `*`.
 fn prompt_password_from_terminal() -> Result<String> {
+    prompt_password_with_prompt("Password: ")
+}
+
+/// Prompt for a new password twice on a real terminal.
+fn prompt_new_password_from_terminal() -> Result<String> {
+    let password = prompt_password_with_prompt("Password: ")?;
+    let confirmation = prompt_password_with_prompt("Repeat password: ")?;
+    ensure_matching_passwords(password, confirmation)
+}
+
+/// Return `password` only when the confirmation matches exactly.
+fn ensure_matching_passwords(password: String, confirmation: String) -> Result<String> {
+    if password != confirmation {
+        bail!("passwords do not match");
+    }
+    Ok(password)
+}
+
+/// Prompt for one password on a real terminal while masking input with `*`.
+fn prompt_password_with_prompt(prompt: &str) -> Result<String> {
     let mut stderr = io::stderr().lock();
-    write!(stderr, "Password: ").context("write password prompt")?;
+    write!(stderr, "{prompt}").context("write password prompt")?;
     stderr.flush().context("flush password prompt")?;
 
     let _raw_mode = RawModeGuard::new()?;
@@ -1247,6 +1287,23 @@ mod tests {
     }
 
     #[test]
+    fn password_confirmation_accepts_matching_values() {
+        let password =
+            ensure_matching_passwords("seed phrase".to_string(), "seed phrase".to_string())
+                .unwrap();
+
+        assert_eq!(password, "seed phrase");
+    }
+
+    #[test]
+    fn password_confirmation_rejects_mismatched_values() {
+        let error =
+            ensure_matching_passwords("seed phrase".to_string(), "other".to_string()).unwrap_err();
+
+        assert_eq!(error.to_string(), "passwords do not match");
+    }
+
+    #[test]
     fn checked_checkout_target_rejects_path_components() {
         let out_dir = Path::new("/tmp/out");
 
@@ -1473,23 +1530,33 @@ mod tests {
 
         let lines = format_storage_config_response(&response);
 
-        assert!(lines
-            .iter()
-            .any(|line| line == "allocated_storage_for_peers: 1024"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "allocated_storage_for_peers: 1024")
+        );
         assert!(lines.iter().any(|line| line == "min_replicas: 3"));
-        assert!(lines
-            .iter()
-            .any(|line| line == "online_peers_storage_obligations_bytes: 10"));
-        assert!(lines
-            .iter()
-            .any(|line| line == "offline_peers_storage_obligations_bytes: 20"));
-        assert!(lines
-            .iter()
-            .any(|line| line == "expired_offline_peers_storage_obligations_bytes: 5"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "online_peers_storage_obligations_bytes: 10")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "offline_peers_storage_obligations_bytes: 20")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "expired_offline_peers_storage_obligations_bytes: 5")
+        );
         assert!(lines.iter().any(|line| line == "our_content_bytes: 30"));
-        assert!(lines
-            .iter()
-            .any(|line| line == "maximum_peer_content_accepted_bytes: 40"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "maximum_peer_content_accepted_bytes: 40")
+        );
     }
 
     #[test]
@@ -1602,10 +1669,12 @@ mod tests {
         );
 
         let recover_updates = recover_content_with_client(&mut recovered_client).await?;
-        assert!(recover_updates
-            .last()
-            .map(|update| update.recovered_most_recent_version)
-            .unwrap_or(false));
+        assert!(
+            recover_updates
+                .last()
+                .map(|update| update.recovered_most_recent_version)
+                .unwrap_or(false)
+        );
         let recovered = get_file_with_client(&mut recovered_client, "local.txt").await?;
         assert_eq!(recovered, b"local-body".to_vec());
 
