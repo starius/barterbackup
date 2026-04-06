@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use dirs::home_dir;
@@ -16,9 +16,10 @@ use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
 use protos::clirpc::{
     CheckContractRequest, CheckoutRevisionRequest, ConnectPeerRequest, DeleteFileRequest,
     ExportBuiltInPeersRequest, File, GetContractsRequest, GetFileRequest, GetStorageConfigRequest,
-    InitRequest, ListConflictsRequest, ListFilesRequest, ProposeContractRequest,
-    RecoverContentRequest, ResolveConflictRequest, SetFileRequest, SetStorageConfigRequest,
-    StateRequest, StateResponse, StopRequest, StorageConfig, UnlockRequest,
+    InitRequest, ListConflictsRequest, ListFilesRequest, PeerInfo, PeerStatus, PeersRequest,
+    PeersResponse, ProposeContractRequest, RecoverContentRequest, ResolveConflictRequest,
+    SetFileRequest, SetStorageConfigRequest, StateRequest, StateResponse, StopRequest,
+    StorageConfig, UnlockRequest,
 };
 use tlsutil::{connect_pinned_channel, read_keys};
 use tokio::time::sleep;
@@ -167,8 +168,21 @@ enum Command {
         onion_service_id: String,
     },
 
-    /// Print the daemon's current known peer list.
-    ConnectedPeers,
+    /// Print the daemon's current peer inventory.
+    #[command(alias = "connected-peers")]
+    Peers {
+        /// status filters peers by current local transport state.
+        #[arg(long, value_enum)]
+        status: Vec<PeerStatusFilter>,
+
+        /// with_contract keeps only peers with persisted contract state.
+        #[arg(long, conflicts_with = "without_contract")]
+        with_contract: bool,
+
+        /// without_contract keeps only peers without persisted contract state.
+        #[arg(long, conflicts_with = "with_contract")]
+        without_contract: bool,
+    },
 
     /// Print the Rust source file for the compiled built-in peer list.
     #[command(hide = true)]
@@ -225,6 +239,58 @@ enum Command {
 
 /// RawModeGuard restores the terminal mode after password entry.
 struct RawModeGuard;
+
+/// PeerStatusFilter selects which peer states to print.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PeerStatusFilter {
+    /// Connected peers still have an open cached outbound client.
+    Connected,
+    /// Online peers were last observed live but are not connected now.
+    Online,
+    /// Offline peers were last observed unreachable or have never been seen live.
+    Offline,
+}
+
+/// PeerListFilter controls CLI-side peer inventory filtering.
+#[derive(Clone, Debug, Default)]
+struct PeerListFilter {
+    /// statuses restricts the accepted current peer states when non-empty.
+    statuses: Vec<PeerStatusFilter>,
+    /// has_contract restricts the accepted contract state when set.
+    has_contract: Option<bool>,
+}
+
+impl PeerListFilter {
+    /// Build one peer filter from parsed CLI flags.
+    fn new(statuses: Vec<PeerStatusFilter>, with_contract: bool, without_contract: bool) -> Self {
+        Self {
+            statuses,
+            has_contract: if with_contract {
+                Some(true)
+            } else if without_contract {
+                Some(false)
+            } else {
+                None
+            },
+        }
+    }
+
+    /// Return whether one peer info entry matches this filter.
+    fn matches(&self, peer: &PeerInfo) -> bool {
+        if let Some(has_contract) = self.has_contract {
+            if peer.has_contract != has_contract {
+                return false;
+            }
+        }
+        if self.statuses.is_empty() {
+            return true;
+        }
+
+        self.statuses
+            .iter()
+            .any(|status| peer_status_matches_filter(peer, *status))
+    }
+}
 
 impl RawModeGuard {
     /// Enable terminal raw mode and return a guard that disables it on drop.
@@ -287,7 +353,17 @@ async fn run_parsed(args: Args) -> Result<()> {
         Command::GetFile { name, out } => get_file(&target, &name, out.as_deref()).await,
         Command::DeleteFile { name } => delete_file(&target, &name).await,
         Command::ConnectPeer { onion_service_id } => connect_peer(&target, &onion_service_id).await,
-        Command::ConnectedPeers => connected_peers(&target).await,
+        Command::Peers {
+            status,
+            with_contract,
+            without_contract,
+        } => {
+            peers(
+                &target,
+                PeerListFilter::new(status, with_contract, without_contract),
+            )
+            .await
+        }
         Command::ExportBuiltInPeers => export_built_in_peers(&target).await,
         Command::ListConflicts => list_conflicts(&target).await,
         Command::CheckoutRevision {
@@ -585,11 +661,9 @@ async fn connect_peer(target: &LocalCliTarget, onion_service_id: &str) -> Result
 }
 
 /// Print the current configured peers.
-async fn connected_peers(target: &LocalCliTarget) -> Result<()> {
+async fn peers(target: &LocalCliTarget, filter: PeerListFilter) -> Result<()> {
     let mut client = connect_client(target).await?;
-    for line in
-        format_connected_peers_response(&connected_peers_response_with_client(&mut client).await?)
-    {
+    for line in format_peers_response(&peers_response_with_client(&mut client).await?, &filter) {
         println!("{line}");
     }
     Ok(())
@@ -691,23 +765,32 @@ async fn get_contracts(target: &LocalCliTarget) -> Result<()> {
     Ok(())
 }
 
-/// Format one connected-peer response for CLI output.
-fn format_connected_peers_response(
-    response: &protos::clirpc::ConnectedPeersResponse,
-) -> Vec<String> {
+/// Format one peer-inventory response for CLI output.
+fn format_peers_response(response: &PeersResponse, filter: &PeerListFilter) -> Vec<String> {
     let mut lines = Vec::new();
-    push_peer_group_lines(&mut lines, "connected", &response.connected_peers);
-    push_peer_group_lines(
-        &mut lines,
-        "online_not_connected",
-        &response.online_not_connected_peers,
-    );
-    push_peer_group_lines(&mut lines, "offline", &response.offline_peers);
+    let mut with_contract = Vec::new();
+    let mut online = Vec::new();
+    let mut offline = Vec::new();
+
+    for peer in response.peers.iter().filter(|peer| filter.matches(peer)) {
+        let line = format_peer_info_line(peer);
+        if peer.has_contract {
+            with_contract.push(line);
+        } else if peer_info_status(peer) == PeerStatus::Offline {
+            offline.push(line);
+        } else {
+            online.push(line);
+        }
+    }
+
+    push_peer_inventory_group_lines(&mut lines, "with_contract", &with_contract);
+    push_peer_inventory_group_lines(&mut lines, "online", &online);
+    push_peer_inventory_group_lines(&mut lines, "offline", &offline);
     lines
 }
 
-/// Append one labeled peer group to the CLI output.
-fn push_peer_group_lines(lines: &mut Vec<String>, label: &str, peers: &[protos::clirpc::Peer]) {
+/// Append one labeled peer-inventory group to the CLI output.
+fn push_peer_inventory_group_lines(lines: &mut Vec<String>, label: &str, peers: &[String]) {
     lines.push(format!("{label}: {}", peers.len()));
     if peers.is_empty() {
         lines.push("  (none)".to_string());
@@ -715,8 +798,55 @@ fn push_peer_group_lines(lines: &mut Vec<String>, label: &str, peers: &[protos::
     }
 
     for peer in peers {
-        lines.push(format!("  {}", peer.onion_service_id));
+        lines.push(format!("  {peer}"));
     }
+}
+
+/// Return the decoded peer status, defaulting unknown states to offline.
+fn peer_info_status(peer: &PeerInfo) -> PeerStatus {
+    PeerStatus::try_from(peer.status).unwrap_or(PeerStatus::Offline)
+}
+
+/// Return whether one peer matches the requested CLI status filter.
+fn peer_status_matches_filter(peer: &PeerInfo, filter: PeerStatusFilter) -> bool {
+    matches!(
+        (peer_info_status(peer), filter),
+        (PeerStatus::Connected, PeerStatusFilter::Connected)
+            | (PeerStatus::Online, PeerStatusFilter::Online)
+            | (PeerStatus::Offline, PeerStatusFilter::Offline)
+    )
+}
+
+/// Format one peer inventory entry for human CLI output.
+fn format_peer_info_line(peer: &PeerInfo) -> String {
+    let onion_service_id = peer
+        .peer
+        .as_ref()
+        .map(|peer| peer.onion_service_id.as_str())
+        .unwrap_or("");
+    let status = match peer_info_status(peer) {
+        PeerStatus::Connected => "connected",
+        PeerStatus::Online => "online",
+        PeerStatus::Offline | PeerStatus::Unknown => "offline",
+    };
+    let last_live_at = if peer.last_live_at > 0 {
+        peer.last_live_at.to_string()
+    } else {
+        "never".to_string()
+    };
+
+    format!(
+        "peer={} status={} score_seconds={} score_measured_at={} stored_content_bytes={} latest_known_content_length={} latest_cached_content_length={} stale_cache={} last_live_at={}",
+        onion_service_id,
+        status,
+        peer.score_seconds,
+        peer.score_measured_at,
+        peer.stored_content_bytes,
+        peer.latest_known_content_length,
+        peer.latest_cached_content_length,
+        peer.stale_cache,
+        last_live_at
+    )
 }
 
 /// Format one storage-config response for CLI output.
@@ -1205,25 +1335,22 @@ pub async fn connect_peer_with_client(
     Ok(())
 }
 
-/// Query the configured peer list through an already connected client.
-pub async fn connected_peers_response_with_client(
+/// Query the current peer inventory through an already connected client.
+pub async fn peers_response_with_client(
     client: &mut BarterBackupClientClient<Channel>,
-) -> Result<protos::clirpc::ConnectedPeersResponse> {
-    Ok(client
-        .connected_peers(protos::clirpc::ConnectedPeersRequest {})
-        .await?
-        .into_inner())
+) -> Result<PeersResponse> {
+    Ok(client.peers(PeersRequest {}).await?.into_inner())
 }
 
-/// Query the configured connected-peer onion list through an already connected client.
-pub async fn connected_peers_with_client(
+/// Query the current peer onion list through an already connected client.
+pub async fn peers_with_client(
     client: &mut BarterBackupClientClient<Channel>,
 ) -> Result<Vec<String>> {
-    let response = connected_peers_response_with_client(client).await?;
+    let response = peers_response_with_client(client).await?;
     Ok(response
-        .connected_peers
+        .peers
         .into_iter()
-        .map(|peer| peer.onion_service_id)
+        .filter_map(|peer| peer.peer.map(|peer| peer.onion_service_id))
         .collect())
 }
 
@@ -1754,7 +1881,7 @@ mod tests {
 
         connect_peer_with_client(&mut client, peer_a.address()).await?;
         connect_peer_with_client(&mut client, peer_b.address()).await?;
-        let peers = connected_peers_with_client(&mut client).await?;
+        let peers = peers_with_client(&mut client).await?;
         assert_eq!(
             peers,
             vec![peer_a.address().to_string(), peer_b.address().to_string()]
@@ -1778,25 +1905,99 @@ mod tests {
     }
 
     #[test]
-    fn connected_peer_output_includes_all_groups() {
-        let response = protos::clirpc::ConnectedPeersResponse {
-            connected_peers: vec![protos::clirpc::Peer {
-                onion_service_id: "connected.onion".to_string(),
-            }],
-            online_not_connected_peers: vec![protos::clirpc::Peer {
-                onion_service_id: "online.onion".to_string(),
-            }],
-            offline_peers: Vec::new(),
+    fn peer_output_includes_groups_and_details() {
+        let response = PeersResponse {
+            peers: vec![
+                PeerInfo {
+                    peer: Some(protos::clirpc::Peer {
+                        onion_service_id: "contract.onion".to_string(),
+                    }),
+                    status: PeerStatus::Connected as i32,
+                    has_contract: true,
+                    score_seconds: 7,
+                    score_measured_at: 11,
+                    stored_content_bytes: 13,
+                    latest_known_content_length: 17,
+                    latest_cached_content_length: 19,
+                    stale_cache: true,
+                    last_live_at: 23,
+                },
+                PeerInfo {
+                    peer: Some(protos::clirpc::Peer {
+                        onion_service_id: "online.onion".to_string(),
+                    }),
+                    status: PeerStatus::Online as i32,
+                    has_contract: false,
+                    score_seconds: 0,
+                    score_measured_at: 0,
+                    stored_content_bytes: 0,
+                    latest_known_content_length: 0,
+                    latest_cached_content_length: 0,
+                    stale_cache: false,
+                    last_live_at: 29,
+                },
+            ],
         };
 
-        let lines = format_connected_peers_response(&response);
+        let lines = format_peers_response(&response, &PeerListFilter::default());
 
-        assert_eq!(lines[0], "connected: 1");
-        assert!(lines.iter().any(|line| line == "  connected.onion"));
-        assert!(lines.iter().any(|line| line == "online_not_connected: 1"));
-        assert!(lines.iter().any(|line| line == "  online.onion"));
+        assert_eq!(lines[0], "with_contract: 1");
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("peer=contract.onion")));
+        assert!(lines.iter().any(|line| line.contains("status=connected")));
+        assert!(lines.iter().any(|line| line == "online: 1"));
+        assert!(lines.iter().any(|line| line.contains("peer=online.onion")));
         assert!(lines.iter().any(|line| line == "offline: 0"));
         assert!(lines.iter().any(|line| line == "  (none)"));
+    }
+
+    #[test]
+    fn peer_output_filters_by_status_and_contract() {
+        let response = PeersResponse {
+            peers: vec![
+                PeerInfo {
+                    peer: Some(protos::clirpc::Peer {
+                        onion_service_id: "contract.onion".to_string(),
+                    }),
+                    status: PeerStatus::Connected as i32,
+                    has_contract: true,
+                    score_seconds: 7,
+                    score_measured_at: 11,
+                    stored_content_bytes: 13,
+                    latest_known_content_length: 17,
+                    latest_cached_content_length: 19,
+                    stale_cache: true,
+                    last_live_at: 23,
+                },
+                PeerInfo {
+                    peer: Some(protos::clirpc::Peer {
+                        onion_service_id: "offline.onion".to_string(),
+                    }),
+                    status: PeerStatus::Offline as i32,
+                    has_contract: false,
+                    score_seconds: -5,
+                    score_measured_at: 31,
+                    stored_content_bytes: 0,
+                    latest_known_content_length: 0,
+                    latest_cached_content_length: 0,
+                    stale_cache: false,
+                    last_live_at: 0,
+                },
+            ],
+        };
+
+        let lines = format_peers_response(
+            &response,
+            &PeerListFilter::new(vec![PeerStatusFilter::Offline], false, true),
+        );
+
+        assert_eq!(lines[0], "with_contract: 0");
+        assert!(lines.iter().any(|line| line == "offline: 1"));
+        assert!(lines.iter().any(|line| line.contains("peer=offline.onion")));
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains("peer=contract.onion")));
     }
 
     #[test]
@@ -1878,6 +2079,7 @@ mod tests {
             spawn_registered_p2p_server(remote_peer.clone(), connector.as_ref()).await?;
 
         connect_peer_with_client(&mut client, remote_peer.address()).await?;
+        let _contracts = get_contracts_with_client(&mut client).await?;
         let source = export_built_in_peers_with_client(&mut client).await?;
 
         assert!(source.contains("pub const BUILTIN_PEERS"));

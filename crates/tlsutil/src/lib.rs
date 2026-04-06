@@ -720,11 +720,10 @@ mod tests {
         {
             Err(Status::unimplemented(""))
         }
-        async fn connected_peers(
+        async fn peers(
             &self,
-            _: Request<protos::clirpc::ConnectedPeersRequest>,
-        ) -> std::result::Result<tonic::Response<protos::clirpc::ConnectedPeersResponse>, Status>
-        {
+            _: Request<protos::clirpc::PeersRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::PeersResponse>, Status> {
             Err(Status::unimplemented(""))
         }
         async fn export_built_in_peers(

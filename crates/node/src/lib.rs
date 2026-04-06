@@ -403,6 +403,15 @@ fn peer_inventory_status_rank(status: PeerInventoryStatus) -> u8 {
     }
 }
 
+/// Convert one internal peer status into the local RPC enum value.
+fn proto_peer_status(status: PeerInventoryStatus) -> i32 {
+    match status {
+        PeerInventoryStatus::Connected => clirpc::PeerStatus::Connected as i32,
+        PeerInventoryStatus::Online => clirpc::PeerStatus::Online as i32,
+        PeerInventoryStatus::Offline => clirpc::PeerStatus::Offline as i32,
+    }
+}
+
 /// Convert one stored peer-content summary into the RPC content shape.
 fn rpc_content_info(content: storedpb::PeerContent) -> bbrpc::ContentInfo {
     bbrpc::ContentInfo {
@@ -1044,11 +1053,17 @@ impl Node {
 
     /// Render the full built-in peer source file from built-ins plus live peers.
     pub async fn export_built_in_peer_source(&self) -> Result<String, Status> {
-        let connected_peers = self.connected_peers_response().await?;
-        let live_peers = connected_peers
-            .connected_peers
+        let peers = self.peers_response()?;
+        let live_peers = peers
+            .peers
             .into_iter()
-            .map(|peer| peer.onion_service_id)
+            .filter(|peer| {
+                matches!(
+                    clirpc::PeerStatus::try_from(peer.status),
+                    Ok(clirpc::PeerStatus::Connected) | Ok(clirpc::PeerStatus::Online)
+                )
+            })
+            .filter_map(|peer| peer.peer.map(|peer| peer.onion_service_id))
             .collect::<Vec<_>>();
 
         Ok(render_built_in_peer_source(&merged_export_peers(
@@ -2262,46 +2277,27 @@ impl Node {
         })
     }
 
-    /// Build the connected-peer response by probing each configured peer.
-    pub async fn connected_peers_response(&self) -> Result<clirpc::ConnectedPeersResponse, Status> {
-        let mut connected_peers = Vec::new();
-        let mut offline_peers = Vec::new();
-        let policy =
-            transport::PeerRetryPolicy::for_operation(transport::PeerOperation::HealthCheck);
-
-        for peer_onion in self.known_peers() {
-            if self.is_our_onion(&peer_onion) {
-                continue;
-            }
-            let is_online = match self
-                .connect_peer_client_with_timeout(&peer_onion, policy.connect_timeout)
-                .await
-            {
-                Ok(mut client) => self
-                    .peer_rpc_with_timeout(
-                        &peer_onion,
-                        "health check",
-                        policy.rpc_timeout,
-                        client.health_check(bbrpc::HealthCheckRequest {}),
-                    )
-                    .await
-                    .is_ok(),
-                Err(_) => false,
-            };
-            let peer = clirpc::Peer {
-                onion_service_id: peer_onion,
-            };
-            if is_online {
-                connected_peers.push(peer);
-            } else {
-                offline_peers.push(peer);
-            }
-        }
-
-        Ok(clirpc::ConnectedPeersResponse {
-            connected_peers,
-            online_not_connected_peers: Vec::new(),
-            offline_peers,
+    /// Build the local peer inventory response without dialing peers live.
+    pub fn peers_response(&self) -> Result<clirpc::PeersResponse, Status> {
+        Ok(clirpc::PeersResponse {
+            peers: self
+                .peer_inventory()?
+                .into_iter()
+                .map(|peer| clirpc::PeerInfo {
+                    peer: Some(clirpc::Peer {
+                        onion_service_id: peer.onion_service_id,
+                    }),
+                    status: proto_peer_status(peer.status),
+                    has_contract: peer.has_contract,
+                    score_seconds: peer.score_seconds,
+                    score_measured_at: peer.score_measured_at,
+                    stored_content_bytes: peer.stored_content_bytes,
+                    latest_known_content_length: peer.latest_known_content_length,
+                    latest_cached_content_length: peer.latest_cached_content_length,
+                    stale_cache: peer.stale_cache,
+                    last_live_at: peer.last_live_at,
+                })
+                .collect(),
         })
     }
 
@@ -3110,11 +3106,11 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         Ok(Response::new(clirpc::ConnectPeerResponse {}))
     }
 
-    async fn connected_peers(
+    async fn peers(
         &self,
-        _request: tonic::Request<clirpc::ConnectedPeersRequest>,
-    ) -> Result<tonic::Response<clirpc::ConnectedPeersResponse>, tonic::Status> {
-        Ok(Response::new(self.node.connected_peers_response().await?))
+        _request: tonic::Request<clirpc::PeersRequest>,
+    ) -> Result<tonic::Response<clirpc::PeersResponse>, tonic::Status> {
+        Ok(Response::new(self.node.peers_response()?))
     }
 
     async fn export_built_in_peers(

@@ -1011,12 +1011,12 @@ impl BarterBackupClient for DaemonService {
         Ok(response)
     }
 
-    async fn connected_peers(
+    async fn peers(
         &self,
-        request: tonic::Request<clirpc::ConnectedPeersRequest>,
-    ) -> Result<Response<clirpc::ConnectedPeersResponse>, Status> {
+        request: tonic::Request<clirpc::PeersRequest>,
+    ) -> Result<Response<clirpc::PeersResponse>, Status> {
         CliService::new(self.unlocked_node().await?)
-            .connected_peers(request)
+            .peers(request)
             .await
     }
 
@@ -1199,11 +1199,11 @@ impl BarterBackupClient for DaemonRpcService {
         self.daemon.connect_peer(request).await
     }
 
-    async fn connected_peers(
+    async fn peers(
         &self,
-        request: tonic::Request<clirpc::ConnectedPeersRequest>,
-    ) -> Result<Response<clirpc::ConnectedPeersResponse>, Status> {
-        self.daemon.connected_peers(request).await
+        request: tonic::Request<clirpc::PeersRequest>,
+    ) -> Result<Response<clirpc::PeersResponse>, Status> {
+        self.daemon.peers(request).await
     }
 
     async fn export_built_in_peers(

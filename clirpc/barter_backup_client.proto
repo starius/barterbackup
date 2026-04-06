@@ -23,8 +23,9 @@ service BarterBackupClient {
     // try to connect to it.
     rpc ConnectPeer(ConnectPeerRequest) returns (ConnectPeerResponse);
 
-    // ConnectedPeers returns the list of connected online peers.
-    rpc ConnectedPeers(ConnectedPeersRequest) returns (ConnectedPeersResponse);
+    // Peers returns the current local peer inventory without probing peers
+    // live over the network.
+    rpc Peers(PeersRequest) returns (PeersResponse);
 
     // ExportBuiltInPeers renders the Rust source file for the compiled
     // built-in bootstrap peer list.
@@ -175,18 +176,57 @@ message ConnectPeerRequest {
 
 message ConnectPeerResponse {}
 
-message ConnectedPeersRequest {}
+message PeersRequest {}
 
-message ConnectedPeersResponse {
-    // connected_peers contains the list of connected online peers.
-    repeated Peer connected_peers = 1;
+enum PeerStatus
+{
+    PEER_STATUS_UNKNOWN = 0;
+    PEER_STATUS_CONNECTED = 1;
+    PEER_STATUS_ONLINE = 2;
+    PEER_STATUS_OFFLINE = 3;
+}
 
-    // online_not_connected_peers contains the list of peers we believe are
-    // online, but we are not connected to them now.
-    repeated Peer online_not_connected_peers = 2;
+message PeerInfo {
+    // peer identifies the peer being reported.
+    Peer peer = 1;
 
-    // offline_peers contains the list of known offline peers.
-    repeated Peer offline_peers = 3;
+    // status is the current locally observed transport status.
+    PeerStatus status = 2;
+
+    // has_contract reports whether persisted state indicates a current
+    // contract relationship with this peer.
+    bool has_contract = 3;
+
+    // score_seconds is the peer's current persisted score.
+    int64 score_seconds = 4;
+
+    // score_measured_at is when score_seconds was last updated.
+    int64 score_measured_at = 5;
+
+    // stored_content_bytes is the amount of this peer's mirrored content we
+    // currently keep locally.
+    int64 stored_content_bytes = 6;
+
+    // latest_known_content_length is the newest peer revision length we know
+    // exists.
+    int64 latest_known_content_length = 7;
+
+    // latest_cached_content_length is the newest peer revision length we cache
+    // locally.
+    int64 latest_cached_content_length = 8;
+
+    // stale_cache reports whether latest known and latest cached revisions
+    // differ.
+    bool stale_cache = 9;
+
+    // last_live_at is when the peer last answered successfully over the
+    // transport.
+    int64 last_live_at = 10;
+}
+
+message PeersResponse {
+    // peers is the current local peer inventory in deterministic order.
+    repeated PeerInfo peers = 1;
 }
 
 message ExportBuiltInPeersRequest {}

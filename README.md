@@ -232,6 +232,7 @@ Plaintext file I/O happens on the CLI side:
 Inspect contracts and recovery:
 
 ```bash
+bbcli peers
 bbcli get-contracts
 bbcli propose-contract <peer-onion-id>
 bbcli check-contract <peer-onion-id>
@@ -258,6 +259,9 @@ bbcli export-built-in-peers > crates/node/src/builtin_peers.rs
 
 Recovery and conflicts:
 
+- `bbcli peers` reports the current local peer inventory without dialing peers
+  live, including status, scores, cached bytes, and whether mirrored peer data
+  is stale
 - `bbcli get-contracts` reports both the newest revision the daemon knows a
   peer has and the newest revision it has cached locally for that peer
 - recovery chooses the freshest revision that is actually recoverable across

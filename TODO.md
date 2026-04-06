@@ -4,7 +4,7 @@ These are the product and hardening items that are still unresolved.
 
 - Decide the final grouped CLI command layout before renaming the surface.
   Proposed grouping for review:
-  - `bbcli node state|init|unlock|stop|connect-peer|connected-peers`
+  - `bbcli node state|init|unlock|stop|connect-peer|peers`
   - `bbcli file list|get|set|delete`
   - `bbcli contract list|propose|check`
   - `bbcli recovery run|list-conflicts|checkout|resolve`
