@@ -20,7 +20,7 @@ use std::time::Duration;
 use storage::{Filesystem, StorageError, Store};
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tonic::{Code, Response, Status};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use transport::PeerConnector;
 
 /// PeerIdentity describes the authenticated peer that issued a request.
@@ -856,7 +856,7 @@ impl Node {
             if let Err(error) =
                 self.add_known_peer_with_origin(&peer_onion, peer_origin_code(false, false))
             {
-                warn!(peer = %peer_onion, %error, "skipped discovered peer during peer exchange");
+                debug!(peer = %peer_onion, %error, "skipped discovered peer during peer exchange");
             }
         }
 
@@ -1656,7 +1656,7 @@ impl Node {
                 if let Some(previous_content_id) = previous_cached_content_id {
                     self.remove_unused_foreign_blob(&previous_content_id)?;
                 }
-                info!(
+                debug!(
                     peer = %peer_onion,
                     previous_content_id = %previous_content_id_hex,
                     "cleared mirrored peer content"
@@ -2475,7 +2475,7 @@ impl Node {
                 our_content_section_offset: 0,
                 our_content_section_length: 0,
             });
-            info!(
+            debug!(
                 peer = %peer_onion,
                 success = true,
                 new_score_seconds = new_score,
@@ -3140,12 +3140,15 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
                 Ok(public_key) => public_key,
                 Err(_) => continue,
             };
+            if self.node.is_our_public_key(&public_key) {
+                continue;
+            }
             let peer_onion = keys::onion_hostname_from_public_key(&public_key);
             if let Err(error) = self
                 .node
                 .add_known_peer_with_origin(&peer_onion, peer_origin_code(false, false))
             {
-                warn!(peer = %peer_onion, %error, "skipped discovered peer during peer exchange");
+                debug!(peer = %peer_onion, %error, "skipped discovered peer during peer exchange");
             }
         }
 
