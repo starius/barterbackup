@@ -25,3 +25,8 @@ These are the product and hardening items that are still unresolved.
 - Extend storage accounting beyond the fixed 1 GiB peer budget and current
   score-tier policy. Expiration policy, historical visibility, and richer
   operator reporting for mirrored peer storage are still basic.
+- Add deferred batching for low-value peer metadata writes such as
+  reachability updates and liveness-score changes. Those fields are useful,
+  but they should not force an encrypted metadata rewrite on every small
+  update when a short configurable flush delay would preserve SSD life and
+  battery.
