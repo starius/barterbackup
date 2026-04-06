@@ -18,3 +18,5 @@ tokio-rustls = "0.26"
 tokio-stream = { version = "0.1", features = ["net"] }
 transport = { path = "../transport" }
 async-trait = "0.1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.5", features = ["util"] }

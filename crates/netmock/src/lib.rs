@@ -9,14 +9,17 @@ use anyhow::Result;
 use async_trait::async_trait;
 use ed25519_dalek::SecretKey;
 use futures_util::StreamExt;
+use hyper_util::rt::TokioIo;
 use std::collections::BTreeMap;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::server::TlsStream;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
+use tower::service_fn;
 use transport::{PeerClient, PeerConnector};
 
 /// MockPeerListener is a localhost TCP listener wrapped in peer TLS.
@@ -83,7 +86,7 @@ pub async fn connect_peer_channel(
 /// MockPeerConnector resolves onion hostnames to localhost mock endpoints.
 #[derive(Debug, Default)]
 pub struct MockPeerConnector {
-    endpoints: RwLock<BTreeMap<String, String>>,
+    endpoints: Arc<RwLock<BTreeMap<String, String>>>,
 }
 
 impl MockPeerConnector {
@@ -108,14 +111,43 @@ impl PeerConnector for MockPeerConnector {
         peer_onion: &str,
         client_private_key: &SecretKey,
     ) -> Result<PeerClient> {
-        let endpoint = self
-            .endpoints
+        self.endpoints
             .read()
             .unwrap()
             .get(peer_onion)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown peer onion: {peer_onion}"))?;
-        let channel = connect_peer_channel(&endpoint, peer_onion, client_private_key).await?;
+        let client_tls = tlsutil::build_peer_client_tls(peer_onion, client_private_key)?;
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client_tls));
+        let server_name = ServerName::try_from(peer_onion.to_string())
+            .map_err(|err| anyhow::anyhow!("invalid peer onion {peer_onion:?}: {err}"))?;
+        let peer_onion = peer_onion.to_string();
+        let endpoints = self.endpoints.clone();
+        let channel = Endpoint::from_shared(format!("http://{peer_onion}:80"))?
+            .connect_with_connector(service_fn(move |_| {
+                let connector = connector.clone();
+                let server_name = server_name.clone();
+                let peer_onion = peer_onion.clone();
+                let endpoints = endpoints.clone();
+
+                async move {
+                    let endpoint = endpoints
+                        .read()
+                        .unwrap()
+                        .get(&peer_onion)
+                        .cloned()
+                        .ok_or_else(|| io::Error::other("unknown peer onion"))?;
+                    let socket_addr = endpoint.strip_prefix("https://").unwrap_or(&endpoint);
+                    let tcp_stream = TcpStream::connect(socket_addr).await?;
+                    let tls_stream = connector
+                        .connect(server_name, tcp_stream)
+                        .await
+                        .map_err(io::Error::other)?;
+
+                    Ok::<_, io::Error>(TokioIo::new(tls_stream))
+                }
+            }))
+            .await?;
 
         Ok(transport::configure_peer_client(PeerClient::new(channel)))
     }
