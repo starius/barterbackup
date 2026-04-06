@@ -56,10 +56,12 @@ pub struct Args {
 impl Args {
     /// Return the local daemon endpoint, honoring the legacy environment.
     fn resolved_local_addr(&self) -> String {
-        self.local_addr
-            .clone()
-            .or_else(|| std::env::var("BBCLI_DAEMON_ADDR").ok())
-            .unwrap_or_else(|| DEFAULT_LOCAL_ADDR.to_string())
+        normalize_local_addr(
+            self.local_addr
+                .clone()
+                .or_else(|| std::env::var("BBCLI_DAEMON_ADDR").ok())
+                .unwrap_or_else(|| DEFAULT_LOCAL_ADDR.to_string()),
+        )
     }
 
     /// Return the default daemon data directory used for local CLI keys.
@@ -84,6 +86,15 @@ struct LocalCliTarget {
     local_addr: String,
     /// keys_dir is the directory containing the local mTLS session keys.
     keys_dir: PathBuf,
+}
+
+/// Normalize one local CLI endpoint so bare host:port values use HTTPS.
+fn normalize_local_addr(local_addr: String) -> String {
+    if local_addr.contains("://") {
+        return local_addr;
+    }
+
+    format!("https://{local_addr}")
 }
 
 /// Command is one top-level `bbcli` subcommand.
@@ -1655,7 +1666,7 @@ mod tests {
         let args = Args::parse_from([
             "bbcli",
             "--local-addr",
-            "https://127.0.0.1:10001",
+            "127.0.0.1:10001",
             "--data-dir",
             "/tmp/bb",
             "state",
@@ -1670,8 +1681,14 @@ mod tests {
 
     #[test]
     fn args_accept_legacy_daemon_addr_alias() {
-        let args = Args::parse_from(["bbcli", "--daemon-addr", "https://127.0.0.1:10002", "state"]);
+        let args = Args::parse_from(["bbcli", "--daemon-addr", "127.0.0.1:10002", "state"]);
         assert_eq!(args.resolved_local_addr(), "https://127.0.0.1:10002");
+    }
+
+    #[test]
+    fn args_preserve_explicit_local_addr_scheme() {
+        let args = Args::parse_from(["bbcli", "--local-addr", "https://127.0.0.1:10003", "state"]);
+        assert_eq!(args.resolved_local_addr(), "https://127.0.0.1:10003");
     }
 
     #[tokio::test(flavor = "multi_thread")]

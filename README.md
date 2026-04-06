@@ -127,6 +127,8 @@ CLI:
 - `BBCLI_DATA_DIR`: daemon data directory used to locate `<data-dir>/cli-keys`,
   default `~/.barterbackup`
 - `BBCLI_CLI_KEYS_DIR`: directory containing `server.pub` and `client.key`
+- `bbcli --local-addr` also accepts a bare `host:port` value and will assume
+  `https://`, so the same address string can be reused for `bbd` and `bbcli`
 
 Important current behavior:
 
