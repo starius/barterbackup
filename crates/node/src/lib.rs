@@ -1509,7 +1509,6 @@ impl Node {
         if blob_len == 0 {
             return (0, 0);
         }
-        let section_len = SAMPLE_LEN.min(blob_len);
 
         // Hash peer identity, revision, and current time so repeated checks
         // move across the blob while remaining deterministic in tests.
@@ -1520,12 +1519,8 @@ impl Node {
         let digest = hasher.finalize();
         let mut offset_bytes = [0u8; 8];
         offset_bytes.copy_from_slice(&digest[..8]);
-        let max_offset = blob_len - section_len;
-        let offset = if max_offset == 0 {
-            0
-        } else {
-            (u64::from_le_bytes(offset_bytes) as usize) % (max_offset + 1)
-        };
+        let offset = (u64::from_le_bytes(offset_bytes) as usize) % blob_len;
+        let section_len = SAMPLE_LEN.min(blob_len - offset);
 
         (offset, section_len)
     }
@@ -2258,9 +2253,8 @@ impl Node {
             && matches!(
                 download.section,
                 Some(bbrpc::download_response::Section::RawBytes(ref raw_bytes))
-                    if raw_bytes.value.len() >= section_length
-                        && raw_bytes.value[..section_length]
-                            == local_blob[section_offset..section_offset + section_length]
+                    if raw_bytes.value
+                        == local_blob[section_offset..section_offset + section_length]
             );
         let new_score = self.update_peer_score(&peer_public_key, passed)?;
         updates.push(clirpc::CheckContractUpdate {
@@ -3828,6 +3822,51 @@ mod tests {
         master[..32].copy_from_slice(first.as_slice());
         master[32..].copy_from_slice(second.as_slice());
         master
+    }
+
+    #[test]
+    fn sample_section_for_short_blob_uses_tail_from_offset() -> anyhow::Result<()> {
+        let clock = Arc::new(ManualClock::new(Timestamp::new(10, 0).unwrap()));
+        let node = Node::with_local_storage_and_clock(
+            "sample-short-owner",
+            Arc::new(storage::MemoryFilesystem::new()),
+            clock,
+        )?;
+        let peer_identity = Node::new("sample-short-peer")?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_identity.address())?;
+        let content_id = vec![0x55; CONTENT_ID_LEN];
+        let blob_len = 257usize;
+
+        let (offset, section_len) = node.sample_section(&peer_public_key, &content_id, blob_len);
+        assert!(offset < blob_len);
+        assert_eq!(section_len, blob_len - offset);
+        Ok(())
+    }
+
+    #[test]
+    fn sample_section_can_return_a_one_byte_tail() -> anyhow::Result<()> {
+        let clock = Arc::new(ManualClock::new(Timestamp::new(0, 0).unwrap()));
+        let node = Node::with_local_storage_and_clock(
+            "sample-tail-owner",
+            Arc::new(storage::MemoryFilesystem::new()),
+            clock.clone(),
+        )?;
+        let peer_identity = Node::new("sample-tail-peer")?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_identity.address())?;
+        let content_id = vec![0x77; CONTENT_ID_LEN];
+        let blob_len = 32usize;
+
+        for second in 0..1_024u64 {
+            clock.set(Timestamp::new(second, 0).unwrap());
+            let (offset, section_len) =
+                node.sample_section(&peer_public_key, &content_id, blob_len);
+            if offset == blob_len - 1 {
+                assert_eq!(section_len, 1);
+                return Ok(());
+            }
+        }
+
+        anyhow::bail!("failed to find a one-byte tail sample offset");
     }
 
     /// Build one stored peer entry for priority-policy tests.
