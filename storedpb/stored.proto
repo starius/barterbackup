@@ -35,7 +35,8 @@ message FileHeader {
 }
 
 // Peer is data about the peer that should survive a node reset.
-enum PeerOrigin {
+enum PeerOrigin
+{
     // PEER_ORIGIN_DISCOVERED means the peer was learned from another peer.
     PEER_ORIGIN_DISCOVERED = 0;
 
@@ -47,7 +48,8 @@ enum PeerOrigin {
 }
 
 // FirstContactDirection records which side connected to the other first.
-enum FirstContactDirection {
+enum FirstContactDirection
+{
     // FIRST_CONTACT_DIRECTION_UNKNOWN means the direction was not recorded.
     FIRST_CONTACT_DIRECTION_UNKNOWN = 0;
 

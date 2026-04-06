@@ -149,11 +149,7 @@ fn prepare_tor_state_dir(state_dir: &Path) -> Result<()> {
     // every start and keeps the corresponding Arti keystore ephemeral. Remove
     // only the persisted hidden-service state that would otherwise make Arti
     // look for introduction-point keys from the previous process.
-    remove_path_if_exists(
-        &state_dir
-            .join("hss")
-            .join(BARTERBACKUP_HS_NICKNAME),
-    )?;
+    remove_path_if_exists(&state_dir.join("hss").join(BARTERBACKUP_HS_NICKNAME))?;
     remove_path_if_exists(
         &state_dir
             .join("hss")
@@ -402,11 +398,9 @@ mod tests {
         let hidden_service_lock = state_dir
             .join("hss")
             .join(format!("{BARTERBACKUP_HS_NICKNAME}.lock"));
-        let current_hidden_service_publication =
-            hidden_service_state_dir.join("iptpub.json");
+        let current_hidden_service_publication = hidden_service_state_dir.join("iptpub.json");
         let current_hidden_service_intro_points = hidden_service_state_dir.join("ipts.json");
-        let current_hidden_service_pow_state =
-            hidden_service_state_dir.join("pow_manager.json");
+        let current_hidden_service_pow_state = hidden_service_state_dir.join("pow_manager.json");
         let current_replay_dir = hidden_service_state_dir.join("iptreplay");
         let hidden_service_publication = state_dir
             .join("state")

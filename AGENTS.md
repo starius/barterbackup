@@ -32,6 +32,9 @@ Build and test
 - Prefer `nix develop` for a ready-to-use toolchain.
 - Any repository `make` target can be run as
   `nix develop --command make <target>`.
+- When preparing commits, run `make fmt` regularly so formatter output stays
+  grouped with the code changes that caused it rather than leaking into later
+  unrelated commits.
 - Main commands:
   - `cargo build --workspace`
   - `cargo test --workspace`
