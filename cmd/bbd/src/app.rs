@@ -38,9 +38,9 @@ const PEER_RUNTIME_RESTART_MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 #[derive(Clone, Debug, Parser)]
 #[command(name = "bbd", about = "BarterBackup daemon")]
 pub struct Config {
-    /// cli_addr is the local loopback address for the CLI gRPC service.
-    #[arg(long, env = "BBD_CLI_ADDR", default_value = "127.0.0.1:9911")]
-    pub cli_addr: String,
+    /// local_addr is the local loopback address for the CLI gRPC service.
+    #[arg(long, alias = "cli-addr", env = "BBD_LOCAL_ADDR")]
+    pub local_addr: Option<String>,
 
     /// data_dir is the base directory for all daemon state.
     #[arg(long, env = "BBD_DATA_DIR")]
@@ -56,6 +56,14 @@ impl Config {
 
         let home = home_dir().context("resolve home directory")?;
         Ok(home.join(".barterbackup"))
+    }
+
+    /// Return the local CLI listen address, honoring the legacy environment.
+    pub fn resolved_local_addr(&self) -> String {
+        self.local_addr
+            .clone()
+            .or_else(|| std::env::var("BBD_CLI_ADDR").ok())
+            .unwrap_or_else(|| "127.0.0.1:9911".to_string())
     }
 }
 
@@ -1807,7 +1815,7 @@ where
     let local_cli_tls = prepare_local_cli_tls(&data_dir)?;
     let service = Arc::new(DaemonService::new(data_dir.clone(), peer_runtime_factory));
     let shutdown = service.shutdown_request();
-    let listener = tokio::net::TcpListener::bind(&config.cli_addr).await?;
+    let listener = tokio::net::TcpListener::bind(config.resolved_local_addr()).await?;
     let local_addr = listener.local_addr()?;
     let tls_acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(local_cli_tls.server_tls));
 
@@ -2406,6 +2414,15 @@ mod tests {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
+    #[test]
+    fn config_accepts_local_addr_flag_and_legacy_alias() {
+        let modern = Config::parse_from(["bbd", "--local-addr", "127.0.0.1:9921"]);
+        assert_eq!(modern.resolved_local_addr(), "127.0.0.1:9921");
+
+        let legacy = Config::parse_from(["bbd", "--cli-addr", "127.0.0.1:9922"]);
+        assert_eq!(legacy.resolved_local_addr(), "127.0.0.1:9922");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn dir_lock_blocks_second_owner() -> Result<()> {
         let temp_dir = TempDir::new()?;
@@ -2547,7 +2564,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let shutdown_signal = shutdown.clone();
         let config = Config {
-            cli_addr,
+            local_addr: Some(cli_addr),
             data_dir: Some(temp_dir.path().to_path_buf()),
         };
         let daemon_task = tokio::spawn(async move {
@@ -2601,7 +2618,7 @@ mod tests {
         let cli_addr = reserve_loopback_addr()?;
         let daemon_addr = format!("https://{cli_addr}");
         let config = Config {
-            cli_addr,
+            local_addr: Some(cli_addr),
             data_dir: Some(temp_dir.path().to_path_buf()),
         };
         let daemon_task = tokio::spawn(async move {

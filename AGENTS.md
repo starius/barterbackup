@@ -84,8 +84,9 @@ Current operational details
 - The daemon starts locked and must be unlocked through `bbcli unlock`.
 - Local admin mTLS material lives in `<data-dir>/cli-keys`.
 - Those local admin keys are currently regenerated on each daemon start.
-- If a non-default data directory is used, `BBCLI_CLI_KEYS_DIR` must point to
-  the matching `cli-keys` directory.
+- `bbcli --data-dir <dir>` uses the matching `<dir>/cli-keys` directory by
+  default, while `BBCLI_CLI_KEYS_DIR` remains available when the session keys
+  are copied elsewhere.
 
 Code style
 

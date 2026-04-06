@@ -25,8 +25,8 @@ use tokio::time::sleep;
 use tonic::transport::Channel;
 use tonic::Code;
 
-/// DEFAULT_DAEMON_ADDR is the default local daemon address.
-pub const DEFAULT_DAEMON_ADDR: &str = "https://127.0.0.1:9911";
+/// DEFAULT_LOCAL_ADDR is the default local daemon address.
+pub const DEFAULT_LOCAL_ADDR: &str = "https://127.0.0.1:9911";
 
 /// DEFAULT_UNLOCK_WAIT_SECS is the default unlock readiness timeout.
 const DEFAULT_UNLOCK_WAIT_SECS: u64 = 30;
@@ -41,12 +41,49 @@ const UNLOCK_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 #[derive(Parser, Debug)]
 #[command(name = "bbcli", about = "BarterBackup CLI")]
 pub struct Args {
-    /// daemon_addr is the local daemon endpoint.
-    #[arg(long, env = "BBCLI_DAEMON_ADDR", default_value = DEFAULT_DAEMON_ADDR)]
-    daemon_addr: String,
+    /// local_addr is the local daemon endpoint.
+    #[arg(long, alias = "daemon-addr", env = "BBCLI_LOCAL_ADDR")]
+    local_addr: Option<String>,
+
+    /// data_dir is the base directory for daemon state and local CLI keys.
+    #[arg(long, env = "BBCLI_DATA_DIR")]
+    data_dir: Option<PathBuf>,
 
     #[command(subcommand)]
     cmd: Command,
+}
+
+impl Args {
+    /// Return the local daemon endpoint, honoring the legacy environment.
+    fn resolved_local_addr(&self) -> String {
+        self.local_addr
+            .clone()
+            .or_else(|| std::env::var("BBCLI_DAEMON_ADDR").ok())
+            .unwrap_or_else(|| DEFAULT_LOCAL_ADDR.to_string())
+    }
+
+    /// Return the default daemon data directory used for local CLI keys.
+    fn resolved_data_dir(&self) -> Result<PathBuf> {
+        if let Some(path) = self.data_dir.clone() {
+            return Ok(path);
+        }
+
+        let home = home_dir().context("resolve home directory")?;
+        Ok(home.join(".barterbackup"))
+    }
+
+    /// Return the local CLI key directory for this command.
+    fn resolved_keys_dir(&self) -> Result<PathBuf> {
+        default_keys_dir(Some(&self.resolved_data_dir()?))
+    }
+}
+
+/// LocalCliTarget groups the local daemon endpoint and matching pinning material.
+struct LocalCliTarget {
+    /// local_addr is the local daemon endpoint.
+    local_addr: String,
+    /// keys_dir is the directory containing the local mTLS session keys.
+    keys_dir: PathBuf,
 }
 
 /// Command is one top-level `bbcli` subcommand.
@@ -209,14 +246,18 @@ where
 
 /// Dispatch one parsed CLI invocation.
 async fn run_parsed(args: Args) -> Result<()> {
+    let target = LocalCliTarget {
+        local_addr: args.resolved_local_addr(),
+        keys_dir: args.resolved_keys_dir()?,
+    };
     let result = match args.cmd {
-        Command::State => state(&args.daemon_addr).await,
+        Command::State => state(&target).await,
         Command::Init {
             password_stdin,
             wait_seconds,
             password,
         } => {
-            run_init_command(&args.daemon_addr, Duration::from_secs(wait_seconds), || {
+            run_init_command(&target, Duration::from_secs(wait_seconds), || {
                 resolve_init_password(password, password_stdin)
             })
             .await
@@ -227,46 +268,37 @@ async fn run_parsed(args: Args) -> Result<()> {
             password,
         } => {
             let password = resolve_main_password(password, password_stdin)?;
-            unlock(
-                &args.daemon_addr,
-                &password,
-                Duration::from_secs(wait_seconds),
-            )
-            .await
+            unlock(&target, &password, Duration::from_secs(wait_seconds)).await
         }
-        Command::Stop => stop(&args.daemon_addr).await,
-        Command::ListFiles => list_files(&args.daemon_addr).await,
-        Command::SetFile { name, path } => set_file(&args.daemon_addr, &name, &path).await,
-        Command::GetFile { name, out } => get_file(&args.daemon_addr, &name, out.as_deref()).await,
-        Command::DeleteFile { name } => delete_file(&args.daemon_addr, &name).await,
-        Command::ConnectPeer { onion_service_id } => {
-            connect_peer(&args.daemon_addr, &onion_service_id).await
-        }
-        Command::ConnectedPeers => connected_peers(&args.daemon_addr).await,
-        Command::ExportBuiltInPeers => export_built_in_peers(&args.daemon_addr).await,
-        Command::ListConflicts => list_conflicts(&args.daemon_addr).await,
+        Command::Stop => stop(&target).await,
+        Command::ListFiles => list_files(&target).await,
+        Command::SetFile { name, path } => set_file(&target, &name, &path).await,
+        Command::GetFile { name, out } => get_file(&target, &name, out.as_deref()).await,
+        Command::DeleteFile { name } => delete_file(&target, &name).await,
+        Command::ConnectPeer { onion_service_id } => connect_peer(&target, &onion_service_id).await,
+        Command::ConnectedPeers => connected_peers(&target).await,
+        Command::ExportBuiltInPeers => export_built_in_peers(&target).await,
+        Command::ListConflicts => list_conflicts(&target).await,
         Command::CheckoutRevision {
             content_id,
             out_dir,
-        } => checkout_revision(&args.daemon_addr, &content_id, &out_dir).await,
-        Command::ResolveConflict { content_id } => {
-            resolve_conflict(&args.daemon_addr, &content_id).await
-        }
+        } => checkout_revision(&target, &content_id, &out_dir).await,
+        Command::ResolveConflict { content_id } => resolve_conflict(&target, &content_id).await,
         Command::SetStorageConfig {
             allocated_storage_for_peers,
             min_replicas,
-        } => set_storage_config(&args.daemon_addr, allocated_storage_for_peers, min_replicas).await,
-        Command::GetStorageConfig => get_storage_config(&args.daemon_addr).await,
-        Command::GetContracts => get_contracts(&args.daemon_addr).await,
+        } => set_storage_config(&target, allocated_storage_for_peers, min_replicas).await,
+        Command::GetStorageConfig => get_storage_config(&target).await,
+        Command::GetContracts => get_contracts(&target).await,
         Command::ProposeContract { onion_service_id } => {
-            propose_contract(&args.daemon_addr, &onion_service_id).await
+            propose_contract(&target, &onion_service_id).await
         }
         Command::CheckContract { onion_service_id } => {
-            check_contract(&args.daemon_addr, &onion_service_id).await
+            check_contract(&target, &onion_service_id).await
         }
-        Command::RecoverContent => recover_content(&args.daemon_addr).await,
+        Command::RecoverContent => recover_content(&target).await,
     };
-    result.map_err(|error| friendly_cli_error(error, &args.daemon_addr))
+    result.map_err(|error| friendly_cli_error(error, &target.local_addr))
 }
 
 /// Read one main password from the selected source.
@@ -405,8 +437,8 @@ fn prompt_password_with_prompt(prompt: &str) -> Result<String> {
 }
 
 /// Print daemon state.
-async fn state(addr: &str) -> Result<()> {
-    let response = state_response(addr, Duration::from_secs(DEFAULT_KEYS_WAIT_SECS)).await?;
+async fn state(target: &LocalCliTarget) -> Result<()> {
+    let response = state_response(target, Duration::from_secs(DEFAULT_KEYS_WAIT_SECS)).await?;
     let peer_runtime_state =
         protos::clirpc::PeerRuntimeState::try_from(response.peer_runtime_state)
             .unwrap_or(protos::clirpc::PeerRuntimeState::Unknown);
@@ -443,17 +475,21 @@ async fn state(addr: &str) -> Result<()> {
 }
 
 /// Run the init command, checking daemon state before asking for a password.
-async fn run_init_command<F>(addr: &str, wait_timeout: Duration, read_password: F) -> Result<()>
+async fn run_init_command<F>(
+    target: &LocalCliTarget,
+    wait_timeout: Duration,
+    read_password: F,
+) -> Result<()>
 where
     F: FnOnce() -> Result<String>,
 {
-    let state = state_response(addr, wait_timeout).await?;
-    continue_init_command(addr, wait_timeout, state, read_password).await
+    let state = state_response(target, wait_timeout).await?;
+    continue_init_command(target, wait_timeout, state, read_password).await
 }
 
 /// Continue `bbcli init` after the daemon state preflight has completed.
 async fn continue_init_command<F>(
-    addr: &str,
+    target: &LocalCliTarget,
     wait_timeout: Duration,
     state: StateResponse,
     read_password: F,
@@ -463,30 +499,28 @@ where
 {
     ensure_daemon_can_initialize(&state)?;
     let password = read_password()?;
-    init(addr, &password, wait_timeout).await
+    init(target, &password, wait_timeout).await
 }
 
 /// Initialize daemon storage, waiting briefly if it is still starting up.
-async fn init(addr: &str, password: &str, wait_timeout: Duration) -> Result<()> {
-    let keys_dir = default_keys_dir();
-    init_with_keys_dir(addr, password, &keys_dir, wait_timeout).await
+async fn init(target: &LocalCliTarget, password: &str, wait_timeout: Duration) -> Result<()> {
+    init_with_keys_dir(&target.local_addr, password, &target.keys_dir, wait_timeout).await
 }
 
 /// Unlock the daemon, waiting briefly if it is still starting up.
-async fn unlock(addr: &str, password: &str, wait_timeout: Duration) -> Result<()> {
-    let keys_dir = default_keys_dir();
-    unlock_with_keys_dir(addr, password, &keys_dir, wait_timeout).await
+async fn unlock(target: &LocalCliTarget, password: &str, wait_timeout: Duration) -> Result<()> {
+    unlock_with_keys_dir(&target.local_addr, password, &target.keys_dir, wait_timeout).await
 }
 
 /// Ask the daemon to stop gracefully.
-async fn stop(addr: &str) -> Result<()> {
-    let mut client = connect_client(addr).await?;
+async fn stop(target: &LocalCliTarget) -> Result<()> {
+    let mut client = connect_client(target).await?;
     stop_with_client(&mut client).await
 }
 
 /// Print the stored file names.
-async fn list_files(addr: &str) -> Result<()> {
-    let mut client = connect_client(addr).await?;
+async fn list_files(target: &LocalCliTarget) -> Result<()> {
+    let mut client = connect_client(target).await?;
     for name in list_files_with_client(&mut client).await? {
         println!("{name}");
     }
@@ -494,15 +528,15 @@ async fn list_files(addr: &str) -> Result<()> {
 }
 
 /// Upload one plaintext file.
-async fn set_file(addr: &str, name: &str, path: &Path) -> Result<()> {
-    let mut client = connect_client(addr).await?;
+async fn set_file(target: &LocalCliTarget, name: &str, path: &Path) -> Result<()> {
+    let mut client = connect_client(target).await?;
     let data = fs::read(path).with_context(|| format!("read input file {}", path.display()))?;
     set_file_with_client(&mut client, name, data).await
 }
 
 /// Download one plaintext file.
-async fn get_file(addr: &str, name: &str, out: Option<&Path>) -> Result<()> {
-    let mut client = connect_client(addr).await?;
+async fn get_file(target: &LocalCliTarget, name: &str, out: Option<&Path>) -> Result<()> {
+    let mut client = connect_client(target).await?;
     let data = get_file_with_client(&mut client, name).await?;
     if let Some(out) = out {
         fs::write(out, data).with_context(|| format!("write output file {}", out.display()))?;
@@ -528,20 +562,20 @@ fn get_file_stdout_bytes(data: Vec<u8>, stdout_is_terminal: bool) -> Result<Vec<
 }
 
 /// Delete one stored file.
-async fn delete_file(addr: &str, name: &str) -> Result<()> {
-    let mut client = connect_client(addr).await?;
+async fn delete_file(target: &LocalCliTarget, name: &str) -> Result<()> {
+    let mut client = connect_client(target).await?;
     delete_file_with_client(&mut client, name).await
 }
 
 /// Register one peer on the daemon.
-async fn connect_peer(addr: &str, onion_service_id: &str) -> Result<()> {
-    let mut client = connect_client(addr).await?;
+async fn connect_peer(target: &LocalCliTarget, onion_service_id: &str) -> Result<()> {
+    let mut client = connect_client(target).await?;
     connect_peer_with_client(&mut client, onion_service_id).await
 }
 
 /// Print the current configured peers.
-async fn connected_peers(addr: &str) -> Result<()> {
-    let mut client = connect_client(addr).await?;
+async fn connected_peers(target: &LocalCliTarget) -> Result<()> {
+    let mut client = connect_client(target).await?;
     for line in
         format_connected_peers_response(&connected_peers_response_with_client(&mut client).await?)
     {
@@ -551,16 +585,16 @@ async fn connected_peers(addr: &str) -> Result<()> {
 }
 
 /// Print the Rust source file for the built-in peer list.
-async fn export_built_in_peers(addr: &str) -> Result<()> {
-    let mut client = connect_client(addr).await?;
+async fn export_built_in_peers(target: &LocalCliTarget) -> Result<()> {
+    let mut client = connect_client(target).await?;
     let source = export_built_in_peers_with_client(&mut client).await?;
     print!("{source}");
     Ok(())
 }
 
 /// Print the unresolved and archived conflict revisions.
-async fn list_conflicts(addr: &str) -> Result<()> {
-    let mut client = connect_client(addr).await?;
+async fn list_conflicts(target: &LocalCliTarget) -> Result<()> {
+    let mut client = connect_client(target).await?;
     let response = list_conflicts_with_client(&mut client).await?;
     for revision in response.revisions {
         println!(
@@ -581,9 +615,13 @@ async fn list_conflicts(addr: &str) -> Result<()> {
 }
 
 /// Write one conflicted or archived revision to a local directory.
-async fn checkout_revision(addr: &str, content_id: &str, out_dir: &Path) -> Result<()> {
+async fn checkout_revision(
+    target: &LocalCliTarget,
+    content_id: &str,
+    out_dir: &Path,
+) -> Result<()> {
     let content_id = decode_content_id_hex(content_id)?;
-    let mut client = connect_client(addr).await?;
+    let mut client = connect_client(target).await?;
     let response = checkout_revision_with_client(&mut client, &content_id).await?;
     fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
     for file in response.file {
@@ -606,25 +644,25 @@ fn checked_checkout_target(out_dir: &Path, file_name: &str) -> Result<PathBuf> {
 }
 
 /// Resolve the active conflict and keep one revision active.
-async fn resolve_conflict(addr: &str, content_id: &str) -> Result<()> {
+async fn resolve_conflict(target: &LocalCliTarget, content_id: &str) -> Result<()> {
     let content_id = decode_content_id_hex(content_id)?;
-    let mut client = connect_client(addr).await?;
+    let mut client = connect_client(target).await?;
     resolve_conflict_with_client(&mut client, &content_id).await
 }
 
 /// Update the storage policy.
 async fn set_storage_config(
-    addr: &str,
+    target: &LocalCliTarget,
     allocated_storage_for_peers: i64,
     min_replicas: i64,
 ) -> Result<()> {
-    let mut client = connect_client(addr).await?;
+    let mut client = connect_client(target).await?;
     set_storage_config_with_client(&mut client, allocated_storage_for_peers, min_replicas).await
 }
 
 /// Print the storage policy and derived usage data.
-async fn get_storage_config(addr: &str) -> Result<()> {
-    let mut client = connect_client(addr).await?;
+async fn get_storage_config(target: &LocalCliTarget) -> Result<()> {
+    let mut client = connect_client(target).await?;
     let response = get_storage_config_with_client(&mut client).await?;
     for line in format_storage_config_response(&response) {
         println!("{line}");
@@ -633,8 +671,8 @@ async fn get_storage_config(addr: &str) -> Result<()> {
 }
 
 /// Print the current contract summary for each known peer.
-async fn get_contracts(addr: &str) -> Result<()> {
-    let mut client = connect_client(addr).await?;
+async fn get_contracts(target: &LocalCliTarget) -> Result<()> {
+    let mut client = connect_client(target).await?;
     let response = get_contracts_with_client(&mut client).await?;
     for line in format_contracts_response(&response) {
         println!("{line}");
@@ -748,8 +786,8 @@ fn format_contracts_response(response: &protos::clirpc::GetContractsResponse) ->
 }
 
 /// Print the streamed updates for one contract proposal.
-async fn propose_contract(addr: &str, onion_service_id: &str) -> Result<()> {
-    let mut client = connect_client(addr).await?;
+async fn propose_contract(target: &LocalCliTarget, onion_service_id: &str) -> Result<()> {
+    let mut client = connect_client(target).await?;
     for update in propose_contract_with_client(&mut client, onion_service_id).await? {
         println!(
             "state={} success={} their_content_length={} their_content_downloaded_bytes={} our_content_length={} our_content_uploaded_bytes={}",
@@ -765,8 +803,8 @@ async fn propose_contract(addr: &str, onion_service_id: &str) -> Result<()> {
 }
 
 /// Print the streamed updates for one contract check.
-async fn check_contract(addr: &str, onion_service_id: &str) -> Result<()> {
-    let mut client = connect_client(addr).await?;
+async fn check_contract(target: &LocalCliTarget, onion_service_id: &str) -> Result<()> {
+    let mut client = connect_client(target).await?;
     for update in check_contract_with_client(&mut client, onion_service_id).await? {
         println!(
             "state={} success={} our_content_length={} our_content_section_offset={} our_content_section_length={}",
@@ -781,8 +819,8 @@ async fn check_contract(addr: &str, onion_service_id: &str) -> Result<()> {
 }
 
 /// Print the streamed updates for one recovery pass.
-async fn recover_content(addr: &str) -> Result<()> {
-    let mut client = connect_client(addr).await?;
+async fn recover_content(target: &LocalCliTarget) -> Result<()> {
+    let mut client = connect_client(target).await?;
     for update in recover_content_with_client(&mut client).await? {
         println!(
             "most_recent_length={} peers_with_latest={} recoverable_length={} peers_with_recoverable={} total_versions={} peers_with_any_versions={} downloaded_bytes={} recovered={} fallback={}",
@@ -800,18 +838,16 @@ async fn recover_content(addr: &str) -> Result<()> {
     Ok(())
 }
 
-/// Connect to the daemon using the default local key directory.
-async fn connect_client(addr: &str) -> Result<BarterBackupClientClient<Channel>> {
-    let keys_dir = default_keys_dir();
+/// Connect to the daemon using the selected local key directory.
+async fn connect_client(target: &LocalCliTarget) -> Result<BarterBackupClientClient<Channel>> {
     let deadline = Instant::now() + Duration::from_secs(DEFAULT_KEYS_WAIT_SECS);
-    wait_for_cli_keys_until(&keys_dir, deadline).await?;
-    connect_client_with_keys_dir(addr, &keys_dir).await
+    wait_for_cli_keys_until(&target.keys_dir, deadline).await?;
+    connect_client_with_keys_dir(&target.local_addr, &target.keys_dir).await
 }
 
-/// Query daemon state using the default local key directory.
-async fn state_response(addr: &str, wait_timeout: Duration) -> Result<StateResponse> {
-    let keys_dir = default_keys_dir();
-    state_response_with_keys_dir(addr, &keys_dir, wait_timeout).await
+/// Query daemon state using the selected local key directory.
+async fn state_response(target: &LocalCliTarget, wait_timeout: Duration) -> Result<StateResponse> {
+    state_response_with_keys_dir(&target.local_addr, &target.keys_dir, wait_timeout).await
 }
 
 /// Connect to the daemon using the local pinning material in `keys_dir`.
@@ -1026,7 +1062,7 @@ fn friendly_cli_error(error: anyhow::Error, daemon_addr: &str) -> anyhow::Error 
         || message.contains("error trying to connect")
     {
         return anyhow!(
-            "could not reach bbd at {daemon_addr}; make sure the daemon is running and BBCLI_DAEMON_ADDR is correct"
+            "could not reach bbd at {daemon_addr}; make sure the daemon is running and --local-addr or BBCLI_LOCAL_ADDR are correct"
         );
     }
 
@@ -1298,15 +1334,17 @@ pub async fn recover_content_with_client(
 }
 
 /// Return the default local CLI key directory.
-fn default_keys_dir() -> PathBuf {
-    std::env::var("BBCLI_CLI_KEYS_DIR")
-        .map(PathBuf::from)
-        .ok()
-        .unwrap_or_else(|| {
-            home_dir()
-                .map(|path| path.join(".barterbackup/cli-keys"))
-                .unwrap()
-        })
+fn default_keys_dir(data_dir: Option<&Path>) -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("BBCLI_CLI_KEYS_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+
+    if let Some(path) = data_dir {
+        return Ok(path.join("cli-keys"));
+    }
+
+    let home = home_dir().context("resolve home directory")?;
+    Ok(home.join(".barterbackup/cli-keys"))
 }
 
 #[cfg(test)]
@@ -1443,7 +1481,7 @@ mod tests {
     fn friendly_cli_error_maps_common_statuses() {
         let locked = friendly_cli_error(
             anyhow!(tonic::Status::failed_precondition("daemon is locked")),
-            DEFAULT_DAEMON_ADDR,
+            DEFAULT_LOCAL_ADDR,
         );
         assert_eq!(
             locked.to_string(),
@@ -1454,7 +1492,7 @@ mod tests {
             anyhow!(tonic::Status::failed_precondition(
                 "daemon storage is not initialized; run init first"
             )),
-            DEFAULT_DAEMON_ADDR,
+            DEFAULT_LOCAL_ADDR,
         );
         assert_eq!(
             uninitialized.to_string(),
@@ -1465,7 +1503,7 @@ mod tests {
             anyhow!(tonic::Status::failed_precondition(
                 "daemon storage is already initialized"
             )),
-            DEFAULT_DAEMON_ADDR,
+            DEFAULT_LOCAL_ADDR,
         );
         assert_eq!(
             initialized.to_string(),
@@ -1476,7 +1514,7 @@ mod tests {
             anyhow!(tonic::Status::permission_denied(
                 "invalid password for this data directory"
             )),
-            DEFAULT_DAEMON_ADDR,
+            DEFAULT_LOCAL_ADDR,
         );
         assert_eq!(
             bad_password.to_string(),
@@ -1490,16 +1528,16 @@ mod tests {
             anyhow!(
                 "daemon did not create local cli keys in /tmp/x (expected /tmp/x/server.pub and /tmp/x/client.key)"
             ),
-            DEFAULT_DAEMON_ADDR,
+            DEFAULT_LOCAL_ADDR,
         );
         assert!(missing_keys.to_string().contains("bbd is not running yet"));
 
         let refused = friendly_cli_error(
             anyhow!("transport error: tcp connect error: Connection refused"),
-            DEFAULT_DAEMON_ADDR,
+            DEFAULT_LOCAL_ADDR,
         );
         assert!(refused.to_string().contains("could not reach bbd"));
-        assert!(refused.to_string().contains(DEFAULT_DAEMON_ADDR));
+        assert!(refused.to_string().contains(DEFAULT_LOCAL_ADDR));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1579,9 +1617,13 @@ mod tests {
     async fn init_command_checks_state_before_requesting_password() -> anyhow::Result<()> {
         let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let called_clone = called.clone();
+        let target = LocalCliTarget {
+            local_addr: DEFAULT_LOCAL_ADDR.to_string(),
+            keys_dir: tempdir()?.path().join("cli-keys"),
+        };
 
         let error = continue_init_command(
-            DEFAULT_DAEMON_ADDR,
+            &target,
             Duration::from_secs(1),
             StateResponse {
                 storage_initialized: true,
@@ -1606,6 +1648,30 @@ mod tests {
         );
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
         Ok(())
+    }
+
+    #[test]
+    fn args_resolve_local_addr_and_keys_dir_from_data_dir() {
+        let args = Args::parse_from([
+            "bbcli",
+            "--local-addr",
+            "https://127.0.0.1:10001",
+            "--data-dir",
+            "/tmp/bb",
+            "state",
+        ]);
+
+        assert_eq!(args.resolved_local_addr(), "https://127.0.0.1:10001");
+        assert_eq!(
+            args.resolved_keys_dir().unwrap(),
+            PathBuf::from("/tmp/bb/cli-keys")
+        );
+    }
+
+    #[test]
+    fn args_accept_legacy_daemon_addr_alias() {
+        let args = Args::parse_from(["bbcli", "--daemon-addr", "https://127.0.0.1:10002", "state"]);
+        assert_eq!(args.resolved_local_addr(), "https://127.0.0.1:10002");
     }
 
     #[tokio::test(flavor = "multi_thread")]

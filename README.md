@@ -118,12 +118,14 @@ make clippy
 
 Daemon:
 
-- `BBD_CLI_ADDR`: local `clirpc` listen address, default `127.0.0.1:9911`
+- `BBD_LOCAL_ADDR`: local `clirpc` listen address, default `127.0.0.1:9911`
 - `BBD_DATA_DIR`: daemon state directory, default `~/.barterbackup`
 
 CLI:
 
-- `BBCLI_DAEMON_ADDR`: daemon address, default `https://127.0.0.1:9911`
+- `BBCLI_LOCAL_ADDR`: daemon address, default `https://127.0.0.1:9911`
+- `BBCLI_DATA_DIR`: daemon data directory used to locate `<data-dir>/cli-keys`,
+  default `~/.barterbackup`
 - `BBCLI_CLI_KEYS_DIR`: directory containing `server.pub` and `client.key`
 
 Important current behavior:
@@ -142,8 +144,9 @@ Important current behavior:
   per-service replay and introduction-point state, startup prunes only the
   hidden-service-specific `state/hs_ipt*.json` and
   `hss_iptreplay/replay_barterbackup` paths while keeping the public Tor cache
-- if you use a custom `BBD_DATA_DIR`, point `BBCLI_CLI_KEYS_DIR` at the same
-  directory's `cli-keys` subdirectory
+- `bbcli --data-dir <dir>` automatically uses `<dir>/cli-keys`
+- `BBCLI_CLI_KEYS_DIR` overrides that path when you need to point at copied
+  session keys explicitly
 - if `bbd` runs over SSH, you can copy that session `cli-keys` directory to
   your local machine and run `bbcli` locally against the forwarded daemon
   address with `BBCLI_CLI_KEYS_DIR` pointing at the copied keys
@@ -177,11 +180,11 @@ echo 'correct horse battery staple' | bbcli unlock --password-stdin
 If you use a custom data directory:
 
 ```bash
-BBD_DATA_DIR=/tmp/barterbackup bbd
+bbd --data-dir /tmp/barterbackup
 echo 'correct horse battery staple' | \
-  BBCLI_CLI_KEYS_DIR=/tmp/barterbackup/cli-keys bbcli init --password-stdin
+  bbcli --data-dir /tmp/barterbackup init --password-stdin
 echo 'correct horse battery staple' | \
-  BBCLI_CLI_KEYS_DIR=/tmp/barterbackup/cli-keys bbcli unlock --password-stdin
+  bbcli --data-dir /tmp/barterbackup unlock --password-stdin
 ```
 
 Add a peer:
