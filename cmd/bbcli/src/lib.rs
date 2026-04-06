@@ -1047,6 +1047,11 @@ fn friendly_cli_error(error: anyhow::Error, daemon_addr: &str) -> anyhow::Error 
             {
                 anyhow!("daemon storage is already initialized; run `bbcli unlock` instead")
             }
+            Code::FailedPrecondition
+                if status.message() == "local node cannot act as its own peer" =>
+            {
+                anyhow!("the local node cannot be connected as its own peer")
+            }
             Code::Unavailable if status.message() == "unlock already in progress" => {
                 anyhow!("unlock is already in progress; wait for it to finish")
             }
@@ -1519,6 +1524,17 @@ mod tests {
         assert_eq!(
             initialized.to_string(),
             "daemon storage is already initialized; run `bbcli unlock` instead"
+        );
+
+        let self_peer = friendly_cli_error(
+            anyhow!(tonic::Status::failed_precondition(
+                "local node cannot act as its own peer"
+            )),
+            DEFAULT_LOCAL_ADDR,
+        );
+        assert_eq!(
+            self_peer.to_string(),
+            "the local node cannot be connected as its own peer"
         );
 
         let bad_password = friendly_cli_error(
