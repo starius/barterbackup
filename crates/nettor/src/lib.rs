@@ -143,12 +143,25 @@ fn prepare_tor_state_dir(state_dir: &Path) -> Result<()> {
             .with_context(|| format!("create tor state dir {}", state_dir.display()))?;
     }
 
-    // Arti stores public directory caches and hidden-service replay state under
-    // the same root. BarterBackup wants to keep the public cache material but
-    // intentionally re-derives the hidden-service identity on every start and
-    // keeps the corresponding Arti keystore ephemeral. Remove only the
-    // persisted hidden-service state that would otherwise make Arti look for
-    // introduction-point keys from the previous process.
+    // Arti stores public directory caches and per-service hidden-service state
+    // under the same root. BarterBackup wants to keep the public cache
+    // material but intentionally re-derives the hidden-service identity on
+    // every start and keeps the corresponding Arti keystore ephemeral. Remove
+    // only the persisted hidden-service state that would otherwise make Arti
+    // look for introduction-point keys from the previous process.
+    remove_path_if_exists(
+        &state_dir
+            .join("hss")
+            .join(BARTERBACKUP_HS_NICKNAME),
+    )?;
+    remove_path_if_exists(
+        &state_dir
+            .join("hss")
+            .join(format!("{BARTERBACKUP_HS_NICKNAME}.lock")),
+    )?;
+
+    // Keep pruning the older layout too so upgrades from earlier development
+    // versions do not carry forward stale IPT state.
     remove_path_if_exists(
         &state_dir
             .join("state")
@@ -378,13 +391,23 @@ mod tests {
         assert_ne!(first, second);
     }
 
-    /// Hidden-service replay and IPT files are cleared while shared directory
-    /// cache state remains available across restarts.
+    /// Hidden-service per-service state is cleared while shared directory cache
+    /// state remains available across restarts.
     #[test]
     fn prepare_tor_state_dir_prunes_only_hidden_service_state() {
         let state_dir = build_ephemeral_state_dir();
         let cache_file = state_dir.join("dir_blobs").join("cached-microdesc");
         let sqlite_file = state_dir.join("dir.sqlite3");
+        let hidden_service_state_dir = state_dir.join("hss").join(BARTERBACKUP_HS_NICKNAME);
+        let hidden_service_lock = state_dir
+            .join("hss")
+            .join(format!("{BARTERBACKUP_HS_NICKNAME}.lock"));
+        let current_hidden_service_publication =
+            hidden_service_state_dir.join("iptpub.json");
+        let current_hidden_service_intro_points = hidden_service_state_dir.join("ipts.json");
+        let current_hidden_service_pow_state =
+            hidden_service_state_dir.join("pow_manager.json");
+        let current_replay_dir = hidden_service_state_dir.join("iptreplay");
         let hidden_service_publication = state_dir
             .join("state")
             .join(format!("hs_iptpub_{BARTERBACKUP_HS_NICKNAME}.json"));
@@ -395,22 +418,39 @@ mod tests {
             .join("hss_iptreplay")
             .join(format!("replay_{BARTERBACKUP_HS_NICKNAME}"));
         let unrelated_state = state_dir.join("state").join("other-service.json");
+        let unrelated_hidden_service_dir = state_dir.join("hss").join("other-service");
+        let unrelated_hidden_service_lock = state_dir.join("hss").join("other-service.lock");
+        let unrelated_hidden_service_state = unrelated_hidden_service_dir.join("ipts.json");
 
         fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
         fs::create_dir_all(hidden_service_publication.parent().unwrap()).unwrap();
+        fs::create_dir_all(&hidden_service_state_dir).unwrap();
+        fs::create_dir_all(&current_replay_dir).unwrap();
         fs::create_dir_all(&replay_dir).unwrap();
+        fs::create_dir_all(&unrelated_hidden_service_dir).unwrap();
         fs::write(&cache_file, b"cached-public-tor-state").unwrap();
         fs::write(&sqlite_file, b"sqlite").unwrap();
+        fs::write(&hidden_service_lock, b"lock").unwrap();
+        fs::write(&current_hidden_service_publication, b"iptpub").unwrap();
+        fs::write(&current_hidden_service_intro_points, b"ipts").unwrap();
+        fs::write(&current_hidden_service_pow_state, b"pow").unwrap();
+        fs::write(current_replay_dir.join("lock"), b"lock").unwrap();
         fs::write(&hidden_service_publication, b"iptpub").unwrap();
         fs::write(&hidden_service_intro_points, b"ipts").unwrap();
         fs::write(replay_dir.join("lock"), b"lock").unwrap();
         fs::write(&unrelated_state, b"keep-me").unwrap();
+        fs::write(&unrelated_hidden_service_lock, b"lock").unwrap();
+        fs::write(&unrelated_hidden_service_state, b"keep-me").unwrap();
 
         prepare_tor_state_dir(&state_dir).unwrap();
 
         assert!(cache_file.exists());
         assert!(sqlite_file.exists());
         assert!(unrelated_state.exists());
+        assert!(unrelated_hidden_service_lock.exists());
+        assert!(unrelated_hidden_service_state.exists());
+        assert!(!hidden_service_state_dir.exists());
+        assert!(!hidden_service_lock.exists());
         assert!(!hidden_service_publication.exists());
         assert!(!hidden_service_intro_points.exists());
         assert!(!replay_dir.exists());
