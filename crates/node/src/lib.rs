@@ -49,6 +49,8 @@ pub struct Node {
     storage_config: Mutex<clirpc::StorageConfig>,
     /// peer_connector dials other nodes when peer sync is enabled.
     peer_connector: Mutex<Option<Arc<dyn PeerConnector>>>,
+    /// peer_client_cache reuses recent outbound peer clients across operations.
+    peer_client_cache: Mutex<BTreeMap<String, CachedPeerClient>>,
 }
 
 /// Return the peer-content size limit as an `i64` for protobuf comparisons.
@@ -61,6 +63,12 @@ const DEFAULT_ALLOCATED_STORAGE_FOR_PEERS: i64 = 1024 * 1024 * 1024;
 
 /// MAX_TRACKED_PEERS is the maximum number of peers kept in metadata.
 const MAX_TRACKED_PEERS: usize = 1024;
+
+/// MAX_CACHED_PEER_CLIENTS bounds the in-memory outbound peer client cache.
+const MAX_CACHED_PEER_CLIENTS: usize = 32;
+
+/// PEER_CLIENT_CACHE_IDLE_TTL_SECS expires idle cached peer clients.
+const PEER_CLIENT_CACHE_IDLE_TTL_SECS: i64 = 5 * 60;
 
 /// StorageClass splits mirrored peer blobs into reserved and best-effort sets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,6 +107,15 @@ enum StorageAdmission {
     Store { evict_content_ids: Vec<Vec<u8>> },
     /// TrackOnly remembers the peer's latest content id without caching bytes.
     TrackOnly,
+}
+
+/// CachedPeerClient keeps one reusable outbound peer client with its last use time.
+#[derive(Clone)]
+struct CachedPeerClient {
+    /// client is the configured outbound gRPC peer client.
+    client: transport::PeerClient,
+    /// last_used_at_secs is the node clock second when this client was last reused.
+    last_used_at_secs: i64,
 }
 
 /// PeerAdmissionPlan describes how peer-capacity enforcement handles a peer.
@@ -419,6 +436,7 @@ impl Node {
             known_peers: Mutex::new(BTreeSet::new()),
             storage_config: Mutex::new(default_storage_config()),
             peer_connector: Mutex::new(None),
+            peer_client_cache: Mutex::new(BTreeMap::new()),
         };
 
         if node.store.is_some() {
@@ -694,6 +712,59 @@ impl Node {
         *self.peer_connector.lock().unwrap() = Some(peer_connector);
     }
 
+    /// Return the current node-clock second for cache bookkeeping.
+    fn cache_now_secs(&self) -> i64 {
+        i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX)
+    }
+
+    /// Drop expired outbound peer clients.
+    fn prune_peer_runtime_state(&self, now_secs: i64) {
+        self.peer_client_cache.lock().unwrap().retain(|_, entry| {
+            now_secs.saturating_sub(entry.last_used_at_secs) <= PEER_CLIENT_CACHE_IDLE_TTL_SECS
+        });
+    }
+
+    /// Return one cached outbound peer client when it is still inside the idle TTL.
+    fn cached_peer_client(&self, peer_onion: &str) -> Option<transport::PeerClient> {
+        let now_secs = self.cache_now_secs();
+        self.prune_peer_runtime_state(now_secs);
+
+        let mut cache = self.peer_client_cache.lock().unwrap();
+        let entry = cache.get_mut(peer_onion)?;
+        entry.last_used_at_secs = now_secs;
+        Some(entry.client.clone())
+    }
+
+    /// Remember one outbound peer client in the bounded in-memory cache.
+    fn remember_peer_client(&self, peer_onion: &str, client: &transport::PeerClient) {
+        let now_secs = self.cache_now_secs();
+        self.prune_peer_runtime_state(now_secs);
+
+        let mut cache = self.peer_client_cache.lock().unwrap();
+        cache.insert(
+            peer_onion.to_string(),
+            CachedPeerClient {
+                client: client.clone(),
+                last_used_at_secs: now_secs,
+            },
+        );
+        while cache.len() > MAX_CACHED_PEER_CLIENTS {
+            let Some(oldest_key) = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used_at_secs)
+                .map(|(peer_onion, _)| peer_onion.clone())
+            else {
+                break;
+            };
+            cache.remove(&oldest_key);
+        }
+    }
+
+    /// Evict one cached outbound peer client immediately.
+    fn evict_cached_peer_client(&self, peer_onion: &str) {
+        self.peer_client_cache.lock().unwrap().remove(peer_onion);
+    }
+
     /// Add a peer onion hostname to the configured peer set.
     pub fn add_known_peer(&self, peer_onion: &str) -> Result<(), Status> {
         self.add_known_peer_with_origin(peer_onion, peer_origin_code(false, true))
@@ -858,6 +929,10 @@ impl Node {
         peer_onion: &str,
         connect_timeout: Duration,
     ) -> Result<transport::PeerClient, Status> {
+        if let Some(client) = self.cached_peer_client(peer_onion) {
+            return Ok(client);
+        }
+
         let connector = self
             .peer_connector
             .lock()
@@ -881,7 +956,9 @@ impl Node {
             )?;
         }
 
-        Ok(transport::configure_peer_client(client))
+        let client = transport::configure_peer_client(client);
+        self.remember_peer_client(peer_onion, &client);
+        Ok(client)
     }
 
     /// Run one peer RPC under the shared timeout policy.
@@ -911,13 +988,22 @@ impl Node {
     {
         match tokio::time::timeout(rpc_timeout, future).await {
             Ok(Ok(response)) => Ok(response.into_inner()),
-            Ok(Err(error)) => Err(Status::new(
-                error.code(),
-                format!("{operation} from {peer_onion}: {}", error.message()),
-            )),
-            Err(_) => Err(Status::deadline_exceeded(format!(
-                "{operation} from {peer_onion} timed out"
-            ))),
+            Ok(Err(error)) => {
+                let status = Status::new(
+                    error.code(),
+                    format!("{operation} from {peer_onion}: {}", error.message()),
+                );
+                if transport::is_retryable_peer_status(&status) {
+                    self.evict_cached_peer_client(peer_onion);
+                }
+                Err(status)
+            }
+            Err(_) => {
+                self.evict_cached_peer_client(peer_onion);
+                Err(Status::deadline_exceeded(format!(
+                    "{operation} from {peer_onion} timed out"
+                )))
+            }
         }
     }
 
@@ -1840,14 +1926,24 @@ impl Node {
     pub async fn connected_peers_response(&self) -> Result<clirpc::ConnectedPeersResponse, Status> {
         let mut connected_peers = Vec::new();
         let mut offline_peers = Vec::new();
+        let policy =
+            transport::PeerRetryPolicy::for_operation(transport::PeerOperation::HealthCheck);
 
         for peer_onion in self.known_peers() {
             if self.is_our_onion(&peer_onion) {
                 continue;
             }
-            let is_online = match self.connect_peer_client(&peer_onion).await {
-                Ok(mut client) => client
-                    .health_check(bbrpc::HealthCheckRequest {})
+            let is_online = match self
+                .connect_peer_client_with_timeout(&peer_onion, policy.connect_timeout)
+                .await
+            {
+                Ok(mut client) => self
+                    .peer_rpc_with_timeout(
+                        &peer_onion,
+                        "health check",
+                        policy.rpc_timeout,
+                        client.health_check(bbrpc::HealthCheckRequest {}),
+                    )
                     .await
                     .is_ok(),
                 Err(_) => false,
@@ -3676,6 +3772,54 @@ mod tests {
         }
     }
 
+    /// UnavailableHealthPeerService returns a retryable health-check failure.
+    #[derive(Clone, Default)]
+    struct UnavailableHealthPeerService;
+
+    #[tonic::async_trait]
+    impl bbrpc::barter_backup_server_server::BarterBackupServer for UnavailableHealthPeerService {
+        async fn health_check(
+            &self,
+            _request: Request<bbrpc::HealthCheckRequest>,
+        ) -> std::result::Result<Response<bbrpc::HealthCheckResponse>, Status> {
+            Err(Status::unavailable("peer health unavailable"))
+        }
+
+        async fn peer_exchange(
+            &self,
+            _request: Request<bbrpc::PeerExchangeRequest>,
+        ) -> std::result::Result<Response<bbrpc::PeerExchangeResponse>, Status> {
+            Err(Status::unimplemented(
+                "peer exchange is not used in this test",
+            ))
+        }
+
+        async fn get_content_revision(
+            &self,
+            _request: Request<bbrpc::GetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::GetContentRevisionResponse>, Status> {
+            Err(Status::unimplemented(
+                "get content revision is not used in this test",
+            ))
+        }
+
+        async fn set_content_revision(
+            &self,
+            _request: Request<bbrpc::SetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::SetContentRevisionResponse>, Status> {
+            Err(Status::unimplemented(
+                "set content revision is not used in this test",
+            ))
+        }
+
+        async fn download(
+            &self,
+            _request: Request<bbrpc::DownloadRequest>,
+        ) -> std::result::Result<Response<bbrpc::DownloadResponse>, Status> {
+            Err(Status::unimplemented("download is not used in this test"))
+        }
+    }
+
     /// Spawn a plain h2c peer server for adversarial tests.
     async fn spawn_plain_peer_server<S>(
         service: S,
@@ -4674,6 +4818,123 @@ mod tests {
         );
 
         online_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_client_cache_reuses_recent_dials() -> anyhow::Result<()> {
+        let node = Arc::new(Node::new("cache-reuse-owner")?);
+        let peer_identity = Node::new("cache-reuse-peer")?;
+        let base_connector = Arc::new(PlainPeerConnector::new());
+        let counting_connector = Arc::new(FlakyPeerConnector::new(base_connector.clone(), 0));
+        node.set_peer_connector(counting_connector.clone());
+
+        let (endpoint, server) = spawn_plain_peer_server(StaticPeerService::new(
+            bbrpc::GetContentRevisionResponse::default(),
+            DownloadBehavior::Response(bbrpc::DownloadResponse::default()),
+        ))
+        .await?;
+        base_connector.register_peer(peer_identity.address(), &endpoint);
+
+        let _first = node.connect_peer_client(peer_identity.address()).await?;
+        let _second = node.connect_peer_client(peer_identity.address()).await?;
+
+        assert_eq!(counting_connector.dial_count(), 1);
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_client_cache_expires_after_idle_ttl() -> anyhow::Result<()> {
+        let clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let node = Arc::new(Node::with_local_storage_and_clock(
+            "cache-expire-owner",
+            Arc::new(storage::MemoryFilesystem::new()),
+            clock.clone(),
+        )?);
+        let peer_identity = Node::new("cache-expire-peer")?;
+        let base_connector = Arc::new(PlainPeerConnector::new());
+        let counting_connector = Arc::new(FlakyPeerConnector::new(base_connector.clone(), 0));
+        node.set_peer_connector(counting_connector.clone());
+
+        let (endpoint, server) = spawn_plain_peer_server(StaticPeerService::new(
+            bbrpc::GetContentRevisionResponse::default(),
+            DownloadBehavior::Response(bbrpc::DownloadResponse::default()),
+        ))
+        .await?;
+        base_connector.register_peer(peer_identity.address(), &endpoint);
+
+        let _first = node.connect_peer_client(peer_identity.address()).await?;
+        clock.advance(Duration::from_secs(
+            u64::try_from(PEER_CLIENT_CACHE_IDLE_TTL_SECS + 1).unwrap_or(u64::MAX),
+        ));
+        let _second = node.connect_peer_client(peer_identity.address()).await?;
+
+        assert_eq!(counting_connector.dial_count(), 2);
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retryable_peer_rpc_failure_evicts_cached_client() -> anyhow::Result<()> {
+        let node = Arc::new(Node::new("cache-evict-owner")?);
+        let peer_identity = Node::new("cache-evict-peer")?;
+        let base_connector = Arc::new(PlainPeerConnector::new());
+        let counting_connector = Arc::new(FlakyPeerConnector::new(base_connector.clone(), 0));
+        node.set_peer_connector(counting_connector.clone());
+
+        let (endpoint, server) = spawn_plain_peer_server(UnavailableHealthPeerService).await?;
+        base_connector.register_peer(peer_identity.address(), &endpoint);
+
+        let _first = node.connect_peer_client(peer_identity.address()).await?;
+        let mut cached_client = node.connect_peer_client(peer_identity.address()).await?;
+        let error = node
+            .peer_rpc(
+                peer_identity.address(),
+                "health check",
+                cached_client.health_check(bbrpc::HealthCheckRequest {}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::Unavailable);
+
+        let _redialed = node.connect_peer_client(peer_identity.address()).await?;
+        assert_eq!(counting_connector.dial_count(), 2);
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_client_cache_stays_bounded() -> anyhow::Result<()> {
+        let node = Arc::new(Node::new("cache-bound-owner")?);
+        let base_connector = Arc::new(PlainPeerConnector::new());
+        let counting_connector = Arc::new(FlakyPeerConnector::new(base_connector.clone(), 0));
+        node.set_peer_connector(counting_connector.clone());
+
+        let (endpoint, server) = spawn_plain_peer_server(StaticPeerService::new(
+            bbrpc::GetContentRevisionResponse::default(),
+            DownloadBehavior::Response(bbrpc::DownloadResponse::default()),
+        ))
+        .await?;
+
+        let mut peer_onions = Vec::new();
+        for index in 0..(MAX_CACHED_PEER_CLIENTS + 2) {
+            let peer_identity = Node::new(&format!("cache-bound-peer-{index}"))?;
+            base_connector.register_peer(peer_identity.address(), &endpoint);
+            peer_onions.push(peer_identity.address().to_string());
+            let _client = node.connect_peer_client(peer_identity.address()).await?;
+        }
+
+        assert_eq!(
+            node.peer_client_cache.lock().unwrap().len(),
+            MAX_CACHED_PEER_CLIENTS
+        );
+
+        let _redialed = node.connect_peer_client(&peer_onions[0]).await?;
+        assert_eq!(counting_connector.dial_count(), MAX_CACHED_PEER_CLIENTS + 3);
+
+        server.abort();
         Ok(())
     }
 
