@@ -60,6 +60,21 @@ enum FirstContactDirection
     FIRST_CONTACT_DIRECTION_INBOUND = 2;
 }
 
+// PeerReachability records the last observed transport reachability state.
+enum PeerReachability
+{
+    // PEER_REACHABILITY_UNKNOWN means we have no recorded live probe outcome.
+    PEER_REACHABILITY_UNKNOWN = 0;
+
+    // PEER_REACHABILITY_ONLINE means the most recent completed transport
+    // interaction reached the peer successfully.
+    PEER_REACHABILITY_ONLINE = 1;
+
+    // PEER_REACHABILITY_OFFLINE means the most recent completed transport
+    // interaction failed because the peer could not be reached.
+    PEER_REACHABILITY_OFFLINE = 2;
+}
+
 // PeerContent describes one peer-visible mirrored revision.
 message PeerContent {
     // content_id is the peer's encrypted revision identifier.
@@ -98,6 +113,14 @@ message Peer {
 
     // first_contact_direction records who connected first, if known.
     FirstContactDirection first_contact_direction = 8;
+
+    // reachability records whether the most recent completed transport
+    // interaction reached the peer successfully.
+    PeerReachability reachability = 9;
+
+    // last_live_at is the Unix timestamp (seconds) when this peer last
+    // responded successfully over the transport.
+    int64 last_live_at = 10;
 }
 
 // ConflictRevision describes one locally stored revision involved in a

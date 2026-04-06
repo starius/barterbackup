@@ -676,6 +676,8 @@ mod tests {
             latest_cached_content: None,
             origin: storedpb::PeerOrigin::Discovered as i32,
             first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
+            reachability: storedpb::PeerReachability::Unknown as i32,
+            last_live_at: 0,
         }];
         let encoded = codec
             .encode(sample_seed(7), &sample_files(), &peers)

@@ -447,6 +447,8 @@ impl Store {
                 latest_cached_content: None,
                 origin,
                 first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
+                reachability: storedpb::PeerReachability::Unknown as i32,
+                last_live_at: 0,
             });
         }
         self.persist_peer_state()
@@ -539,7 +541,34 @@ impl Store {
                 latest_cached_content: None,
                 origin: storedpb::PeerOrigin::Discovered as i32,
                 first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
+                reachability: storedpb::PeerReachability::Unknown as i32,
+                last_live_at: 0,
             });
+        }
+
+        self.persist_peer_state()
+    }
+
+    /// Record the latest observed transport reachability for a peer.
+    pub fn set_peer_reachability(
+        &mut self,
+        onion_pubkey: &[u8],
+        reachability: i32,
+        last_live_at: Option<i64>,
+    ) -> Result<(), StorageError> {
+        if onion_pubkey.is_empty() {
+            return Err(StorageError::InvalidFileName);
+        }
+
+        self.ensure_peer(onion_pubkey)?;
+        let peer = self
+            .peers
+            .iter_mut()
+            .find(|peer| peer.onion_pubkey == onion_pubkey)
+            .expect("peer entry must exist after ensure_peer");
+        peer.reachability = reachability;
+        if let Some(last_live_at) = last_live_at {
+            peer.last_live_at = last_live_at;
         }
 
         self.persist_peer_state()
@@ -1440,6 +1469,8 @@ mod tests {
                 latest_cached_content: None,
                 origin: storedpb::PeerOrigin::Discovered as i32,
                 first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
+                reachability: storedpb::PeerReachability::Unknown as i32,
+                last_live_at: 0,
             }],
             active_conflict: None,
             archived_conflicts: Vec::new(),

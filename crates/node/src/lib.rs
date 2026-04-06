@@ -123,6 +123,42 @@ struct CachedPeerClient {
     last_used_at_secs: i64,
 }
 
+/// PeerInventoryStatus reports the local daemon's current view of one peer.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum PeerInventoryStatus {
+    /// Connected means an outbound cached client is currently open.
+    Connected,
+    /// Online means the last completed transport interaction succeeded.
+    Online,
+    /// Offline means the last completed transport interaction failed or is unknown.
+    Offline,
+}
+
+/// PeerInventoryEntry is one locally reported peer summary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PeerInventoryEntry {
+    /// onion_service_id is the peer onion hostname.
+    onion_service_id: String,
+    /// status is the current locally observed transport state.
+    status: PeerInventoryStatus,
+    /// has_contract reports whether persisted state indicates an active contract relationship.
+    has_contract: bool,
+    /// score_seconds is the peer's current persisted score.
+    score_seconds: i64,
+    /// score_measured_at is when `score_seconds` was last updated.
+    score_measured_at: i64,
+    /// stored_content_bytes is the number of mirrored bytes currently cached locally.
+    stored_content_bytes: i64,
+    /// latest_known_content_length is the newest peer revision length we know exists.
+    latest_known_content_length: i64,
+    /// latest_cached_content_length is the newest peer revision length we currently cache.
+    latest_cached_content_length: i64,
+    /// stale_cache reports whether latest known and latest cached revisions differ.
+    stale_cache: bool,
+    /// last_live_at is when the peer last responded successfully over the transport.
+    last_live_at: i64,
+}
+
 /// PeerAdmissionPlan describes how peer-capacity enforcement handles a peer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PeerAdmissionPlan {
@@ -323,6 +359,48 @@ fn peer_latest_known_content(peer: &storedpb::Peer) -> Option<storedpb::PeerCont
             content_length: 0,
         })
     })
+}
+
+/// Return whether persisted metadata indicates an existing contract relationship.
+fn peer_has_contract(peer: &storedpb::Peer) -> bool {
+    peer.score_measured_at > 0
+        || peer.score_seconds != 0
+        || peer_latest_known_content(peer).is_some()
+        || peer_latest_cached_content(peer).is_some()
+}
+
+/// Convert persisted reachability plus cache presence into the reported status.
+fn peer_inventory_status(peer: Option<&storedpb::Peer>, connected: bool) -> PeerInventoryStatus {
+    if connected {
+        return PeerInventoryStatus::Connected;
+    }
+
+    match peer.map(|peer| peer.reachability) {
+        Some(reachability) if reachability == storedpb::PeerReachability::Online as i32 => {
+            PeerInventoryStatus::Online
+        }
+        _ => PeerInventoryStatus::Offline,
+    }
+}
+
+/// Return the group priority used when listing peers.
+fn peer_inventory_group_rank(entry: &PeerInventoryEntry) -> u8 {
+    if entry.has_contract {
+        0
+    } else if entry.status != PeerInventoryStatus::Offline {
+        1
+    } else {
+        2
+    }
+}
+
+/// Return the status priority used inside one peer listing group.
+fn peer_inventory_status_rank(status: PeerInventoryStatus) -> u8 {
+    match status {
+        PeerInventoryStatus::Connected => 0,
+        PeerInventoryStatus::Online => 1,
+        PeerInventoryStatus::Offline => 2,
+    }
 }
 
 /// Convert one stored peer-content summary into the RPC content shape.
@@ -747,6 +825,16 @@ impl Node {
         Some(entry.client.clone())
     }
 
+    /// Report whether one cached outbound peer client is currently open.
+    fn has_cached_peer_client(&self, peer_onion: &str) -> bool {
+        let now_secs = self.cache_now_secs();
+        self.prune_peer_runtime_state(now_secs);
+        self.peer_client_cache
+            .lock()
+            .unwrap()
+            .contains_key(peer_onion)
+    }
+
     /// Remember one outbound peer client in the bounded in-memory cache.
     fn remember_peer_client(&self, peer_onion: &str, client: &transport::PeerClient) {
         let now_secs = self.cache_now_secs();
@@ -775,6 +863,47 @@ impl Node {
     /// Evict one cached outbound peer client immediately.
     fn evict_cached_peer_client(&self, peer_onion: &str) {
         self.peer_client_cache.lock().unwrap().remove(peer_onion);
+    }
+
+    /// Persist a successful live transport interaction with one peer.
+    fn note_peer_live(&self, peer_onion: &str) -> Result<(), Status> {
+        if self.is_our_onion(peer_onion) {
+            return Ok(());
+        }
+        if self.store.is_none() {
+            return Ok(());
+        }
+
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
+            .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+        let now_secs = i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX);
+        self.with_store(|store| {
+            store.set_peer_reachability(
+                peer_public_key.as_bytes(),
+                storedpb::PeerReachability::Online as i32,
+                Some(now_secs),
+            )
+        })
+    }
+
+    /// Persist a failed live transport interaction with one peer.
+    fn note_peer_offline(&self, peer_onion: &str) -> Result<(), Status> {
+        if self.is_our_onion(peer_onion) {
+            return Ok(());
+        }
+        if self.store.is_none() {
+            return Ok(());
+        }
+
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
+            .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+        self.with_store(|store| {
+            store.set_peer_reachability(
+                peer_public_key.as_bytes(),
+                storedpb::PeerReachability::Offline as i32,
+                None,
+            )
+        })
     }
 
     /// Return whether the peer-exchange cooldown has elapsed for one peer.
@@ -1078,6 +1207,7 @@ impl Node {
                 peer_origin_code(false, false),
                 storedpb::FirstContactDirection::Outbound as i32,
             )?;
+            self.note_peer_live(peer_onion)?;
         }
 
         let client = transport::configure_peer_client(client);
@@ -1135,7 +1265,7 @@ impl Node {
     /// operation budget.
     async fn retry_peer_operation<T, F, Fut>(
         &self,
-        _peer_onion: &str,
+        peer_onion: &str,
         policy: transport::PeerRetryPolicy,
         mut operation: F,
     ) -> Result<T, Status>
@@ -1153,6 +1283,7 @@ impl Node {
                     retry_attempt = retry_attempt.saturating_add(1);
                     let backoff = policy.backoff_for_attempt(retry_attempt);
                     if started_at.elapsed().saturating_add(backoff) > policy.total_budget {
+                        let _ = self.note_peer_offline(peer_onion);
                         return Err(error);
                     }
                     tokio::time::sleep(backoff).await;
@@ -2034,6 +2165,87 @@ impl Node {
         })
     }
 
+    /// Build the current local peer inventory without dialing any peers.
+    fn peer_inventory(&self) -> Result<Vec<PeerInventoryEntry>, Status> {
+        let tracked_peers = if self.store.is_some() {
+            self.tracked_peers()?
+        } else {
+            Vec::new()
+        };
+        let mut tracked_by_onion = BTreeMap::new();
+        for peer in tracked_peers {
+            let peer_onion = match self.onion_from_public_key_bytes(&peer.onion_pubkey) {
+                Ok(peer_onion) => peer_onion,
+                Err(_) => continue,
+            };
+            tracked_by_onion.insert(peer_onion, peer);
+        }
+
+        let mut peers = Vec::new();
+        for peer_onion in self.known_peers() {
+            if self.is_our_onion(&peer_onion) {
+                continue;
+            }
+
+            let tracked_peer = tracked_by_onion.get(&peer_onion);
+            let connected = self.has_cached_peer_client(&peer_onion);
+            let status = peer_inventory_status(tracked_peer, connected);
+            let latest_known_content = tracked_peer.and_then(peer_latest_known_content);
+            let latest_cached_content = tracked_peer.and_then(peer_latest_cached_content);
+            let stored_content_bytes = match tracked_peer {
+                Some(peer) => {
+                    let peer_public_key = ed25519_dalek::PublicKey::from_bytes(&peer.onion_pubkey)
+                        .map_err(|_| Status::invalid_argument("peer public key is invalid"))?;
+                    self.mirrored_peer_content_length(&peer_public_key)?
+                }
+                None => 0,
+            };
+
+            peers.push(PeerInventoryEntry {
+                onion_service_id: peer_onion,
+                status,
+                has_contract: tracked_peer.is_some_and(peer_has_contract),
+                score_seconds: tracked_peer
+                    .map(|peer| peer.score_seconds)
+                    .unwrap_or_default(),
+                score_measured_at: tracked_peer
+                    .map(|peer| peer.score_measured_at)
+                    .unwrap_or_default(),
+                stored_content_bytes,
+                latest_known_content_length: latest_known_content
+                    .as_ref()
+                    .map(|content| content.content_length)
+                    .unwrap_or_default(),
+                latest_cached_content_length: latest_cached_content
+                    .as_ref()
+                    .map(|content| content.content_length)
+                    .unwrap_or_default(),
+                stale_cache: latest_known_content
+                    .as_ref()
+                    .map(|content| &content.content_id)
+                    != latest_cached_content
+                        .as_ref()
+                        .map(|content| &content.content_id),
+                last_live_at: tracked_peer
+                    .map(|peer| peer.last_live_at)
+                    .unwrap_or_default(),
+            });
+        }
+
+        peers.sort_by(|left, right| {
+            peer_inventory_group_rank(left)
+                .cmp(&peer_inventory_group_rank(right))
+                .then(
+                    peer_inventory_status_rank(left.status)
+                        .cmp(&peer_inventory_status_rank(right.status)),
+                )
+                .then(right.last_live_at.cmp(&left.last_live_at))
+                .then(right.score_seconds.cmp(&left.score_seconds))
+                .then(left.onion_service_id.cmp(&right.onion_service_id))
+        });
+        Ok(peers)
+    }
+
     /// Report whether our current local content matches the peer's advertised
     /// copy of our revision.
     fn our_content_synced_with_peer(
@@ -2138,7 +2350,11 @@ impl Node {
                             "failed to refresh mirrored peer content while building contracts"
                         );
                     }
+                } else {
+                    let _ = self.note_peer_offline(&peer_onion);
                 }
+            } else {
+                let _ = self.note_peer_offline(&peer_onion);
             }
             let (their_latest_known_content, their_latest_cached_content) =
                 self.mirrored_peer_revision_state(&peer_public_key)?;
@@ -4124,6 +4340,17 @@ mod tests {
         })?)
     }
 
+    /// Return the current in-memory peer inventory entry for one onion identifier.
+    fn peer_inventory_entry(
+        node: &Node,
+        peer_onion: &str,
+    ) -> anyhow::Result<Option<PeerInventoryEntry>> {
+        Ok(node
+            .peer_inventory()?
+            .into_iter()
+            .find(|peer| peer.onion_service_id == peer_onion))
+    }
+
     /// Return the current content info and encrypted blob from a node.
     fn current_content_snapshot(node: &Node) -> anyhow::Result<(bbrpc::ContentInfo, Vec<u8>)> {
         let content_info = node
@@ -4451,6 +4678,8 @@ mod tests {
             latest_cached_content: None,
             origin,
             first_contact_direction,
+            reachability: storedpb::PeerReachability::Unknown as i32,
+            last_live_at: 0,
         }
     }
 
@@ -5002,7 +5231,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn connected_peers_classifies_online_and_offline_nodes() -> anyhow::Result<()> {
+    async fn peer_inventory_uses_cached_and_persisted_reachability() -> anyhow::Result<()> {
         let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let requester_node = Arc::new(Node::with_local_storage("requester", requester_filesystem)?);
         let online_node = Arc::new(Node::new("online-peer")?);
@@ -5014,30 +5243,76 @@ mod tests {
 
         let online_server =
             spawn_registered_p2p_server(online_node.clone(), connector.as_ref()).await?;
-        let cli = CliService::new(requester_node.clone());
+        let _connected_client = requester_node
+            .connect_peer_client(online_node.address())
+            .await?;
+        requester_node.note_peer_offline(offline_node.address())?;
 
-        let response = cli
-            .connected_peers(tonic::Request::new(clirpc::ConnectedPeersRequest {}))
-            .await?
-            .into_inner();
-        assert_eq!(
-            response
-                .connected_peers
-                .into_iter()
-                .map(|peer| peer.onion_service_id)
-                .collect::<Vec<_>>(),
-            vec![online_node.address().to_string()]
-        );
-        assert_eq!(
-            response
-                .offline_peers
-                .into_iter()
-                .map(|peer| peer.onion_service_id)
-                .collect::<Vec<_>>(),
-            vec![offline_node.address().to_string()]
-        );
+        let online = peer_inventory_entry(requester_node.as_ref(), online_node.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing online peer entry"))?;
+        let offline = peer_inventory_entry(requester_node.as_ref(), offline_node.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing offline peer entry"))?;
+
+        assert_eq!(online.status, PeerInventoryStatus::Connected);
+        assert!(online.last_live_at > 0);
+        assert_eq!(offline.status, PeerInventoryStatus::Offline);
+        assert_eq!(offline.last_live_at, 0);
 
         online_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_inventory_sorts_contracts_before_online_and_offline() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage(
+            "peer-inventory-order",
+            filesystem,
+        )?);
+        let contract_peer = Node::new("contract-peer")?;
+        let online_peer = Node::new("online-inventory-peer")?;
+        let offline_peer = Node::new("offline-inventory-peer")?;
+
+        node.add_known_peer(contract_peer.address())?;
+        node.add_known_peer(online_peer.address())?;
+        node.add_known_peer(offline_peer.address())?;
+
+        let contract_key = keys::public_key_from_onion_hostname(contract_peer.address())?;
+        let online_key = keys::public_key_from_onion_hostname(online_peer.address())?;
+        let offline_key = keys::public_key_from_onion_hostname(offline_peer.address())?;
+        node.with_store(|store| {
+            store.set_peer_score(contract_key.as_bytes(), 42, 10)?;
+            store.set_peer_reachability(
+                contract_key.as_bytes(),
+                storedpb::PeerReachability::Online as i32,
+                Some(10),
+            )?;
+            store.set_peer_reachability(
+                online_key.as_bytes(),
+                storedpb::PeerReachability::Online as i32,
+                Some(20),
+            )?;
+            store.set_peer_reachability(
+                offline_key.as_bytes(),
+                storedpb::PeerReachability::Offline as i32,
+                None,
+            )?;
+            Ok(())
+        })?;
+
+        let inventory = node.peer_inventory()?;
+        assert_eq!(
+            inventory
+                .into_iter()
+                .map(|peer| peer.onion_service_id)
+                .collect::<Vec<_>>(),
+            vec![
+                contract_peer.address().to_string(),
+                online_peer.address().to_string(),
+                offline_peer.address().to_string(),
+            ]
+        );
+
         Ok(())
     }
 
