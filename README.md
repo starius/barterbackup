@@ -120,6 +120,7 @@ Daemon:
 
 - `BBD_LOCAL_ADDR`: local `clirpc` listen address, default `127.0.0.1:9911`
 - `BBD_DATA_DIR`: daemon state directory, default `~/.barterbackup`
+- `RUST_LOG`: standard tracing filter, default `info`
 
 CLI:
 
@@ -129,6 +130,18 @@ CLI:
 - `BBCLI_CLI_KEYS_DIR`: directory containing `server.pub` and `client.key`
 - `bbcli --local-addr` also accepts a bare `host:port` value and will assume
   `https://`, so the same address string can be reused for `bbd` and `bbcli`
+
+To see debug logs from the daemon, start it with `RUST_LOG=debug`, for example:
+
+```bash
+RUST_LOG=debug bbd
+```
+
+You can also scope this to specific crates, for example:
+
+```bash
+RUST_LOG=bbd=debug,node=debug bbd
+```
 
 Important current behavior:
 
