@@ -431,6 +431,11 @@ enum ContractState
 
     // COMPLETED means the operation finished successfully.
     COMPLETED = 8;
+
+    // PEER_UNAVAILABLE means we could not complete the check because the peer
+    // stayed unreachable or failed to serve the requested data before the
+    // retry budget expired.
+    PEER_UNAVAILABLE = 9;
 };
 
 // ProposeContractUpdate reports progress or status changes while proposing a

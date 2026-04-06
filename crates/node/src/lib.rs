@@ -2130,12 +2130,64 @@ impl Node {
         &self,
         peer_onion: &str,
     ) -> Result<Vec<clirpc::CheckContractUpdate>, Status> {
-        self.retry_peer_operation(
+        self.check_contract_updates_with_policy(
             peer_onion,
             transport::PeerRetryPolicy::for_operation(transport::PeerOperation::Check),
-            || self.check_contract_updates_once(peer_onion),
         )
         .await
+    }
+
+    /// Verify one peer contract under the provided retry and timeout policy.
+    async fn check_contract_updates_with_policy(
+        &self,
+        peer_onion: &str,
+        policy: transport::PeerRetryPolicy,
+    ) -> Result<Vec<clirpc::CheckContractUpdate>, Status> {
+        if self.is_our_onion(peer_onion) {
+            return Err(self.self_peer_error());
+        }
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
+            .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+        match self
+            .retry_peer_operation(peer_onion, policy, || {
+                self.check_contract_updates_once(peer_onion, policy)
+            })
+            .await
+        {
+            Ok(updates) => Ok(updates),
+            Err(error) if transport::is_retryable_peer_status(&error) => {
+                let our_content_length = self
+                    .responder_content()?
+                    .map(|content| content.content_length)
+                    .unwrap_or(0);
+                let new_score = self.update_peer_score(&peer_public_key, false)?;
+                warn!(
+                    peer = %peer_onion,
+                    code = ?error.code(),
+                    message = %error.message(),
+                    new_score_seconds = new_score,
+                    our_content_length,
+                    "peer contract check failed after retries"
+                );
+                Ok(vec![
+                    clirpc::CheckContractUpdate {
+                        state: clirpc::ContractState::ConnectingToPeer as i32,
+                        success: false,
+                        our_content_length: 0,
+                        our_content_section_offset: 0,
+                        our_content_section_length: 0,
+                    },
+                    clirpc::CheckContractUpdate {
+                        state: clirpc::ContractState::PeerUnavailable as i32,
+                        success: false,
+                        our_content_length,
+                        our_content_section_offset: 0,
+                        our_content_section_length: 0,
+                    },
+                ])
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Perform one contract-check attempt against a peer without any outer
@@ -2143,6 +2195,7 @@ impl Node {
     async fn check_contract_updates_once(
         &self,
         peer_onion: &str,
+        policy: transport::PeerRetryPolicy,
     ) -> Result<Vec<clirpc::CheckContractUpdate>, Status> {
         if self.is_our_onion(peer_onion) {
             return Err(self.self_peer_error());
@@ -2159,7 +2212,6 @@ impl Node {
 
         // Refresh the peer's advertised content before validating their copy of
         // our own revision.
-        let policy = transport::PeerRetryPolicy::for_operation(transport::PeerOperation::Check);
         let mut client = self
             .connect_peer_client_with_timeout(peer_onion, policy.connect_timeout)
             .await?;
@@ -3489,6 +3541,141 @@ mod tests {
         }
     }
 
+    /// RetryableRevisionFailurePeerService always fails revision probes with a
+    /// retryable status.
+    #[derive(Clone, Default)]
+    struct RetryableRevisionFailurePeerService;
+
+    #[tonic::async_trait]
+    impl bbrpc::barter_backup_server_server::BarterBackupServer
+        for RetryableRevisionFailurePeerService
+    {
+        async fn health_check(
+            &self,
+            _request: Request<bbrpc::HealthCheckRequest>,
+        ) -> std::result::Result<Response<bbrpc::HealthCheckResponse>, Status> {
+            Ok(Response::new(bbrpc::HealthCheckResponse::default()))
+        }
+
+        async fn peer_exchange(
+            &self,
+            _request: Request<bbrpc::PeerExchangeRequest>,
+        ) -> std::result::Result<Response<bbrpc::PeerExchangeResponse>, Status> {
+            Err(Status::unimplemented(
+                "peer exchange is not used in this test",
+            ))
+        }
+
+        async fn get_content_revision(
+            &self,
+            _request: Request<bbrpc::GetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::GetContentRevisionResponse>, Status> {
+            Err(Status::unavailable("retryable revision failure"))
+        }
+
+        async fn set_content_revision(
+            &self,
+            _request: Request<bbrpc::SetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::SetContentRevisionResponse>, Status> {
+            Err(Status::unimplemented(
+                "set content revision is not used in this test",
+            ))
+        }
+
+        async fn download(
+            &self,
+            _request: Request<bbrpc::DownloadRequest>,
+        ) -> std::result::Result<Response<bbrpc::DownloadResponse>, Status> {
+            Err(Status::unimplemented("download is not used in this test"))
+        }
+    }
+
+    /// TimeoutDownloadPeerService advertises the right revision but keeps the
+    /// sampled download hanging past the RPC timeout.
+    #[derive(Clone)]
+    struct TimeoutDownloadPeerService {
+        /// requester_content is the local revision the peer claims to store.
+        requester_content: bbrpc::ContentInfo,
+        /// blob is the exact encrypted content that would eventually be served.
+        blob: Vec<u8>,
+    }
+
+    impl TimeoutDownloadPeerService {
+        /// Create a timeout service for one advertised requester revision.
+        fn new(requester_content: bbrpc::ContentInfo, blob: Vec<u8>) -> Self {
+            Self {
+                requester_content,
+                blob,
+            }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl bbrpc::barter_backup_server_server::BarterBackupServer for TimeoutDownloadPeerService {
+        async fn health_check(
+            &self,
+            _request: Request<bbrpc::HealthCheckRequest>,
+        ) -> std::result::Result<Response<bbrpc::HealthCheckResponse>, Status> {
+            Ok(Response::new(bbrpc::HealthCheckResponse::default()))
+        }
+
+        async fn peer_exchange(
+            &self,
+            _request: Request<bbrpc::PeerExchangeRequest>,
+        ) -> std::result::Result<Response<bbrpc::PeerExchangeResponse>, Status> {
+            Err(Status::unimplemented(
+                "peer exchange is not used in this test",
+            ))
+        }
+
+        async fn get_content_revision(
+            &self,
+            _request: Request<bbrpc::GetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::GetContentRevisionResponse>, Status> {
+            Ok(Response::new(bbrpc::GetContentRevisionResponse {
+                requester_content: Some(self.requester_content.clone()),
+                requester_remaining_seconds: 0,
+                responder_content: None,
+                requester_latest_known_content: Some(self.requester_content.clone()),
+            }))
+        }
+
+        async fn set_content_revision(
+            &self,
+            _request: Request<bbrpc::SetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::SetContentRevisionResponse>, Status> {
+            Err(Status::unimplemented(
+                "set content revision is not used in this test",
+            ))
+        }
+
+        async fn download(
+            &self,
+            request: Request<bbrpc::DownloadRequest>,
+        ) -> std::result::Result<Response<bbrpc::DownloadResponse>, Status> {
+            let request = request.into_inner();
+            let offset = usize::try_from(request.offset)
+                .map_err(|_| Status::invalid_argument("offset is too large"))?;
+            let requested_length = usize::try_from(request.length)
+                .map_err(|_| Status::invalid_argument("length is too large"))?;
+            let section_end = offset.saturating_add(requested_length).min(self.blob.len());
+            let section = self
+                .blob
+                .get(offset..section_end)
+                .ok_or_else(|| Status::invalid_argument("offset is too large"))?
+                .to_vec();
+
+            tokio::time::sleep(transport::PEER_RPC_TIMEOUT + Duration::from_millis(25)).await;
+            Ok(Response::new(bbrpc::DownloadResponse {
+                total_length: i64::try_from(self.blob.len()).unwrap_or(i64::MAX),
+                sha256: Sha256::digest(&self.blob).to_vec(),
+                section: Some(bbrpc::download_response::Section::RawBytes(
+                    bbrpc::RawBytes { value: section },
+                )),
+            }))
+        }
+    }
+
     /// Spawn a plain h2c peer server for adversarial tests.
     async fn spawn_plain_peer_server<S>(
         service: S,
@@ -3575,6 +3762,18 @@ mod tests {
         let blob = node.with_store(|store| store.current_blob())?;
 
         Ok((content_info, blob))
+    }
+
+    /// Build a short retry policy for failure-path tests.
+    fn test_check_retry_policy() -> transport::PeerRetryPolicy {
+        transport::PeerRetryPolicy {
+            operation: transport::PeerOperation::Check,
+            connect_timeout: Duration::from_millis(50),
+            rpc_timeout: Duration::from_millis(50),
+            total_budget: Duration::from_millis(220),
+            initial_backoff: Duration::from_millis(5),
+            max_backoff: Duration::from_millis(20),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5444,6 +5643,173 @@ mod tests {
         assert_eq!(
             peer_score_seconds(requester_node.as_ref(), peer_identity.address())?,
             3_600
+        );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_contract_penalizes_retry_exhausted_transport_failures() -> anyhow::Result<()> {
+        let requester_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage_and_clock(
+            "requester-check-transport-failure",
+            requester_filesystem,
+            requester_clock.clone(),
+        )?);
+        let peer_identity = Node::new("check-transport-failure-peer")?;
+        let base_connector = Arc::new(netmock::MockPeerConnector::new());
+        let flaky_connector = Arc::new(FlakyPeerConnector::new(base_connector, usize::MAX));
+        requester_node.set_peer_connector(flaky_connector.clone());
+        requester_node.add_known_peer(peer_identity.address())?;
+
+        let requester_cli = CliService::new(requester_node.clone());
+        requester_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_identity.address())?;
+        requester_node.with_store(|store| {
+            store.set_peer_score(
+                peer_public_key.as_bytes(),
+                0,
+                i64::try_from(requester_clock.now().secs).unwrap_or(i64::MAX),
+            )
+        })?;
+
+        requester_clock.advance(Duration::from_secs(3_600));
+        let updates = requester_node
+            .check_contract_updates_with_policy(peer_identity.address(), test_check_retry_policy())
+            .await?;
+        assert_eq!(
+            updates.last().map(|update| update.state),
+            Some(clirpc::ContractState::PeerUnavailable as i32)
+        );
+        assert_eq!(updates.last().map(|update| update.success), Some(false));
+        assert!(flaky_connector.dial_count() >= 2);
+        assert_eq!(
+            peer_score_seconds(requester_node.as_ref(), peer_identity.address())?,
+            -3_600
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_contract_penalizes_retry_exhausted_revision_failures() -> anyhow::Result<()> {
+        let requester_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage_and_clock(
+            "requester-check-revision-failure",
+            requester_filesystem,
+            requester_clock.clone(),
+        )?);
+        let peer_identity = Node::new("check-revision-failure-peer")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        requester_node.add_known_peer(peer_identity.address())?;
+
+        let requester_cli = CliService::new(requester_node.clone());
+        requester_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_identity.address())?;
+        requester_node.with_store(|store| {
+            store.set_peer_score(
+                peer_public_key.as_bytes(),
+                0,
+                i64::try_from(requester_clock.now().secs).unwrap_or(i64::MAX),
+            )
+        })?;
+
+        let (endpoint, server) =
+            spawn_plain_peer_server(RetryableRevisionFailurePeerService).await?;
+        connector.register_peer(peer_identity.address(), &endpoint);
+
+        requester_clock.advance(Duration::from_secs(1_800));
+        let updates = requester_node
+            .check_contract_updates_with_policy(peer_identity.address(), test_check_retry_policy())
+            .await?;
+        assert_eq!(
+            updates.last().map(|update| update.state),
+            Some(clirpc::ContractState::PeerUnavailable as i32)
+        );
+        assert_eq!(updates.last().map(|update| update.success), Some(false));
+        assert_eq!(
+            peer_score_seconds(requester_node.as_ref(), peer_identity.address())?,
+            -1_800
+        );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_contract_penalizes_retry_exhausted_download_timeouts() -> anyhow::Result<()> {
+        let requester_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage_and_clock(
+            "requester-check-download-timeout",
+            requester_filesystem,
+            requester_clock.clone(),
+        )?);
+        let peer_identity = Node::new("check-download-timeout-peer")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        requester_node.add_known_peer(peer_identity.address())?;
+
+        let requester_cli = CliService::new(requester_node.clone());
+        requester_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let requester_content = requester_node.responder_content()?.unwrap();
+        let requester_blob = requester_node.with_store(|store| store.current_blob())?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_identity.address())?;
+        requester_node.with_store(|store| {
+            store.set_peer_score(
+                peer_public_key.as_bytes(),
+                0,
+                i64::try_from(requester_clock.now().secs).unwrap_or(i64::MAX),
+            )
+        })?;
+
+        let (endpoint, server) = spawn_plain_peer_server(TimeoutDownloadPeerService::new(
+            requester_content,
+            requester_blob,
+        ))
+        .await?;
+        connector.register_peer(peer_identity.address(), &endpoint);
+
+        requester_clock.advance(Duration::from_secs(900));
+        let updates = requester_node
+            .check_contract_updates_with_policy(peer_identity.address(), test_check_retry_policy())
+            .await?;
+        assert_eq!(
+            updates.last().map(|update| update.state),
+            Some(clirpc::ContractState::PeerUnavailable as i32)
+        );
+        assert_eq!(updates.last().map(|update| update.success), Some(false));
+        assert_eq!(
+            peer_score_seconds(requester_node.as_ref(), peer_identity.address())?,
+            -900
         );
 
         server.abort();
