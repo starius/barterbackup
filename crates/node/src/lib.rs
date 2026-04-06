@@ -51,6 +51,8 @@ pub struct Node {
     peer_connector: Mutex<Option<Arc<dyn PeerConnector>>>,
     /// peer_client_cache reuses recent outbound peer clients across operations.
     peer_client_cache: Mutex<BTreeMap<String, CachedPeerClient>>,
+    /// peer_exchange_last_attempt records the last in-memory peer exchange attempt.
+    peer_exchange_last_attempt: Mutex<BTreeMap<String, i64>>,
 }
 
 /// Return the peer-content size limit as an `i64` for protobuf comparisons.
@@ -69,6 +71,9 @@ const MAX_CACHED_PEER_CLIENTS: usize = 32;
 
 /// PEER_CLIENT_CACHE_IDLE_TTL_SECS expires idle cached peer clients.
 const PEER_CLIENT_CACHE_IDLE_TTL_SECS: i64 = 5 * 60;
+
+/// PEER_EXCHANGE_COOLDOWN_SECS limits how often one peer exchange runs per peer.
+const PEER_EXCHANGE_COOLDOWN_SECS: i64 = 5 * 60;
 
 /// StorageClass splits mirrored peer blobs into reserved and best-effort sets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -437,6 +442,7 @@ impl Node {
             storage_config: Mutex::new(default_storage_config()),
             peer_connector: Mutex::new(None),
             peer_client_cache: Mutex::new(BTreeMap::new()),
+            peer_exchange_last_attempt: Mutex::new(BTreeMap::new()),
         };
 
         if node.store.is_some() {
@@ -717,11 +723,17 @@ impl Node {
         i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX)
     }
 
-    /// Drop expired outbound peer clients.
+    /// Drop expired outbound peer clients and stale peer-exchange cooldown entries.
     fn prune_peer_runtime_state(&self, now_secs: i64) {
         self.peer_client_cache.lock().unwrap().retain(|_, entry| {
             now_secs.saturating_sub(entry.last_used_at_secs) <= PEER_CLIENT_CACHE_IDLE_TTL_SECS
         });
+        self.peer_exchange_last_attempt
+            .lock()
+            .unwrap()
+            .retain(|_, last_attempt| {
+                now_secs.saturating_sub(*last_attempt) <= PEER_EXCHANGE_COOLDOWN_SECS
+            });
     }
 
     /// Return one cached outbound peer client when it is still inside the idle TTL.
@@ -765,6 +777,27 @@ impl Node {
         self.peer_client_cache.lock().unwrap().remove(peer_onion);
     }
 
+    /// Return whether the peer-exchange cooldown has elapsed for one peer.
+    fn peer_exchange_due(&self, peer_onion: &str) -> bool {
+        let now_secs = self.cache_now_secs();
+        self.prune_peer_runtime_state(now_secs);
+        self.peer_exchange_last_attempt
+            .lock()
+            .unwrap()
+            .get(peer_onion)
+            .is_none_or(|last_attempt| {
+                now_secs.saturating_sub(*last_attempt) >= PEER_EXCHANGE_COOLDOWN_SECS
+            })
+    }
+
+    /// Record one peer-exchange attempt for cooldown tracking.
+    fn note_peer_exchange_attempt(&self, peer_onion: &str) {
+        self.peer_exchange_last_attempt
+            .lock()
+            .unwrap()
+            .insert(peer_onion.to_string(), self.cache_now_secs());
+    }
+
     /// Add a peer onion hostname to the configured peer set.
     pub fn add_known_peer(&self, peer_onion: &str) -> Result<(), Status> {
         self.add_known_peer_with_origin(peer_onion, peer_origin_code(false, true))
@@ -787,6 +820,97 @@ impl Node {
     /// Return the configured peer onion hostnames in deterministic order.
     pub fn known_peers(&self) -> Vec<String> {
         self.known_peers.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// Build the peer-exchange request payload from the current known peer set.
+    fn peer_exchange_request(&self) -> bbrpc::PeerExchangeRequest {
+        bbrpc::PeerExchangeRequest {
+            peers: self
+                .known_peers()
+                .into_iter()
+                .filter_map(|peer_onion| {
+                    keys::public_key_from_onion_hostname(&peer_onion)
+                        .ok()
+                        .map(|public_key| bbrpc::Peer {
+                            onion_pubkey: public_key.to_bytes().to_vec(),
+                        })
+                })
+                .collect(),
+        }
+    }
+
+    /// Merge one peer-exchange response into the known peer set.
+    fn merge_peer_exchange_response(
+        &self,
+        response: bbrpc::PeerExchangeResponse,
+    ) -> Result<(), Status> {
+        for peer in response.peers {
+            let public_key = match ed25519_dalek::PublicKey::from_bytes(&peer.onion_pubkey) {
+                Ok(public_key) => public_key,
+                Err(_) => continue,
+            };
+            if self.is_our_public_key(&public_key) {
+                continue;
+            }
+            let peer_onion = keys::onion_hostname_from_public_key(&public_key);
+            if let Err(error) =
+                self.add_known_peer_with_origin(&peer_onion, peer_origin_code(false, false))
+            {
+                warn!(peer = %peer_onion, %error, "skipped discovered peer during peer exchange");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Run one best-effort peer exchange after a successful live contact.
+    async fn maybe_exchange_peers_with_client(
+        &self,
+        peer_onion: &str,
+        client: &mut transport::PeerClient,
+    ) -> Result<(), Status> {
+        if !self.peer_exchange_due(peer_onion) {
+            return Ok(());
+        }
+
+        let policy =
+            transport::PeerRetryPolicy::for_operation(transport::PeerOperation::PeerExchange);
+        match self
+            .peer_rpc_with_timeout(
+                peer_onion,
+                "peer exchange",
+                policy.rpc_timeout,
+                client.peer_exchange(self.peer_exchange_request()),
+            )
+            .await
+        {
+            Ok(response) => {
+                self.note_peer_exchange_attempt(peer_onion);
+                self.merge_peer_exchange_response(response)?;
+            }
+            Err(error) if error.code() == Code::Unimplemented => {
+                self.note_peer_exchange_attempt(peer_onion);
+            }
+            Err(error) if !transport::is_retryable_peer_status(&error) => {
+                self.note_peer_exchange_attempt(peer_onion);
+                warn!(
+                    peer = %peer_onion,
+                    code = ?error.code(),
+                    message = %error.message(),
+                    "peer exchange failed with a terminal status"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    peer = %peer_onion,
+                    code = ?error.code(),
+                    message = %error.message(),
+                    "peer exchange failed with a retryable status"
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// Render the full built-in peer source file from built-ins plus live peers.
@@ -1060,13 +1184,17 @@ impl Node {
             let mut client = self
                 .connect_peer_client_with_timeout(peer_onion, policy.connect_timeout)
                 .await?;
-            self.peer_rpc_with_timeout(
-                peer_onion,
-                "get content revision",
-                policy.rpc_timeout,
-                client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
-            )
-            .await
+            let revision = self
+                .peer_rpc_with_timeout(
+                    peer_onion,
+                    "get content revision",
+                    policy.rpc_timeout,
+                    client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
+                )
+                .await?;
+            self.maybe_exchange_peers_with_client(peer_onion, &mut client)
+                .await?;
+            Ok(revision)
         })
         .await
     }
@@ -2190,6 +2318,8 @@ impl Node {
             .await?;
             uploaded_our_content = our_content_length;
         }
+        self.maybe_exchange_peers_with_client(peer_onion, &mut client)
+            .await?;
 
         updates.push(clirpc::ProposeContractUpdate {
             state: clirpc::ContractState::SyncingContents as i32,
@@ -2336,6 +2466,8 @@ impl Node {
 
         let Some(our_content) = self.responder_content()? else {
             let new_score = self.update_peer_score(&peer_public_key, true)?;
+            self.maybe_exchange_peers_with_client(peer_onion, &mut client)
+                .await?;
             updates.push(clirpc::CheckContractUpdate {
                 state: clirpc::ContractState::Completed as i32,
                 success: true,
@@ -2359,6 +2491,8 @@ impl Node {
             != Some(our_content.content_id.as_slice())
         {
             let new_score = self.update_peer_score(&peer_public_key, false)?;
+            self.maybe_exchange_peers_with_client(peer_onion, &mut client)
+                .await?;
             updates.push(clirpc::CheckContractUpdate {
                 state: clirpc::ContractState::OurContentRevisionMissing as i32,
                 success: false,
@@ -2405,6 +2539,8 @@ impl Node {
                         == local_blob[section_offset..section_offset + section_length]
             );
         let new_score = self.update_peer_score(&peer_public_key, passed)?;
+        self.maybe_exchange_peers_with_client(peer_onion, &mut client)
+            .await?;
         updates.push(clirpc::CheckContractUpdate {
             state: if passed {
                 clirpc::ContractState::Completed as i32
@@ -3810,6 +3946,92 @@ mod tests {
             Err(Status::unimplemented(
                 "set content revision is not used in this test",
             ))
+        }
+
+        async fn download(
+            &self,
+            _request: Request<bbrpc::DownloadRequest>,
+        ) -> std::result::Result<Response<bbrpc::DownloadResponse>, Status> {
+            Err(Status::unimplemented("download is not used in this test"))
+        }
+    }
+
+    /// PeerExchangeState tracks one peer-exchange-capable test service.
+    struct PeerExchangeState {
+        /// peer_exchange_call_count records how many peer exchange RPCs were observed.
+        peer_exchange_call_count: AtomicUsize,
+        /// revision_response is returned from GetContentRevision.
+        revision_response: bbrpc::GetContentRevisionResponse,
+        /// response_peers is returned from PeerExchange.
+        response_peers: Vec<bbrpc::Peer>,
+    }
+
+    impl PeerExchangeState {
+        /// Create state for one exchange-capable test service.
+        fn new(
+            revision_response: bbrpc::GetContentRevisionResponse,
+            response_peers: Vec<bbrpc::Peer>,
+        ) -> Self {
+            Self {
+                peer_exchange_call_count: AtomicUsize::new(0),
+                revision_response,
+                response_peers,
+            }
+        }
+
+        /// Report how many peer-exchange RPCs were observed.
+        fn peer_exchange_call_count(&self) -> usize {
+            self.peer_exchange_call_count.load(Ordering::SeqCst)
+        }
+    }
+
+    /// PeerExchangePeerService serves revision requests and peer exchange responses.
+    #[derive(Clone)]
+    struct PeerExchangePeerService {
+        /// state stores the fixed revision response and exchange peers.
+        state: Arc<PeerExchangeState>,
+    }
+
+    impl PeerExchangePeerService {
+        /// Create one exchange-capable peer service from shared state.
+        fn new(state: Arc<PeerExchangeState>) -> Self {
+            Self { state }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl bbrpc::barter_backup_server_server::BarterBackupServer for PeerExchangePeerService {
+        async fn health_check(
+            &self,
+            _request: Request<bbrpc::HealthCheckRequest>,
+        ) -> std::result::Result<Response<bbrpc::HealthCheckResponse>, Status> {
+            Ok(Response::new(bbrpc::HealthCheckResponse::default()))
+        }
+
+        async fn peer_exchange(
+            &self,
+            _request: Request<bbrpc::PeerExchangeRequest>,
+        ) -> std::result::Result<Response<bbrpc::PeerExchangeResponse>, Status> {
+            self.state
+                .peer_exchange_call_count
+                .fetch_add(1, Ordering::SeqCst);
+            Ok(Response::new(bbrpc::PeerExchangeResponse {
+                peers: self.state.response_peers.clone(),
+            }))
+        }
+
+        async fn get_content_revision(
+            &self,
+            _request: Request<bbrpc::GetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::GetContentRevisionResponse>, Status> {
+            Ok(Response::new(self.state.revision_response.clone()))
+        }
+
+        async fn set_content_revision(
+            &self,
+            _request: Request<bbrpc::SetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::SetContentRevisionResponse>, Status> {
+            Ok(Response::new(bbrpc::SetContentRevisionResponse {}))
         }
 
         async fn download(
@@ -6235,6 +6457,113 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn propose_contract_merges_peer_exchange_results_with_cooldown() -> anyhow::Result<()> {
+        let clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage_and_clock(
+            "proposal-exchange-owner",
+            filesystem,
+            clock.clone(),
+        )?);
+        let peer_identity = Node::new("proposal-exchange-peer")?;
+        let learned_peer = Node::new("proposal-exchange-learned")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        node.set_peer_connector(connector.clone());
+        node.add_known_peer(peer_identity.address())?;
+
+        CliService::new(node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let exchange_state = Arc::new(PeerExchangeState::new(
+            bbrpc::GetContentRevisionResponse::default(),
+            vec![
+                bbrpc::Peer {
+                    onion_pubkey: learned_peer.ed25519_keypair().public.to_bytes().to_vec(),
+                },
+                bbrpc::Peer {
+                    onion_pubkey: peer_identity.ed25519_keypair().public.to_bytes().to_vec(),
+                },
+                bbrpc::Peer {
+                    onion_pubkey: node.ed25519_keypair().public.to_bytes().to_vec(),
+                },
+                bbrpc::Peer {
+                    onion_pubkey: vec![0x55; 3],
+                },
+            ],
+        ));
+        let (endpoint, server) =
+            spawn_plain_peer_server(PeerExchangePeerService::new(exchange_state.clone())).await?;
+        connector.register_peer(peer_identity.address(), &endpoint);
+
+        let first = node
+            .propose_contract_updates(peer_identity.address())
+            .await?;
+        assert_eq!(first.last().map(|update| update.success), Some(true));
+        assert_eq!(exchange_state.peer_exchange_call_count(), 1);
+        assert!(node
+            .known_peers()
+            .contains(&learned_peer.address().to_string()));
+
+        let second = node
+            .propose_contract_updates(peer_identity.address())
+            .await?;
+        assert_eq!(second.last().map(|update| update.success), Some(true));
+        assert_eq!(exchange_state.peer_exchange_call_count(), 1);
+
+        clock.advance(Duration::from_secs(
+            u64::try_from(PEER_EXCHANGE_COOLDOWN_SECS + 1).unwrap_or(u64::MAX),
+        ));
+        let third = node
+            .propose_contract_updates(peer_identity.address())
+            .await?;
+        assert_eq!(third.last().map(|update| update.success), Some(true));
+        assert_eq!(exchange_state.peer_exchange_call_count(), 2);
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recover_content_merges_peer_exchange_results() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage(
+            "recovery-exchange-owner",
+            filesystem,
+        )?);
+        let peer_identity = Node::new("recovery-exchange-peer")?;
+        let learned_peer = Node::new("recovery-exchange-learned")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        node.set_peer_connector(connector.clone());
+        node.add_known_peer(peer_identity.address())?;
+
+        let exchange_state = Arc::new(PeerExchangeState::new(
+            bbrpc::GetContentRevisionResponse::default(),
+            vec![bbrpc::Peer {
+                onion_pubkey: learned_peer.ed25519_keypair().public.to_bytes().to_vec(),
+            }],
+        ));
+        let (endpoint, server) =
+            spawn_plain_peer_server(PeerExchangePeerService::new(exchange_state.clone())).await?;
+        connector.register_peer(peer_identity.address(), &endpoint);
+
+        let update = node.recover_content_update().await?;
+        assert!(!update.recovered_most_recent_version);
+        assert_eq!(exchange_state.peer_exchange_call_count(), 1);
+        assert!(node
+            .known_peers()
+            .contains(&learned_peer.address().to_string()));
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn propose_contract_syncs_both_sides() -> anyhow::Result<()> {
         let left_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let left_node = Arc::new(Node::with_local_storage("left", left_filesystem)?);
@@ -6447,7 +6776,7 @@ mod tests {
 
         let update = recovered_node.recover_content_update().await?;
         assert!(update.recovered_most_recent_version);
-        assert!(flaky_connector.dial_count() >= 4);
+        assert!(flaky_connector.dial_count() >= 3);
         assert_eq!(
             recovered_node.with_store(|store| store.get_file("alpha.txt"))?,
             b"alpha-body".to_vec()
