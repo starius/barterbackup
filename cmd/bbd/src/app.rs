@@ -397,7 +397,7 @@ enum DaemonNodeState {
     Unlocked(UnlockedNode),
 }
 
-/// PeerRuntimeHealth reports the peer runtime status visible through healthcheck.
+/// PeerRuntimeHealth reports the peer runtime status visible through `state`.
 #[derive(Clone)]
 enum PeerRuntimeHealth {
     /// Starting means the peer runtime is still bootstrapping in the background.
@@ -409,7 +409,7 @@ enum PeerRuntimeHealth {
 }
 
 impl PeerRuntimeHealth {
-    /// Convert one runtime status into the protobuf healthcheck fields.
+    /// Convert one runtime status into the protobuf state fields.
     fn to_proto_fields(&self) -> (i32, String) {
         match self {
             Self::Starting => (clirpc::PeerRuntimeState::Starting as i32, String::new()),
@@ -431,7 +431,7 @@ enum SelfCheckHealth {
 }
 
 impl SelfCheckHealth {
-    /// Convert one self-check status into the protobuf healthcheck fields.
+    /// Convert one self-check status into the protobuf state fields.
     fn to_proto_fields(&self) -> (i32, String) {
         match self {
             Self::Unknown => (clirpc::SelfPeerCheckState::Unknown as i32, String::new()),
@@ -443,7 +443,7 @@ impl SelfCheckHealth {
 
 /// BackgroundPeerRuntime bootstraps and owns the peer-facing runtime lifecycle.
 struct BackgroundPeerRuntime {
-    /// status reports peer runtime readiness or failure to healthcheck.
+    /// status reports peer runtime readiness or failure to `state`.
     status: Arc<StdMutex<PeerRuntimeHealth>>,
     /// self_check reports whether the daemon can reach its own peer RPC path.
     self_check: Arc<StdMutex<SelfCheckHealth>>,
@@ -807,10 +807,10 @@ impl BarterBackupClient for DaemonService {
     /// RecoverContentStream streams recovery progress updates.
     type RecoverContentStream = <CliService as BarterBackupClient>::RecoverContentStream;
 
-    async fn local_health_check(
+    async fn state(
         &self,
-        _request: tonic::Request<clirpc::HealthCheckRequest>,
-    ) -> Result<Response<clirpc::HealthCheckResponse>, Status> {
+        _request: tonic::Request<clirpc::StateRequest>,
+    ) -> Result<Response<clirpc::StateResponse>, Status> {
         let (
             server_onion,
             peer_runtime_state,
@@ -843,7 +843,7 @@ impl BarterBackupClient for DaemonService {
             }
         };
 
-        Ok(Response::new(clirpc::HealthCheckResponse {
+        Ok(Response::new(clirpc::StateResponse {
             server_onion,
             uptime_seconds: i64::try_from(self.started_at.elapsed().as_secs()).unwrap_or(i64::MAX),
             peer_runtime_state,
@@ -1131,11 +1131,11 @@ impl BarterBackupClient for DaemonRpcService {
     /// RecoverContentStream streams recovery progress updates.
     type RecoverContentStream = <DaemonService as BarterBackupClient>::RecoverContentStream;
 
-    async fn local_health_check(
+    async fn state(
         &self,
-        request: tonic::Request<clirpc::HealthCheckRequest>,
-    ) -> Result<Response<clirpc::HealthCheckResponse>, Status> {
-        self.daemon.local_health_check(request).await
+        request: tonic::Request<clirpc::StateRequest>,
+    ) -> Result<Response<clirpc::StateResponse>, Status> {
+        self.daemon.state(request).await
     }
 
     async fn init(
@@ -2250,7 +2250,7 @@ mod tests {
 
         loop {
             let health = service
-                .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+                .state(tonic::Request::new(clirpc::StateRequest {}))
                 .await?
                 .into_inner();
             let peer_state = clirpc::PeerRuntimeState::try_from(health.peer_runtime_state)
@@ -2545,7 +2545,7 @@ mod tests {
 
         let mut client = connect_client_with_keys_dir(&daemon_addr, &keys_dir).await?;
         let health = client
-            .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+            .state(tonic::Request::new(clirpc::StateRequest {}))
             .await?
             .into_inner();
         assert!(!health.server_onion.is_empty());
@@ -2611,7 +2611,7 @@ mod tests {
         let service = test_service(&temp_dir);
 
         let locked = service
-            .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+            .state(tonic::Request::new(clirpc::StateRequest {}))
             .await?
             .into_inner();
         assert!(locked.server_onion.is_empty());
@@ -2626,7 +2626,7 @@ mod tests {
 
         init_and_unlock_service(&service, "password").await?;
         let unlocked = service
-            .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+            .state(tonic::Request::new(clirpc::StateRequest {}))
             .await?
             .into_inner();
         assert!(!unlocked.server_onion.is_empty());
@@ -2639,7 +2639,7 @@ mod tests {
             let service = &service;
             async move {
                 let health = service
-                    .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+                    .state(tonic::Request::new(clirpc::StateRequest {}))
                     .await?
                     .into_inner();
                 Ok(health.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32)
@@ -2668,7 +2668,7 @@ mod tests {
             let service = &service;
             async move {
                 let health = service
-                    .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+                    .state(tonic::Request::new(clirpc::StateRequest {}))
                     .await?
                     .into_inner();
                 Ok(health.self_peer_check_state == clirpc::SelfPeerCheckState::Healthy as i32)
@@ -2698,7 +2698,7 @@ mod tests {
             let service = &service;
             async move {
                 let health = service
-                    .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+                    .state(tonic::Request::new(clirpc::StateRequest {}))
                     .await?
                     .into_inner();
                 Ok(
@@ -2724,7 +2724,7 @@ mod tests {
             let service = &service;
             async move {
                 let health = service
-                    .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+                    .state(tonic::Request::new(clirpc::StateRequest {}))
                     .await?
                     .into_inner();
                 Ok(health.self_peer_check_state == clirpc::SelfPeerCheckState::Unhealthy as i32)
@@ -2733,7 +2733,7 @@ mod tests {
         .await?;
 
         let health = service
-            .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+            .state(tonic::Request::new(clirpc::StateRequest {}))
             .await?
             .into_inner();
         assert!(health
@@ -2766,7 +2766,7 @@ mod tests {
 
         runtime_factory.wait_started(Duration::from_secs(1)).await?;
         let health = service
-            .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+            .state(tonic::Request::new(clirpc::StateRequest {}))
             .await?
             .into_inner();
         assert_eq!(
@@ -2794,7 +2794,7 @@ mod tests {
             let service = &service;
             async move {
                 let health = service
-                    .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+                    .state(tonic::Request::new(clirpc::StateRequest {}))
                     .await?
                     .into_inner();
                 Ok(health.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32)
@@ -2826,7 +2826,7 @@ mod tests {
             let service = &service;
             async move {
                 let health = service
-                    .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+                    .state(tonic::Request::new(clirpc::StateRequest {}))
                     .await?
                     .into_inner();
                 Ok(health.peer_runtime_state == clirpc::PeerRuntimeState::Failed as i32)
@@ -2835,7 +2835,7 @@ mod tests {
         .await?;
 
         let health = service
-            .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
+            .state(tonic::Request::new(clirpc::StateRequest {}))
             .await?
             .into_inner();
         assert!(health
@@ -3209,17 +3209,7 @@ mod tests {
             maintenance_config,
         );
         init_and_unlock_service(&restarted_service, "owner-password").await?;
-        wait_for_async(Duration::from_secs(2), || {
-            let restarted_service = &restarted_service;
-            async move {
-                let health = restarted_service
-                    .local_health_check(tonic::Request::new(clirpc::HealthCheckRequest {}))
-                    .await?
-                    .into_inner();
-                Ok(health.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32)
-            }
-        })
-        .await?;
+        wait_for_public_peer_runtime(&restarted_service, Duration::from_secs(2)).await?;
 
         wait_for_async(Duration::from_secs(5), || {
             let restarted_service = &restarted_service;

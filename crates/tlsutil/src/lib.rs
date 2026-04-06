@@ -629,7 +629,7 @@ mod tests {
     use protos::clirpc::barter_backup_client_server::{
         BarterBackupClient, BarterBackupClientServer,
     };
-    use protos::clirpc::HealthCheckRequest;
+    use protos::clirpc::StateRequest;
     use rustls::crypto::aws_lc_rs;
     use std::net::SocketAddr;
     #[cfg(unix)]
@@ -648,12 +648,11 @@ mod tests {
 
     #[tonic::async_trait]
     impl BarterBackupClient for Hc {
-        async fn local_health_check(
+        async fn state(
             &self,
-            _req: Request<HealthCheckRequest>,
-        ) -> std::result::Result<tonic::Response<protos::clirpc::HealthCheckResponse>, Status>
-        {
-            Ok(tonic::Response::new(protos::clirpc::HealthCheckResponse {
+            _req: Request<StateRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::StateResponse>, Status> {
+            Ok(tonic::Response::new(protos::clirpc::StateResponse {
                 server_onion: "".into(),
                 uptime_seconds: 1,
                 peer_runtime_state: protos::clirpc::PeerRuntimeState::Unknown as i32,
@@ -1115,7 +1114,7 @@ mod tests {
         let good_cfg = build_client_tls(&server_pub, &client_priv)?;
         let channel = connect_channel(&addr, good_cfg).await?;
         let mut cli = BarterBackupClientClient::new(channel);
-        let _ = cli.local_health_check(HealthCheckRequest {}).await; // Will likely fail due to dummy svc, but handshake succeeded.
+        let _ = cli.state(StateRequest {}).await; // Will likely fail due to dummy svc, but handshake succeeded.
         Ok(())
     }
 

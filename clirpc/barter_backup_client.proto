@@ -4,10 +4,8 @@ package clirpc;
 
 // BarterBackupClient is the local gRPC service exposed by the daemon.
 service BarterBackupClient {
-    // LocalHealthCheck returns success when the local daemon is healthy.
-    // Renamed from HealthCheck to avoid a method name collision with bbrpc
-    // on the shared Node implementation.
-    rpc LocalHealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+    // State returns the current local daemon status.
+    rpc State(StateRequest) returns (StateResponse);
 
     // Init initializes the daemon storage with the main password before the
     // first unlock.
@@ -99,8 +97,8 @@ service BarterBackupClient {
         returns (stream RecoverContentUpdate);
 }
 
-// HealthCheckRequest is an empty health check request.
-message HealthCheckRequest {}
+// StateRequest is an empty local state request.
+message StateRequest {}
 
 // PeerRuntimeState reports whether the public peer runtime is ready yet.
 enum PeerRuntimeState
@@ -119,8 +117,8 @@ enum SelfPeerCheckState
     SELF_PEER_CHECK_STATE_UNHEALTHY = 2;
 }
 
-// HealthCheckResponse returns local daemon status information.
-message HealthCheckResponse {
+// StateResponse returns local daemon status information.
+message StateResponse {
     // server_onion is the Tor onion hostname of the local daemon.
     string server_onion = 1;
 

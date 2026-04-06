@@ -16,9 +16,9 @@ use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
 use protos::clirpc::{
     CheckContractRequest, CheckoutRevisionRequest, ConnectPeerRequest, DeleteFileRequest,
     ExportBuiltInPeersRequest, File, GetContractsRequest, GetFileRequest, GetStorageConfigRequest,
-    HealthCheckRequest, InitRequest, ListConflictsRequest, ListFilesRequest,
-    ProposeContractRequest, RecoverContentRequest, ResolveConflictRequest, SetFileRequest,
-    SetStorageConfigRequest, StopRequest, StorageConfig, UnlockRequest,
+    InitRequest, ListConflictsRequest, ListFilesRequest, ProposeContractRequest,
+    RecoverContentRequest, ResolveConflictRequest, SetFileRequest, SetStorageConfigRequest,
+    StateRequest, StopRequest, StorageConfig, UnlockRequest,
 };
 use tlsutil::{connect_pinned_channel, read_keys};
 use tokio::time::sleep;
@@ -52,8 +52,8 @@ pub struct Args {
 /// Command is one top-level `bbcli` subcommand.
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Print server onion and uptime.
-    Healthcheck,
+    /// Print daemon state.
+    State,
 
     /// Initialize daemon storage with the main password.
     Init {
@@ -210,7 +210,7 @@ where
 /// Dispatch one parsed CLI invocation.
 async fn run_parsed(args: Args) -> Result<()> {
     let result = match args.cmd {
-        Command::Healthcheck => healthcheck(&args.daemon_addr).await,
+        Command::State => state(&args.daemon_addr).await,
         Command::Init {
             password_stdin,
             wait_seconds,
@@ -407,13 +407,10 @@ fn prompt_password_with_prompt(prompt: &str) -> Result<String> {
     normalize_main_password(password)
 }
 
-/// Print server onion and uptime.
-async fn healthcheck(addr: &str) -> Result<()> {
+/// Print daemon state.
+async fn state(addr: &str) -> Result<()> {
     let mut client = connect_client(addr).await?;
-    let response = client
-        .local_health_check(HealthCheckRequest {})
-        .await?
-        .into_inner();
+    let response = client.state(StateRequest {}).await?.into_inner();
     let peer_runtime_state =
         protos::clirpc::PeerRuntimeState::try_from(response.peer_runtime_state)
             .unwrap_or(protos::clirpc::PeerRuntimeState::Unknown);

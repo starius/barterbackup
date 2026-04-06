@@ -2830,11 +2830,11 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         >,
     >;
 
-    async fn local_health_check(
+    async fn state(
         &self,
-        _request: tonic::Request<clirpc::HealthCheckRequest>,
-    ) -> Result<tonic::Response<clirpc::HealthCheckResponse>, tonic::Status> {
-        Ok(Response::new(clirpc::HealthCheckResponse {
+        _request: tonic::Request<clirpc::StateRequest>,
+    ) -> Result<tonic::Response<clirpc::StateResponse>, tonic::Status> {
+        Ok(Response::new(clirpc::StateResponse {
             server_onion: self.node.address().to_string(),
             uptime_seconds: self.node.uptime_seconds(),
             peer_runtime_state: clirpc::PeerRuntimeState::Unknown as i32,
@@ -4143,20 +4143,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn local_healthcheck_reports_uptime_and_onion() -> anyhow::Result<()> {
+    async fn local_state_reports_uptime_and_onion() -> anyhow::Result<()> {
         let node = Arc::new(Node::new("password")?);
         node.mark_started();
         let (mut client, server) = spawn_cli_server(node.clone()).await?;
 
         let first = client
-            .local_health_check(clirpc::HealthCheckRequest {})
+            .state(clirpc::StateRequest {})
             .await?
             .into_inner();
         assert_eq!(first.server_onion, node.address());
 
         tokio::time::sleep(Duration::from_millis(10)).await;
         let second = client
-            .local_health_check(clirpc::HealthCheckRequest {})
+            .state(clirpc::StateRequest {})
             .await?
             .into_inner();
         assert!(second.uptime_seconds >= first.uptime_seconds);

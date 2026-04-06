@@ -283,7 +283,7 @@ non-selected revisions stay archived and can still be checked out later.
   early startup races
 - `bbcli unlock` returns once the local encrypted store is open; the public
   Tor-facing peer runtime may still be starting in the background, and
-  `bbcli healthcheck` reports that readiness explicitly
+  `bbcli state` reports that readiness explicitly
 - `bbcli` waits briefly for `bbd` to create the session `cli-keys` instead of
   creating that directory on its own
 - protobufs are compiled at build time; there are no checked-in generated Rust
