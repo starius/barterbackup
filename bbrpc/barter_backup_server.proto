@@ -97,11 +97,18 @@ message SetContentRevisionResponse {}
 message DownloadRequest {
     bytes content_id = 1;
 
+    // offset is the byte offset inside the encrypted blob where the requested
+    // section begins.
     int64 offset = 2;
+
+    // length is the preferred number of bytes to return starting at `offset`.
+    // The responder returns at most this many bytes and may return a shorter
+    // tail section when `offset + length` would run past the end of the blob.
+    int64 length = 3;
 
     // reference_content_id is an existing revision used in reference
     // sections. Optional.
-    bytes reference_content_id = 3;
+    bytes reference_content_id = 4;
 }
 
 message RawBytes {

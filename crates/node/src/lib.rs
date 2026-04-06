@@ -1010,6 +1010,7 @@ impl Node {
                 client.download(bbrpc::DownloadRequest {
                     content_id: content_id.to_vec(),
                     offset: 0,
+                    length: expected_length,
                     reference_content_id: Vec::new(),
                 }),
             )
@@ -1031,7 +1032,6 @@ impl Node {
             return Err(Status::data_loss("peer returned an invalid content hash"));
         }
 
-        // The current protocol implementation serves whole blobs as raw bytes.
         let raw_bytes = match response.section {
             Some(bbrpc::download_response::Section::RawBytes(raw_bytes)) => raw_bytes.value,
             Some(bbrpc::download_response::Section::Reference(_)) => {
@@ -1041,7 +1041,7 @@ impl Node {
             }
             None => return Err(Status::internal("peer returned no content section")),
         };
-        if i64::try_from(raw_bytes.len()).unwrap_or(i64::MAX) != response.total_length {
+        if i64::try_from(raw_bytes.len()).unwrap_or(i64::MAX) != expected_length {
             return Err(Status::internal("peer returned a short content blob"));
         }
 
@@ -2246,6 +2246,7 @@ impl Node {
                 client.download(bbrpc::DownloadRequest {
                     content_id: our_content.content_id.clone(),
                     offset: i64::try_from(section_offset).unwrap_or(i64::MAX),
+                    length: i64::try_from(section_length).unwrap_or(i64::MAX),
                     reference_content_id: Vec::new(),
                 }),
             )
@@ -2970,6 +2971,9 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         if request.offset < 0 {
             return Err(Status::invalid_argument("offset must be non-negative"));
         }
+        if request.length < 0 {
+            return Err(Status::invalid_argument("length must be non-negative"));
+        }
         if !request.reference_content_id.is_empty() {
             return Err(Status::invalid_argument(
                 "reference_content_id is not supported",
@@ -2978,6 +2982,8 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
 
         let offset = usize::try_from(request.offset)
             .map_err(|_| Status::invalid_argument("offset is too large"))?;
+        let requested_length = usize::try_from(request.length)
+            .map_err(|_| Status::invalid_argument("length is too large"))?;
         let current_content_id = self.node.with_store(|store| {
             Ok(store
                 .current_content_id()
@@ -3008,10 +3014,14 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         if offset > blob.len() {
             return Err(Status::out_of_range("offset is past the end of the blob"));
         }
+        if requested_length > transport::MAX_PEER_CONTENT_BYTES {
+            return Err(Status::invalid_argument("length is too large"));
+        }
 
         let sha256 = Sha256::digest(&blob).to_vec();
+        let section_end = offset.saturating_add(requested_length).min(blob.len());
         let raw_bytes = bbrpc::RawBytes {
-            value: blob[offset..].to_vec(),
+            value: blob[offset..section_end].to_vec(),
         };
         Ok(Response::new(bbrpc::DownloadResponse {
             total_length: i64::try_from(blob.len()).unwrap_or(i64::MAX),
@@ -3458,12 +3468,20 @@ mod tests {
             if request.offset < 0 {
                 return Err(Status::invalid_argument("offset must be non-negative"));
             }
+            if request.length < 0 {
+                return Err(Status::invalid_argument("length must be non-negative"));
+            }
             let offset = usize::try_from(request.offset)
                 .map_err(|_| Status::invalid_argument("offset is too large"))?;
+            let requested_length = usize::try_from(request.length)
+                .map_err(|_| Status::invalid_argument("length is too large"))?;
+            let section_end = offset
+                .saturating_add(requested_length)
+                .min(self.state.blob.len());
             let sampled = self
                 .state
                 .blob
-                .get(offset..)
+                .get(offset..section_end)
                 .ok_or_else(|| Status::invalid_argument("offset is too large"))?
                 .to_vec();
 
@@ -4115,6 +4133,7 @@ mod tests {
             .download(tonic::Request::new(bbrpc::DownloadRequest {
                 content_id: responder.content_id.clone(),
                 offset: 0,
+                length: responder.content_length,
                 reference_content_id: Vec::new(),
             }))
             .await?
@@ -4124,6 +4143,102 @@ mod tests {
         match download.section.unwrap() {
             bbrpc::download_response::Section::RawBytes(raw_bytes) => {
                 assert!(raw_bytes.value.starts_with(content::HEADER_MAGIC));
+            }
+            bbrpc::download_response::Section::Reference(_) => {
+                panic!("download unexpectedly returned a reference section");
+            }
+        }
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn p2p_download_returns_exact_requested_range() -> anyhow::Result<()> {
+        let server_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let server_node = Arc::new(Node::with_local_storage("range-server", server_filesystem)?);
+        let client_node = Arc::new(Node::new("range-client")?);
+        let cli = CliService::new(server_node.clone());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+
+        cli.set_file(tonic::Request::new(clirpc::SetFileRequest {
+            file: Some(clirpc::File {
+                name: "alpha.txt".to_string(),
+                data: vec![0x41; 128],
+            }),
+        }))
+        .await?;
+
+        let (responder, blob) = current_content_snapshot(server_node.as_ref())?;
+        let server = spawn_registered_p2p_server(server_node.clone(), connector.as_ref()).await?;
+        let mut p2p =
+            connect_p2p_client(client_node.clone(), server_node.clone(), connector.as_ref())
+                .await?;
+
+        let offset = 7usize;
+        let length = 33usize;
+        let download = p2p
+            .download(tonic::Request::new(bbrpc::DownloadRequest {
+                content_id: responder.content_id.clone(),
+                offset: i64::try_from(offset).unwrap_or(i64::MAX),
+                length: i64::try_from(length).unwrap_or(i64::MAX),
+                reference_content_id: Vec::new(),
+            }))
+            .await?
+            .into_inner();
+        assert_eq!(download.total_length, responder.content_length);
+
+        let expected = &blob[offset..offset + length];
+        match download.section.unwrap() {
+            bbrpc::download_response::Section::RawBytes(raw_bytes) => {
+                assert_eq!(raw_bytes.value, expected);
+            }
+            bbrpc::download_response::Section::Reference(_) => {
+                panic!("download unexpectedly returned a reference section");
+            }
+        }
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn p2p_download_returns_short_tail_near_eof() -> anyhow::Result<()> {
+        let server_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let server_node = Arc::new(Node::with_local_storage("tail-server", server_filesystem)?);
+        let client_node = Arc::new(Node::new("tail-client")?);
+        let cli = CliService::new(server_node.clone());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+
+        cli.set_file(tonic::Request::new(clirpc::SetFileRequest {
+            file: Some(clirpc::File {
+                name: "alpha.txt".to_string(),
+                data: b"small-tail".to_vec(),
+            }),
+        }))
+        .await?;
+
+        let (responder, blob) = current_content_snapshot(server_node.as_ref())?;
+        let server = spawn_registered_p2p_server(server_node.clone(), connector.as_ref()).await?;
+        let mut p2p =
+            connect_p2p_client(client_node.clone(), server_node.clone(), connector.as_ref())
+                .await?;
+
+        let offset = blob.len().saturating_sub(1);
+        let download = p2p
+            .download(tonic::Request::new(bbrpc::DownloadRequest {
+                content_id: responder.content_id.clone(),
+                offset: i64::try_from(offset).unwrap_or(i64::MAX),
+                length: 16 * 1024,
+                reference_content_id: Vec::new(),
+            }))
+            .await?
+            .into_inner();
+        assert_eq!(download.total_length, responder.content_length);
+
+        match download.section.unwrap() {
+            bbrpc::download_response::Section::RawBytes(raw_bytes) => {
+                assert_eq!(raw_bytes.value, blob[offset..].to_vec());
             }
             bbrpc::download_response::Section::Reference(_) => {
                 panic!("download unexpectedly returned a reference section");
@@ -4566,11 +4681,67 @@ mod tests {
             .download(tonic::Request::new(bbrpc::DownloadRequest {
                 content_id: responder.content_id,
                 offset: 0,
+                length: 1,
                 reference_content_id: vec![0x55; CONTENT_ID_LEN],
             }))
             .await
             .unwrap_err();
         assert_eq!(error.code(), Code::InvalidArgument);
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn download_rejects_invalid_length() -> anyhow::Result<()> {
+        let server_node = Arc::new(Node::with_local_storage(
+            "download-length-server",
+            Arc::new(storage::MemoryFilesystem::new()),
+        )?);
+        let client_node = Arc::new(Node::new("download-length-client")?);
+        let cli = CliService::new(server_node.clone());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+
+        cli.set_file(tonic::Request::new(clirpc::SetFileRequest {
+            file: Some(clirpc::File {
+                name: "alpha.txt".to_string(),
+                data: b"alpha-body".to_vec(),
+            }),
+        }))
+        .await?;
+
+        let server = spawn_registered_p2p_server(server_node.clone(), connector.as_ref()).await?;
+        let mut p2p =
+            connect_p2p_client(client_node.clone(), server_node.clone(), connector.as_ref())
+                .await?;
+        let responder = p2p
+            .get_content_revision(tonic::Request::new(bbrpc::GetContentRevisionRequest {}))
+            .await?
+            .into_inner()
+            .responder_content
+            .unwrap();
+
+        let negative = p2p
+            .download(tonic::Request::new(bbrpc::DownloadRequest {
+                content_id: responder.content_id.clone(),
+                offset: 0,
+                length: -1,
+                reference_content_id: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(negative.code(), Code::InvalidArgument);
+
+        let oversized = p2p
+            .download(tonic::Request::new(bbrpc::DownloadRequest {
+                content_id: responder.content_id,
+                offset: 0,
+                length: i64::try_from(transport::MAX_PEER_CONTENT_BYTES).unwrap_or(i64::MAX) + 1,
+                reference_content_id: Vec::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(oversized.code(), Code::InvalidArgument);
 
         server.abort();
         Ok(())
@@ -4722,6 +4893,7 @@ mod tests {
             .download(bbrpc::DownloadRequest {
                 content_id: requester_content.content_id.clone(),
                 offset: 0,
+                length: 1,
                 reference_content_id: Vec::new(),
             })
             .await
