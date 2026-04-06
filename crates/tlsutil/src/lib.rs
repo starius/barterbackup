@@ -49,6 +49,15 @@ use tokio_rustls::TlsConnector;
 use tonic::transport::{Channel, Endpoint};
 use tower::service_fn;
 
+/// Install the shared Rustls crypto provider for this process once.
+pub fn install_process_default_crypto_provider() {
+    if CryptoProvider::get_default().is_some() {
+        return;
+    }
+
+    let _ = crypto_provider().install_default();
+}
+
 /// Generate a fresh Ed25519 keypair.
 pub fn generate_ed25519() -> Result<(PublicKey, SecretKey)> {
     let kp = Keypair::generate(&mut rand::rngs::OsRng);
