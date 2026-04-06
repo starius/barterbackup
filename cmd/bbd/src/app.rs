@@ -751,6 +751,24 @@ impl DaemonService {
         }
     }
 
+    /// Report whether this data directory already has an initialized password fingerprint.
+    fn storage_initialized(&self) -> Result<bool> {
+        let fingerprint_path = self.fingerprint_path();
+        match fs::metadata(&fingerprint_path) {
+            Ok(metadata) => {
+                if !metadata.is_file() {
+                    bail!("expected {} to be a file", fingerprint_path.display());
+                }
+                restrict_owner_only_file(&fingerprint_path)?;
+                Ok(true)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => {
+                Err(error).with_context(|| format!("read {}", fingerprint_path.display()))
+            }
+        }
+    }
+
     /// Build and start the unlocked node state for the provided password.
     async fn build_unlocked_node(&self, password: &str) -> Result<UnlockedNode> {
         // Create the encrypted local store before starting the public peer
@@ -811,6 +829,9 @@ impl BarterBackupClient for DaemonService {
         &self,
         _request: tonic::Request<clirpc::StateRequest>,
     ) -> Result<Response<clirpc::StateResponse>, Status> {
+        let storage_initialized = self
+            .storage_initialized()
+            .map_err(|error| Status::internal(error.to_string()))?;
         let (
             server_onion,
             peer_runtime_state,
@@ -844,6 +865,7 @@ impl BarterBackupClient for DaemonService {
         };
 
         Ok(Response::new(clirpc::StateResponse {
+            storage_initialized,
             server_onion,
             uptime_seconds: i64::try_from(self.started_at.elapsed().as_secs()).unwrap_or(i64::MAX),
             peer_runtime_state,
@@ -857,6 +879,15 @@ impl BarterBackupClient for DaemonService {
         &self,
         request: tonic::Request<clirpc::InitRequest>,
     ) -> Result<Response<clirpc::InitResponse>, Status> {
+        if self
+            .storage_initialized()
+            .map_err(|error| Status::internal(error.to_string()))?
+        {
+            return Err(Status::failed_precondition(
+                "daemon storage is already initialized",
+            ));
+        }
+
         let password = request.into_inner().main_password;
         if password.is_empty() {
             return Err(Status::invalid_argument("main password is required"));
@@ -877,14 +908,8 @@ impl BarterBackupClient for DaemonService {
             }
         }
 
-        if !self
-            .initialize_fingerprint(&password)
-            .map_err(|error| Status::internal(error.to_string()))?
-        {
-            return Err(Status::permission_denied(
-                "invalid password for this data directory",
-            ));
-        }
+        self.initialize_fingerprint(&password)
+            .map_err(|error| Status::internal(error.to_string()))?;
 
         Ok(Response::new(clirpc::InitResponse {}))
     }
@@ -2229,15 +2254,20 @@ mod tests {
         Ok(())
     }
 
-    /// Initialize and unlock a daemon service through the public RPCs.
-    async fn init_and_unlock_service(service: &DaemonService, password: &str) -> Result<()> {
-        init_service(service, password).await?;
+    /// Unlock a daemon service through its public unlock RPC.
+    async fn unlock_service(service: &DaemonService, password: &str) -> Result<()> {
         service
             .unlock(tonic::Request::new(clirpc::UnlockRequest {
                 main_password: password.to_string(),
             }))
             .await?;
         Ok(())
+    }
+
+    /// Initialize and unlock a daemon service through the public RPCs.
+    async fn init_and_unlock_service(service: &DaemonService, password: &str) -> Result<()> {
+        init_service(service, password).await?;
+        unlock_service(service, password).await
     }
 
     /// Wait until the public peer runtime is both bootstrapped and reachable.
@@ -2614,6 +2644,7 @@ mod tests {
             .state(tonic::Request::new(clirpc::StateRequest {}))
             .await?
             .into_inner();
+        assert!(!locked.storage_initialized);
         assert!(locked.server_onion.is_empty());
         assert_eq!(
             locked.peer_runtime_state,
@@ -2629,6 +2660,7 @@ mod tests {
             .state(tonic::Request::new(clirpc::StateRequest {}))
             .await?
             .into_inner();
+        assert!(unlocked.storage_initialized);
         assert!(!unlocked.server_onion.is_empty());
         assert!(matches!(
             clirpc::PeerRuntimeState::try_from(unlocked.peer_runtime_state),
@@ -2967,11 +2999,17 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn init_is_idempotent_for_same_password() -> Result<()> {
+    async fn init_reports_initialized_state_after_first_run() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let service = test_service(&temp_dir);
         init_service(&service, "correct horse battery staple").await?;
-        init_service(&service, "correct horse battery staple").await?;
+
+        let state = service
+            .state(tonic::Request::new(clirpc::StateRequest {}))
+            .await?
+            .into_inner();
+
+        assert!(state.storage_initialized);
         assert!(service.fingerprint_path().is_file());
         Ok(())
     }
@@ -2996,7 +3034,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn init_rejects_wrong_password_for_existing_data_dir() -> Result<()> {
+    async fn init_rejects_existing_data_dir_regardless_of_password() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let first_service = test_service(&temp_dir);
         init_service(&first_service, "correct horse battery staple").await?;
@@ -3008,7 +3046,17 @@ mod tests {
             }))
             .await
             .unwrap_err();
-        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(error.message(), "daemon storage is already initialized");
+
+        let error = second_service
+            .init(tonic::Request::new(clirpc::InitRequest {
+                main_password: "correct horse battery staple".to_string(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(error.message(), "daemon storage is already initialized");
         Ok(())
     }
 
@@ -3208,7 +3256,7 @@ mod tests {
             }),
             maintenance_config,
         );
-        init_and_unlock_service(&restarted_service, "owner-password").await?;
+        unlock_service(&restarted_service, "owner-password").await?;
         wait_for_public_peer_runtime(&restarted_service, Duration::from_secs(2)).await?;
 
         wait_for_async(Duration::from_secs(5), || {
@@ -3380,7 +3428,7 @@ mod tests {
             }),
             restarted_remote_maintenance,
         );
-        init_and_unlock_service(&restarted_remote, "remote-manual").await?;
+        unlock_service(&restarted_remote, "remote-manual").await?;
         wait_for_public_peer_runtime(&restarted_remote, Duration::from_secs(30)).await?;
 
         // Change the remote content after restart. The local mirror should stay

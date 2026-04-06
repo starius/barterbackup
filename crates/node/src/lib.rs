@@ -2835,6 +2835,7 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         _request: tonic::Request<clirpc::StateRequest>,
     ) -> Result<tonic::Response<clirpc::StateResponse>, tonic::Status> {
         Ok(Response::new(clirpc::StateResponse {
+            storage_initialized: true,
             server_onion: self.node.address().to_string(),
             uptime_seconds: self.node.uptime_seconds(),
             peer_runtime_state: clirpc::PeerRuntimeState::Unknown as i32,
@@ -4148,17 +4149,11 @@ mod tests {
         node.mark_started();
         let (mut client, server) = spawn_cli_server(node.clone()).await?;
 
-        let first = client
-            .state(clirpc::StateRequest {})
-            .await?
-            .into_inner();
+        let first = client.state(clirpc::StateRequest {}).await?.into_inner();
         assert_eq!(first.server_onion, node.address());
 
         tokio::time::sleep(Duration::from_millis(10)).await;
-        let second = client
-            .state(clirpc::StateRequest {})
-            .await?
-            .into_inner();
+        let second = client.state(clirpc::StateRequest {}).await?.into_inner();
         assert!(second.uptime_seconds >= first.uptime_seconds);
 
         server.abort();

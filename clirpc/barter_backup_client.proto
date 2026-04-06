@@ -119,6 +119,11 @@ enum SelfPeerCheckState
 
 // StateResponse returns local daemon status information.
 message StateResponse {
+    // storage_initialized reports whether the daemon data directory already
+    // contains the main-password fingerprint and therefore cannot be
+    // initialized again.
+    bool storage_initialized = 7;
+
     // server_onion is the Tor onion hostname of the local daemon.
     string server_onion = 1;
 

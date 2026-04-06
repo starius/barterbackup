@@ -662,6 +662,7 @@ mod tests {
             _req: Request<StateRequest>,
         ) -> std::result::Result<tonic::Response<protos::clirpc::StateResponse>, Status> {
             Ok(tonic::Response::new(protos::clirpc::StateResponse {
+                storage_initialized: false,
                 server_onion: "".into(),
                 uptime_seconds: 1,
                 peer_runtime_state: protos::clirpc::PeerRuntimeState::Unknown as i32,
