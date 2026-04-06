@@ -6,9 +6,9 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
+use crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use dirs::home_dir;
 use futures_util::TryStreamExt;
@@ -18,12 +18,12 @@ use protos::clirpc::{
     ExportBuiltInPeersRequest, File, GetContractsRequest, GetFileRequest, GetStorageConfigRequest,
     InitRequest, ListConflictsRequest, ListFilesRequest, ProposeContractRequest,
     RecoverContentRequest, ResolveConflictRequest, SetFileRequest, SetStorageConfigRequest,
-    StateRequest, StopRequest, StorageConfig, UnlockRequest,
+    StateRequest, StateResponse, StopRequest, StorageConfig, UnlockRequest,
 };
 use tlsutil::{connect_pinned_channel, read_keys};
 use tokio::time::sleep;
-use tonic::Code;
 use tonic::transport::Channel;
+use tonic::Code;
 
 /// DEFAULT_DAEMON_ADDR is the default local daemon address.
 pub const DEFAULT_DAEMON_ADDR: &str = "https://127.0.0.1:9911";
@@ -216,12 +216,9 @@ async fn run_parsed(args: Args) -> Result<()> {
             wait_seconds,
             password,
         } => {
-            let password = resolve_init_password(password, password_stdin)?;
-            init(
-                &args.daemon_addr,
-                &password,
-                Duration::from_secs(wait_seconds),
-            )
+            run_init_command(&args.daemon_addr, Duration::from_secs(wait_seconds), || {
+                resolve_init_password(password, password_stdin)
+            })
             .await
         }
         Command::Unlock {
@@ -409,14 +406,14 @@ fn prompt_password_with_prompt(prompt: &str) -> Result<String> {
 
 /// Print daemon state.
 async fn state(addr: &str) -> Result<()> {
-    let mut client = connect_client(addr).await?;
-    let response = client.state(StateRequest {}).await?.into_inner();
+    let response = state_response(addr, Duration::from_secs(DEFAULT_KEYS_WAIT_SECS)).await?;
     let peer_runtime_state =
         protos::clirpc::PeerRuntimeState::try_from(response.peer_runtime_state)
             .unwrap_or(protos::clirpc::PeerRuntimeState::Unknown);
     let self_peer_check_state =
         protos::clirpc::SelfPeerCheckState::try_from(response.self_peer_check_state)
             .unwrap_or(protos::clirpc::SelfPeerCheckState::Unknown);
+    println!("storage_initialized: {}", response.storage_initialized);
     println!("server_onion: {}", response.server_onion);
     println!("uptime_seconds: {}", response.uptime_seconds);
     println!(
@@ -443,6 +440,30 @@ async fn state(addr: &str) -> Result<()> {
         println!("self_peer_check_error: {}", response.self_peer_check_error);
     }
     Ok(())
+}
+
+/// Run the init command, checking daemon state before asking for a password.
+async fn run_init_command<F>(addr: &str, wait_timeout: Duration, read_password: F) -> Result<()>
+where
+    F: FnOnce() -> Result<String>,
+{
+    let state = state_response(addr, wait_timeout).await?;
+    continue_init_command(addr, wait_timeout, state, read_password).await
+}
+
+/// Continue `bbcli init` after the daemon state preflight has completed.
+async fn continue_init_command<F>(
+    addr: &str,
+    wait_timeout: Duration,
+    state: StateResponse,
+    read_password: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<String>,
+{
+    ensure_daemon_can_initialize(&state)?;
+    let password = read_password()?;
+    init(addr, &password, wait_timeout).await
 }
 
 /// Initialize daemon storage, waiting briefly if it is still starting up.
@@ -787,6 +808,12 @@ async fn connect_client(addr: &str) -> Result<BarterBackupClientClient<Channel>>
     connect_client_with_keys_dir(addr, &keys_dir).await
 }
 
+/// Query daemon state using the default local key directory.
+async fn state_response(addr: &str, wait_timeout: Duration) -> Result<StateResponse> {
+    let keys_dir = default_keys_dir();
+    state_response_with_keys_dir(addr, &keys_dir, wait_timeout).await
+}
+
 /// Connect to the daemon using the local pinning material in `keys_dir`.
 pub async fn connect_client_with_keys_dir(
     addr: &str,
@@ -795,6 +822,53 @@ pub async fn connect_client_with_keys_dir(
     let (server_pub, client_priv) = read_keys(keys_dir)?;
     let channel = connect_pinned_channel(addr, &server_pub, &client_priv).await?;
     Ok(BarterBackupClientClient::new(channel))
+}
+
+/// Query daemon state through an already connected client.
+pub async fn state_response_with_client(
+    client: &mut BarterBackupClientClient<Channel>,
+) -> Result<StateResponse> {
+    Ok(client.state(StateRequest {}).await?.into_inner())
+}
+
+/// Query daemon state using explicit local pinning material and readiness waits.
+pub async fn state_response_with_keys_dir(
+    addr: &str,
+    keys_dir: &Path,
+    wait_timeout: Duration,
+) -> Result<StateResponse> {
+    let deadline = Instant::now() + wait_timeout;
+    wait_for_cli_keys_until(keys_dir, deadline).await?;
+    let mut last_error = anyhow!("daemon is not ready");
+
+    loop {
+        match connect_client_with_keys_dir(addr, keys_dir).await {
+            Ok(mut client) => match state_response_with_client(&mut client).await {
+                Ok(response) => return Ok(response),
+                Err(error) if is_retryable_unlock_error(&error) && Instant::now() < deadline => {
+                    last_error = error;
+                }
+                Err(error) => return Err(error),
+            },
+            Err(error) if Instant::now() < deadline => {
+                last_error = error;
+            }
+            Err(error) => {
+                return Err(error).context(format!(
+                    "daemon did not become ready within {} seconds",
+                    wait_timeout.as_secs()
+                ));
+            }
+        }
+
+        if Instant::now() >= deadline {
+            return Err(last_error).context(format!(
+                "daemon did not become ready within {} seconds",
+                wait_timeout.as_secs()
+            ));
+        }
+        sleep(UNLOCK_RETRY_INTERVAL).await;
+    }
 }
 
 /// Unlock the daemon using explicit local pinning material and readiness waits.
@@ -921,6 +995,11 @@ fn friendly_cli_error(error: anyhow::Error, daemon_addr: &str) -> anyhow::Error 
             {
                 anyhow!("daemon storage is not initialized; run `bbcli init` first")
             }
+            Code::FailedPrecondition
+                if status.message() == "daemon storage is already initialized" =>
+            {
+                anyhow!("daemon storage is already initialized; run `bbcli unlock` instead")
+            }
             Code::Unavailable if status.message() == "unlock already in progress" => {
                 anyhow!("unlock is already in progress; wait for it to finish")
             }
@@ -952,6 +1031,19 @@ fn friendly_cli_error(error: anyhow::Error, daemon_addr: &str) -> anyhow::Error 
     }
 
     error
+}
+
+/// Reject `bbcli init` once the daemon data directory has already been initialized.
+fn ensure_daemon_can_initialize(state: &StateResponse) -> Result<()> {
+    if !state.storage_initialized {
+        return Ok(());
+    }
+
+    if state.server_onion.is_empty() {
+        bail!("daemon storage is already initialized; run `bbcli unlock` instead");
+    }
+
+    bail!("daemon storage is already initialized and unlocked");
 }
 
 /// Report whether an unlock failure should be retried while the daemon starts.
@@ -1369,6 +1461,17 @@ mod tests {
             "daemon storage is not initialized; run `bbcli init` first"
         );
 
+        let initialized = friendly_cli_error(
+            anyhow!(tonic::Status::failed_precondition(
+                "daemon storage is already initialized"
+            )),
+            DEFAULT_DAEMON_ADDR,
+        );
+        assert_eq!(
+            initialized.to_string(),
+            "daemon storage is already initialized; run `bbcli unlock` instead"
+        );
+
         let bad_password = friendly_cli_error(
             anyhow!(tonic::Status::permission_denied(
                 "invalid password for this data directory"
@@ -1432,6 +1535,77 @@ mod tests {
         wait_for_cli_keys_until(&keys_dir, Instant::now() + Duration::from_secs(1))
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn init_preflight_rejects_initialized_locked_daemon() {
+        let error = ensure_daemon_can_initialize(&StateResponse {
+            storage_initialized: true,
+            server_onion: String::new(),
+            uptime_seconds: 0,
+            peer_runtime_state: protos::clirpc::PeerRuntimeState::Unknown as i32,
+            peer_runtime_error: String::new(),
+            self_peer_check_state: protos::clirpc::SelfPeerCheckState::Unknown as i32,
+            self_peer_check_error: String::new(),
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "daemon storage is already initialized; run `bbcli unlock` instead"
+        );
+    }
+
+    #[test]
+    fn init_preflight_rejects_initialized_unlocked_daemon() {
+        let error = ensure_daemon_can_initialize(&StateResponse {
+            storage_initialized: true,
+            server_onion: "peer.onion".to_string(),
+            uptime_seconds: 0,
+            peer_runtime_state: protos::clirpc::PeerRuntimeState::Ready as i32,
+            peer_runtime_error: String::new(),
+            self_peer_check_state: protos::clirpc::SelfPeerCheckState::Healthy as i32,
+            self_peer_check_error: String::new(),
+        })
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "daemon storage is already initialized and unlocked"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn init_command_checks_state_before_requesting_password() -> anyhow::Result<()> {
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_clone = called.clone();
+
+        let error = continue_init_command(
+            DEFAULT_DAEMON_ADDR,
+            Duration::from_secs(1),
+            StateResponse {
+                storage_initialized: true,
+                server_onion: "peer.onion".to_string(),
+                uptime_seconds: 0,
+                peer_runtime_state: protos::clirpc::PeerRuntimeState::Ready as i32,
+                peer_runtime_error: String::new(),
+                self_peer_check_state: protos::clirpc::SelfPeerCheckState::Healthy as i32,
+                self_peer_check_error: String::new(),
+            },
+            move || {
+                called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok("password".to_string())
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "daemon storage is already initialized and unlocked"
+        );
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1544,33 +1718,23 @@ mod tests {
 
         let lines = format_storage_config_response(&response);
 
-        assert!(
-            lines
-                .iter()
-                .any(|line| line == "allocated_storage_for_peers: 1024")
-        );
+        assert!(lines
+            .iter()
+            .any(|line| line == "allocated_storage_for_peers: 1024"));
         assert!(lines.iter().any(|line| line == "min_replicas: 3"));
-        assert!(
-            lines
-                .iter()
-                .any(|line| line == "online_peers_storage_obligations_bytes: 10")
-        );
-        assert!(
-            lines
-                .iter()
-                .any(|line| line == "offline_peers_storage_obligations_bytes: 20")
-        );
-        assert!(
-            lines
-                .iter()
-                .any(|line| line == "expired_offline_peers_storage_obligations_bytes: 5")
-        );
+        assert!(lines
+            .iter()
+            .any(|line| line == "online_peers_storage_obligations_bytes: 10"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "offline_peers_storage_obligations_bytes: 20"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "expired_offline_peers_storage_obligations_bytes: 5"));
         assert!(lines.iter().any(|line| line == "our_content_bytes: 30"));
-        assert!(
-            lines
-                .iter()
-                .any(|line| line == "maximum_peer_content_accepted_bytes: 40")
-        );
+        assert!(lines
+            .iter()
+            .any(|line| line == "maximum_peer_content_accepted_bytes: 40"));
     }
 
     #[test]
@@ -1683,12 +1847,10 @@ mod tests {
         );
 
         let recover_updates = recover_content_with_client(&mut recovered_client).await?;
-        assert!(
-            recover_updates
-                .last()
-                .map(|update| update.recovered_most_recent_version)
-                .unwrap_or(false)
-        );
+        assert!(recover_updates
+            .last()
+            .map(|update| update.recovered_most_recent_version)
+            .unwrap_or(false));
         let recovered = get_file_with_client(&mut recovered_client, "local.txt").await?;
         assert_eq!(recovered, b"local-body".to_vec());
 
