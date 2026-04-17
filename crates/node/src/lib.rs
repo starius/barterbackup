@@ -805,6 +805,17 @@ impl Node {
         *self.peer_connector.lock().unwrap() = Some(peer_connector);
     }
 
+    /// Drop the active outbound peer connector and every cached peer session.
+    ///
+    /// The daemon uses this before replacing a live peer runtime so stale
+    /// cached channels and their transport state cannot outlive the runtime
+    /// they were created from.
+    pub fn clear_peer_runtime_transport(&self) {
+        *self.peer_connector.lock().unwrap() = None;
+        self.peer_client_cache.lock().unwrap().clear();
+        self.peer_exchange_last_attempt.lock().unwrap().clear();
+    }
+
     /// Return the current node-clock second for cache bookkeeping.
     fn cache_now_secs(&self) -> i64 {
         i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX)
@@ -5397,6 +5408,39 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn clearing_peer_runtime_transport_drops_cached_clients() -> anyhow::Result<()> {
+        let node = Arc::new(Node::new("cache-clear-owner")?);
+        let peer_identity = Node::new("cache-clear-peer")?;
+        let base_connector = Arc::new(PlainPeerConnector::new());
+        let counting_connector = Arc::new(FlakyPeerConnector::new(base_connector.clone(), 0));
+        node.set_peer_connector(counting_connector.clone());
+
+        let (endpoint, server) = spawn_plain_peer_server(StaticPeerService::new(
+            bbrpc::GetContentRevisionResponse::default(),
+            DownloadBehavior::Response(bbrpc::DownloadResponse::default()),
+        ))
+        .await?;
+        base_connector.register_peer(peer_identity.address(), &endpoint);
+
+        let _client = node.connect_peer_client(peer_identity.address()).await?;
+        assert_eq!(node.peer_client_cache.lock().unwrap().len(), 1);
+        assert!(node.peer_connector.lock().unwrap().is_some());
+
+        node.clear_peer_runtime_transport();
+
+        assert!(node.peer_client_cache.lock().unwrap().is_empty());
+        assert!(node.peer_connector.lock().unwrap().is_none());
+        let error = node
+            .connect_peer_client(peer_identity.address())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::FailedPrecondition);
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn peer_client_cache_stays_bounded() -> anyhow::Result<()> {
         let node = Arc::new(Node::new("cache-bound-owner")?);
         let base_connector = Arc::new(PlainPeerConnector::new());
@@ -5480,6 +5524,70 @@ mod tests {
 
         requester_server.abort();
         responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn responder_restart_after_proposal_keeps_peer_sidecar_valid() -> anyhow::Result<()> {
+        let requester_temp = tempfile::tempdir()?;
+        let requester_filesystem: Arc<dyn Filesystem> =
+            Arc::new(storage::OsFilesystem::new(requester_temp.path())?);
+        let requester_node = Arc::new(Node::with_local_storage(
+            "requester-restart",
+            requester_filesystem,
+        )?);
+        let responder_temp = tempfile::tempdir()?;
+        let responder_filesystem: Arc<dyn Filesystem> =
+            Arc::new(storage::OsFilesystem::new(responder_temp.path())?);
+        let responder_node = Arc::new(Node::with_local_storage(
+            "responder-restart",
+            responder_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        responder_node.set_peer_connector(connector.clone());
+        requester_node.add_known_peer(responder_node.address())?;
+        responder_node.add_known_peer(requester_node.address())?;
+
+        let requester_cli = CliService::new(requester_node.clone());
+        requester_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+        let requester_content = requester_node.responder_content()?.unwrap();
+
+        let requester_server =
+            spawn_registered_p2p_server(requester_node.clone(), connector.as_ref()).await?;
+        let responder_server =
+            spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
+
+        let updates = requester_node
+            .propose_contract_updates(responder_node.address())
+            .await?;
+        assert_eq!(updates.last().map(|update| update.success), Some(true));
+        let contracts = responder_node.get_contracts_response().await?;
+        assert_eq!(contracts.contracts.len(), 1);
+
+        responder_server.abort();
+        drop(responder_node);
+
+        let reloaded_filesystem: Arc<dyn Filesystem> =
+            Arc::new(storage::OsFilesystem::new(responder_temp.path())?);
+        let reloaded = Node::with_local_storage("responder-restart", reloaded_filesystem)?;
+        let peers = reloaded.tracked_peers()?;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(
+            peer_latest_known_content(&peers[0])
+                .as_ref()
+                .map(|content| content.content_length),
+            Some(requester_content.content_length)
+        );
+
+        requester_server.abort();
         Ok(())
     }
 

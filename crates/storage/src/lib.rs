@@ -1616,4 +1616,58 @@ mod tests {
             assert_eq!(file_mode, 0o600);
         }
     }
+
+    #[test]
+    fn os_filesystem_reloads_peer_sidecar_after_mirrored_state_updates() {
+        let temp = tempfile::tempdir().unwrap();
+        let fs: Arc<dyn Filesystem> = Arc::new(OsFilesystem::new(temp.path()).unwrap());
+        let peer_key = vec![0x5a; 32];
+        let content_id = b"mirrored-content-id".to_vec();
+        let mirrored_blob = b"opaque-peer-ciphertext".to_vec();
+
+        let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+        store
+            .set_peer_content_state(
+                &peer_key,
+                Some(&content_id),
+                Some(i64::try_from(mirrored_blob.len()).unwrap()),
+                Some(&content_id),
+                Some(i64::try_from(mirrored_blob.len()).unwrap()),
+            )
+            .unwrap();
+        store
+            .set_peer_reachability(
+                &peer_key,
+                storedpb::PeerReachability::Online as i32,
+                Some(123),
+            )
+            .unwrap();
+        store.set_peer_score(&peer_key, 456, 789).unwrap();
+        store
+            .write_mirrored_blob(&content_id, &mirrored_blob)
+            .unwrap();
+        drop(store);
+
+        let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        let peer = &reloaded.peers()[0];
+        assert_eq!(peer.onion_pubkey, peer_key);
+        assert_eq!(peer.score_seconds, 456);
+        assert_eq!(peer.score_measured_at, 789);
+        assert_eq!(
+            peer.latest_known_content
+                .as_ref()
+                .map(|content| content.content_id.clone()),
+            Some(content_id.clone())
+        );
+        assert_eq!(
+            peer.latest_cached_content
+                .as_ref()
+                .map(|content| content.content_id.clone()),
+            Some(content_id.clone())
+        );
+        assert_eq!(
+            reloaded.read_mirrored_blob(&content_id).unwrap(),
+            mirrored_blob
+        );
+    }
 }

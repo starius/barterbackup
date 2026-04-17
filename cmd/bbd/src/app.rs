@@ -358,7 +358,6 @@ impl PeerRuntimeFactory for TorPeerRuntimeFactory {
         // Bootstrap one shared Tor client and use it for both inbound and
         // outbound peer traffic.
         let transport = Arc::new(nettor::TorTransport::new(&self.tor_state_dir).await?);
-        node.set_peer_connector(transport.clone());
 
         // Publish the deterministic onion service and reject any mismatch
         // between the node identity and the transport identity immediately.
@@ -372,6 +371,7 @@ impl PeerRuntimeFactory for TorPeerRuntimeFactory {
                 node.address()
             );
         }
+        node.set_peer_connector(transport.clone());
 
         // Run the peer-facing gRPC server until shutdown is requested.
         let shutdown = CancellationToken::new();
@@ -543,6 +543,7 @@ impl BackgroundPeerRuntime {
                         if let Err(error) = maintenance_runtime.shutdown().await {
                             warn!(onion = %node.address(), %error, "maintenance shutdown failed");
                         }
+                        node.clear_peer_runtime_transport();
                         if let Err(error) = peer_runtime.shutdown().await {
                             warn!(onion = %node.address(), %error, "peer runtime shutdown failed");
                         }
@@ -555,6 +556,7 @@ impl BackgroundPeerRuntime {
                         if let Err(error) = maintenance_runtime.shutdown().await {
                             warn!(onion = %node.address(), %error, "maintenance shutdown failed during restart");
                         }
+                        node.clear_peer_runtime_transport();
                         if let Err(error) = peer_runtime.shutdown().await {
                             warn!(onion = %node.address(), %error, "peer runtime shutdown failed during restart");
                         }
@@ -567,6 +569,7 @@ impl BackgroundPeerRuntime {
                         if let Err(error) = maintenance_runtime.shutdown().await {
                             warn!(onion = %node.address(), %error, "maintenance shutdown failed after peer runtime exit");
                         }
+                        node.clear_peer_runtime_transport();
 
                         let error_message = match result {
                             Ok(Ok(())) => {
@@ -3479,6 +3482,106 @@ mod tests {
 
         restarted_remote.shutdown().await?;
         local_service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restart_after_contract_view_keeps_unlockable_peer_state() -> Result<()> {
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        let owner_dir = TempDir::new()?;
+        let peer_dir = TempDir::new()?;
+        let owner_service = DaemonService::with_maintenance_config(
+            owner_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            MaintenanceConfig::with_interval(Duration::from_secs(3600)),
+        );
+        let peer_service = DaemonService::with_maintenance_config(
+            peer_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            MaintenanceConfig::with_interval(Duration::from_secs(3600)),
+        );
+
+        init_and_unlock_service(&owner_service, "restart-owner").await?;
+        init_and_unlock_service(&peer_service, "restart-peer").await?;
+        wait_for_public_peer_runtime(&owner_service, Duration::from_secs(30)).await?;
+        wait_for_public_peer_runtime(&peer_service, Duration::from_secs(30)).await?;
+
+        owner_service
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+        let owner_onion = unlocked_node(&owner_service).await.address().to_string();
+        let peer_onion = unlocked_node(&peer_service).await.address().to_string();
+
+        owner_service
+            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: peer_onion.clone(),
+                }),
+            }))
+            .await?;
+        peer_service
+            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: owner_onion.clone(),
+                }),
+            }))
+            .await?;
+
+        let mut proposal_updates = owner_service
+            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: peer_onion.clone(),
+                }),
+            }))
+            .await?
+            .into_inner();
+        while let Some(update) = proposal_updates.next().await {
+            let _ = update?;
+        }
+
+        let contracts = peer_service
+            .get_contracts(tonic::Request::new(clirpc::GetContractsRequest {}))
+            .await?
+            .into_inner()
+            .contracts;
+        assert_eq!(contracts.len(), 1);
+        assert!(contracts[0].online);
+        assert!(contracts[0].our_content_synced);
+
+        peer_service.shutdown().await?;
+
+        let restarted_peer = DaemonService::with_maintenance_config(
+            peer_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            MaintenanceConfig::with_interval(Duration::from_secs(3600)),
+        );
+        unlock_service(&restarted_peer, "restart-peer").await?;
+        wait_for_public_peer_runtime(&restarted_peer, Duration::from_secs(30)).await?;
+
+        let restarted_contracts = restarted_peer
+            .get_contracts(tonic::Request::new(clirpc::GetContractsRequest {}))
+            .await?
+            .into_inner()
+            .contracts;
+        assert_eq!(restarted_contracts.len(), 1);
+        assert_eq!(
+            restarted_contracts[0].their_latest_cached_content_length,
+            contracts[0].their_latest_cached_content_length
+        );
+
+        restarted_peer.shutdown().await?;
+        owner_service.shutdown().await?;
         Ok(())
     }
 

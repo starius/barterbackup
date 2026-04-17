@@ -32,3 +32,4 @@ async-trait = "0.1"
 content = { path = "../content" }
 tokio-stream = { version = "0.1", features = ["net"] }
 netmock = { path = "../netmock" }
+tempfile = "3"
