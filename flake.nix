@@ -64,9 +64,15 @@
         in {
           default = pkgs.mkShell {
             packages = commonPackages;
+            shellHook = ''
+              unset CC CXX AR
+            '';
           };
           rust = pkgs.mkShell {
             packages = commonPackages;
+            shellHook = ''
+              unset CC CXX AR
+            '';
           };
         });
     };
