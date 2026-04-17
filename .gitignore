@@ -9,3 +9,5 @@ target-static/
 target-windows/
 target-sanitize/
 fuzz/target/
+integration/docker/gen/
+target-integration/

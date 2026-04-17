@@ -39,6 +39,7 @@
         let
           commonPackages = [
             rustToolchain
+            pkgs.arti
             pkgs.cargo-nextest
             pkgs.cargo-deny
             pkgs.cargo-audit
@@ -48,13 +49,19 @@
             pkgs.clang
             # Provides clang-format for Makefile proto formatting.
             pkgs.clang-tools
+            pkgs.docker-client
             pkgs.git
+            pkgs.go
             pkgs.nasm
             pkgs.ninja
             pkgs.openssl
             pkgs.pkg-config
             pkgs.protobuf
+            pkgs.protoc-gen-go
+            pkgs.protoc-gen-go-grpc
+            pkgs.python3
             pkgs.sqlite
+            pkgs.tor
             pkgs.pkgsCross.aarch64-multiplatform-musl.stdenv.cc
             pkgs.pkgsCross.musl64.stdenv.cc
           ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [

@@ -1,7 +1,12 @@
 CARGO ?= cargo
 RUSTC ?= rustc
 CLANG_FORMAT ?= clang-format
+GO ?= go
+GOFMT ?= gofmt
+PROTOC_GEN_GO ?= protoc-gen-go
+PROTOC_GEN_GO_GRPC ?= protoc-gen-go-grpc
 PROTO_FILES := $(shell find bbrpc clirpc storedpb -type f -name '*.proto' | sort)
+GO_FILES := $(shell find integration/docker -type f -name '*.go' 2>/dev/null | sort)
 HOST_TRIPLE := $(shell $(RUSTC) -vV | sed -n 's/^host: //p')
 WINDOWS_TARGET := x86_64-pc-windows-msvc
 STATIC_LINUX_AMD64_TARGET := x86_64-unknown-linux-musl
@@ -9,6 +14,8 @@ STATIC_LINUX_ARM64_TARGET := aarch64-unknown-linux-musl
 STATIC_TARGET_DIR ?= target-static
 WINDOWS_TARGET_DIR ?= target-windows
 SANITIZER_TARGET_DIR ?= target-sanitize
+GO_RPC_MODULE := barterbackup/integration/docker
+GO_RPC_OUT_DIR := integration/docker/gen/clirpc
 
 ifeq ($(HOST_TRIPLE),x86_64-unknown-linux-gnu)
 STATIC_TARGET := $(STATIC_LINUX_AMD64_TARGET)
@@ -25,7 +32,7 @@ STATIC_LINUX_ARM64_ENV := \
 	CXX_aarch64_unknown_linux_musl=aarch64-unknown-linux-musl-g++ \
 	AR_aarch64_unknown_linux_musl=aarch64-unknown-linux-musl-ar
 
-.PHONY: build test unit fmt clippy install build-static build-static-linux-amd64 build-static-linux-arm64 build-windows sanitize-address clean
+.PHONY: build test unit fmt clippy install rpc build-static build-static-linux-amd64 build-static-linux-arm64 build-windows sanitize-address clean
 
 build:
 	$(CARGO) build --workspace
@@ -38,9 +45,23 @@ unit: test
 fmt:
 	$(CARGO) fmt --all
 	$(CLANG_FORMAT) -i $(PROTO_FILES)
+	$(GOFMT) -w $(GO_FILES)
 
 clippy:
 	$(CARGO) clippy --workspace --all-targets
+
+rpc:
+	rm -rf $(GO_RPC_OUT_DIR)
+	mkdir -p $(GO_RPC_OUT_DIR)
+	PATH="$(dir $(shell command -v $(PROTOC_GEN_GO))):$(dir $(shell command -v $(PROTOC_GEN_GO_GRPC))):$$PATH" \
+		protoc -I . \
+			--go_out=integration/docker \
+			--go_opt=module=$(GO_RPC_MODULE) \
+			--go_opt=Mclirpc/barter_backup_client.proto=$(GO_RPC_MODULE)/gen/clirpc \
+			--go-grpc_out=integration/docker \
+			--go-grpc_opt=module=$(GO_RPC_MODULE) \
+			--go-grpc_opt=Mclirpc/barter_backup_client.proto=$(GO_RPC_MODULE)/gen/clirpc \
+			clirpc/barter_backup_client.proto
 
 install:
 	$(CARGO) install --path cmd/bbd --locked
