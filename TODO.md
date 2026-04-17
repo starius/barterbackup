@@ -17,6 +17,10 @@ These are the product and hardening items that are still unresolved.
   block Tor still needs a product decision and implementation path, including
   whether to support external Tor, pluggable transports, or operator-managed
   hidden-service keys.
+- Investigate switching the container and integration-test runtime back to
+  `scratch` by resolving the current `fs-mistrust` passwd/group dependency.
+  Private-network Tor tests currently need a fuller base image even though the
+  binaries themselves are static.
 - Finish the remaining operator-facing hardening around observability and
   resource controls. Structured peer logs, peer I/O bounds, timeout handling,
   dedicated fuzz targets, and clearer CLI peer summaries are now in place, but
