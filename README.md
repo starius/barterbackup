@@ -1,7 +1,8 @@
 # BarterBackup
 
-BarterBackup is a pure Rust mutual-backup system built around a daemon
-(`bbd`) and a CLI (`bbcli`).
+BarterBackup is a Rust mutual-backup system built around a daemon (`bbd`) and
+a CLI (`bbcli`). It also includes a Go Docker/Chutney integration harness for
+end-to-end testing against `clirpc`.
 
 Each node keeps one encrypted content blob derived from the user's file set,
 stores encrypted blobs for peers, and recovers the newest revision from peers
@@ -28,6 +29,7 @@ cached blob belongs to without exposing plaintext user data.
 - `cmd/bbcli`: CLI binary
 - `crates/*`: Rust libraries
 - `bbrpc`, `clirpc`, `storedpb`: protobuf definitions
+- `integration/docker`: Go Docker/Chutney integration harness
 - `flake.nix`: Nix development shell
 - `Makefile`: convenience targets for build/test/fmt/clippy/install
 
@@ -45,6 +47,7 @@ Any `make` target can be run inside it directly, for example:
 ```bash
 nix develop --command make test
 nix develop --command make build-static
+nix develop --command make integration-test-docker
 ```
 
 Without Nix, use a current stable Rust toolchain. Protobuf compilation uses a
@@ -76,6 +79,8 @@ make build-static-linux-amd64
 make build-static-linux-arm64
 make build-windows
 make sanitize-address
+make rpc
+make integration-test-docker
 ```
 
 `make build-static` produces musl-linked Linux binaries for the current Linux
@@ -87,7 +92,8 @@ binaries for those targets and are intended to work from any supported
 binaries and requests static CRT linkage; Windows system DLLs still remain
 dynamic as usual, and the first run downloads the Microsoft SDK pieces that
 `cargo-xwin` needs. `make sanitize-address` is a Linux-only nightly target
-that rebuilds the workspace with AddressSanitizer instrumentation.
+that rebuilds the workspace with AddressSanitizer instrumentation. `make rpc`
+generates the Go `clirpc` stubs under `integration/docker/gen/clirpc`.
 
 ## Test
 
@@ -113,6 +119,30 @@ Other helpers:
 make fmt
 make clippy
 ```
+
+Docker integration:
+
+```bash
+make integration-test-docker
+```
+
+This target:
+
+- builds static `bbd` and `bbcli` binaries for the current Linux host
+- regenerates the Go `clirpc` stubs
+- runs the Go test module under `integration/docker`
+
+The Docker integration harness requires:
+
+- a Linux host
+- a working Docker daemon
+- the dev-shell tools from `nix develop`
+
+It creates a private Chutney Tor network and runs `bbd` inside Docker
+containers while the Go harness drives `clirpc` directly. Runtime state lives
+outside the repository under `/tmp/barterbackup-integration` by default. Set
+`BB_DOCKER_TEST_WORKDIR` to override that path. Use
+`BB_KEEP_INTEGRATION_ARTIFACTS=1` to keep per-test scenario files after a run.
 
 ## Configuration
 

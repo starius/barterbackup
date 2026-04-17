@@ -3,7 +3,8 @@ BarterBackup – Agent Notes
 Scope
 
 - This file guides agents working in this repository.
-- The repository is Rust-only.
+- The product implementation is Rust.
+- `integration/docker` contains a Go Docker/Chutney integration harness.
 
 Repository layout
 
@@ -20,6 +21,7 @@ Repository layout
 - `crates/nettor`: Arti-backed peer transport.
 - `crates/node`: node orchestration and both RPC services.
 - `bbrpc`, `clirpc`, `storedpb`: `.proto` definitions.
+- `integration/docker`: Go integration tests that drive `clirpc` directly.
 
 Terminology
 
@@ -46,6 +48,8 @@ Build and test
   - `make fmt`
   - `make clippy`
   - `make install`
+  - `make rpc`
+  - `make integration-test-docker`
   - `make build-static`
   - `make build-static-linux-amd64`
   - `make build-static-linux-arm64`
@@ -59,6 +63,8 @@ Proto generation
   just to build the project.
 - After editing `.proto` files, rebuild or retest the workspace. There are no
   checked-in generated Rust stubs to commit.
+- `make rpc` generates Go `clirpc` stubs for `integration/docker`. Those
+  generated files live under `integration/docker/gen` and are not checked in.
 
 Transport and security
 
@@ -102,6 +108,10 @@ Testing
 - Use `clock::ManualClock` for long-horizon behavior.
 - Use `netmock` for multi-node transport tests that do not need real Tor.
 - Cover malformed peer responses and recovery edge cases, not just happy paths.
+- Docker integration tests use the Go harness under `integration/docker` plus
+  a private Chutney network. The harness keeps runtime state outside the repo
+  under `/tmp/barterbackup-integration` unless `BB_DOCKER_TEST_WORKDIR`
+  overrides it.
 
 Open product gaps
 
