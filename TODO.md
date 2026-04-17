@@ -30,3 +30,7 @@ These are the product and hardening items that are still unresolved.
   but they should not force an encrypted metadata rewrite on every small
   update when a short configurable flush delay would preserve SSD life and
   battery.
+- Add a daemon-wide time and scheduler abstraction in `bbd` so long-running
+  scenarios can be tested with synthetic time instead of wall-clock waiting.
+  `node` and `storage` already support injected clocks, but daemon maintenance,
+  retries, self-checks, and waits still depend directly on `tokio::time`.
