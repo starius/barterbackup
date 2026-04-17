@@ -59,7 +59,13 @@
             pkgs.protobuf
             pkgs.protoc-gen-go
             pkgs.protoc-gen-go-grpc
-            pkgs.python3
+            (pkgs.python3.withPackages (ps: [
+              ps.cryptography
+              ps.paramiko
+              ps.tomli-w
+              ps.typeguard
+              ps.typing-extensions
+            ]))
             pkgs.sqlite
             pkgs.tor
             pkgs.pkgsCross.aarch64-multiplatform-musl.stdenv.cc
