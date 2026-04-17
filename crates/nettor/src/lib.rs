@@ -28,6 +28,7 @@ use tonic::transport::Endpoint;
 use tower::service_fn;
 use tracing::{info, warn};
 use transport::{PeerClient, PeerConnector};
+use tor_config::{resolve as resolve_config, ConfigurationSource, ConfigurationSources};
 
 use tor_config::ExplicitOrAuto;
 use tor_hscrypto::pk::HsIdKeypair;
@@ -50,19 +51,10 @@ pub struct TorTransport {
 
 impl TorTransport {
     /// Bootstrap a Tor client rooted at `state_dir`.
-    pub async fn new(state_dir: impl AsRef<Path>) -> Result<Self> {
+    pub async fn new(state_dir: impl AsRef<Path>, arti_config: Option<&Path>) -> Result<Self> {
         prepare_tor_state_dir(state_dir.as_ref())?;
 
-        let mut cfg_builder = TorClientConfig::builder();
-        cfg_builder
-            .storage()
-            .state_dir(CfgPath::new_literal(state_dir.as_ref()));
-        cfg_builder
-            .storage()
-            .keystore()
-            .primary()
-            .kind(ExplicitOrAuto::Explicit(ArtiKeystoreKind::Ephemeral));
-        let cfg = cfg_builder.build()?;
+        let cfg = load_arti_config(state_dir.as_ref(), arti_config)?;
         let client = TorClient::create_bootstrapped(cfg)
             .await
             .context("bootstrap arti")?;
@@ -121,6 +113,32 @@ impl TorTransport {
             _accept_task: accept_task,
         })
     }
+}
+
+/// Load one Arti client config, optionally from one external TOML file.
+fn load_arti_config(state_dir: &Path, arti_config: Option<&Path>) -> Result<TorClientConfig> {
+    let Some(path) = arti_config else {
+        let mut cfg_builder = TorClientConfig::builder();
+        cfg_builder
+            .storage()
+            .state_dir(CfgPath::new_literal(state_dir));
+        cfg_builder
+            .storage()
+            .keystore()
+            .primary()
+            .kind(ExplicitOrAuto::Explicit(ArtiKeystoreKind::Ephemeral));
+        return cfg_builder.build().context("build default arti config");
+    };
+
+    let cfg_sources = ConfigurationSources::from_cmdline(
+        std::iter::empty::<ConfigurationSource>(),
+        [path.to_path_buf()],
+        std::iter::empty::<String>(),
+    );
+    let cfg_tree = cfg_sources
+        .load()
+        .with_context(|| format!("load arti config {}", path.display()))?;
+    resolve_config(cfg_tree).with_context(|| format!("decode arti config {}", path.display()))
 }
 
 /// Create the Tor state root and prune stale per-service hidden-service state.
@@ -455,5 +473,43 @@ mod tests {
         );
 
         fs::remove_dir_all(&state_dir).unwrap();
+    }
+
+    /// One external Arti config file can be decoded into one client config.
+    #[test]
+    fn load_arti_config_from_toml_file() {
+        let config_path = build_ephemeral_state_dir().join("arti.toml");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &config_path,
+            r#"
+                [storage]
+                cache_dir = "/tmp/arti-cache"
+                state_dir = "/tmp/arti-state"
+
+                [address_filter]
+                allow_local_addrs = true
+
+                [channel]
+                padding = "none"
+
+                [[tor_network.fallback_caches]]
+                rsa_identity = "3AD93C9F25FBC37B3DF94862CDD4B24B06B67616"
+                ed_identity = "7foPjsa+e6yk7KI3vKP/VN/xuqwXHhtS1/0GnqXj4b4"
+                orports = ["127.0.0.1:5100"]
+
+                [[tor_network.authorities]]
+                name = "auth1"
+                v3ident = "92EEA43CA79682F4B0C812BB70D346EC6702F86C"
+
+                [storage.keystore.primary]
+                kind = "ephemeral"
+            "#,
+        )
+        .unwrap();
+
+        load_arti_config(Path::new("/tmp/ignored-state-dir"), Some(&config_path)).unwrap();
+
+        fs::remove_dir_all(config_path.parent().unwrap()).unwrap();
     }
 }

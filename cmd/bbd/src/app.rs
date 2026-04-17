@@ -45,6 +45,10 @@ pub struct Config {
     /// data_dir is the base directory for all daemon state.
     #[arg(long, env = "BBD_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
+
+    /// arti_config is one optional Arti TOML file for custom test networks.
+    #[arg(long, env = "BBD_ARTI_CONFIG")]
+    pub arti_config: Option<PathBuf>,
 }
 
 impl Config {
@@ -343,12 +347,17 @@ impl MaintenanceSchedule {
 pub struct TorPeerRuntimeFactory {
     /// tor_state_dir is the filesystem location used by Arti for cached state.
     tor_state_dir: PathBuf,
+    /// arti_config is one optional Arti TOML file to merge before bootstrap.
+    arti_config: Option<PathBuf>,
 }
 
 impl TorPeerRuntimeFactory {
     /// Create a Tor peer runtime factory rooted at `tor_state_dir`.
-    pub fn new(tor_state_dir: PathBuf) -> Self {
-        Self { tor_state_dir }
+    pub fn new(tor_state_dir: PathBuf, arti_config: Option<PathBuf>) -> Self {
+        Self {
+            tor_state_dir,
+            arti_config,
+        }
     }
 }
 
@@ -357,7 +366,9 @@ impl PeerRuntimeFactory for TorPeerRuntimeFactory {
     async fn start(&self, node: Arc<Node>) -> Result<StartedTask> {
         // Bootstrap one shared Tor client and use it for both inbound and
         // outbound peer traffic.
-        let transport = Arc::new(nettor::TorTransport::new(&self.tor_state_dir).await?);
+        let transport = Arc::new(
+            nettor::TorTransport::new(&self.tor_state_dir, self.arti_config.as_deref()).await?,
+        );
 
         // Publish the deterministic onion service and reject any mismatch
         // between the node identity and the transport identity immediately.
@@ -1908,9 +1919,13 @@ where
     F: std::future::Future<Output = ()> + Send,
 {
     let data_dir = config.resolved_data_dir()?;
+    let arti_config = config.arti_config.clone();
     run_with_peer_runtime_until(
         config,
-        Arc::new(TorPeerRuntimeFactory::new(data_dir.join("tor"))),
+        Arc::new(TorPeerRuntimeFactory::new(
+            data_dir.join("tor"),
+            arti_config,
+        )),
         shutdown_signal,
     )
     .await
@@ -2473,9 +2488,19 @@ mod tests {
     fn config_accepts_local_addr_flag_and_legacy_alias() {
         let modern = Config::parse_from(["bbd", "--local-addr", "127.0.0.1:9921"]);
         assert_eq!(modern.resolved_local_addr(), "127.0.0.1:9921");
+        assert_eq!(modern.arti_config, None);
 
         let legacy = Config::parse_from(["bbd", "--cli-addr", "127.0.0.1:9922"]);
         assert_eq!(legacy.resolved_local_addr(), "127.0.0.1:9922");
+    }
+
+    #[test]
+    fn config_accepts_arti_config_flag() {
+        let parsed = Config::parse_from(["bbd", "--arti-config", "/tmp/chutney-arti.toml"]);
+        assert_eq!(
+            parsed.arti_config,
+            Some(PathBuf::from("/tmp/chutney-arti.toml"))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2641,6 +2666,7 @@ mod tests {
         let config = Config {
             local_addr: Some(cli_addr),
             data_dir: Some(temp_dir.path().to_path_buf()),
+            arti_config: None,
         };
         let daemon_task = tokio::spawn(async move {
             run_with_peer_runtime_until(config, Arc::new(NoopPeerRuntimeFactory), async move {
@@ -2695,6 +2721,7 @@ mod tests {
         let config = Config {
             local_addr: Some(cli_addr),
             data_dir: Some(temp_dir.path().to_path_buf()),
+            arti_config: None,
         };
         let daemon_task = tokio::spawn(async move {
             run_with_peer_runtime_until(config, Arc::new(NoopPeerRuntimeFactory), async move {
@@ -3747,12 +3774,18 @@ mod tests {
             let recovered_dir = TempDir::new()?;
             let owner_service = DaemonService::with_maintenance_config(
                 owner_dir.path().to_path_buf(),
-                Arc::new(TorPeerRuntimeFactory::new(owner_dir.path().join("tor"))),
+                Arc::new(TorPeerRuntimeFactory::new(
+                    owner_dir.path().join("tor"),
+                    None,
+                )),
                 MaintenanceConfig::with_interval(Duration::from_secs(3600)),
             );
             let peer_service = DaemonService::with_maintenance_config(
                 peer_dir.path().to_path_buf(),
-                Arc::new(TorPeerRuntimeFactory::new(peer_dir.path().join("tor"))),
+                Arc::new(TorPeerRuntimeFactory::new(
+                    peer_dir.path().join("tor"),
+                    None,
+                )),
                 MaintenanceConfig::with_interval(Duration::from_secs(3600)),
             );
 
@@ -3843,7 +3876,10 @@ mod tests {
             owner_service.shutdown().await?;
             let recovered_service = DaemonService::with_maintenance_config(
                 recovered_dir.path().to_path_buf(),
-                Arc::new(TorPeerRuntimeFactory::new(recovered_dir.path().join("tor"))),
+                Arc::new(TorPeerRuntimeFactory::new(
+                    recovered_dir.path().join("tor"),
+                    None,
+                )),
                 MaintenanceConfig::with_interval(Duration::from_secs(3600)),
             );
             unlock_for_test(&recovered_service, "owner-live-tor").await?;
