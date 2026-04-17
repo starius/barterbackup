@@ -449,6 +449,18 @@ impl SelfCheckHealth {
     }
 }
 
+/// Return whether one unhealthy self-check should count toward a runtime restart.
+fn self_check_failure_counts_for_restart(observed_healthy_once: bool, error: &str) -> bool {
+    if observed_healthy_once {
+        return true;
+    }
+
+    // Early Tor self-checks often fail before descriptor publication and
+    // rendezvous availability have converged. Treat those transport-style
+    // timeouts as startup noise until we have seen at least one healthy pass.
+    !(error.contains("timed out") || error.contains("transport error"))
+}
+
 /// BackgroundPeerRuntime bootstraps and owns the peer-facing runtime lifecycle.
 struct BackgroundPeerRuntime {
     /// status reports peer runtime readiness or failure to `state`.
@@ -1714,6 +1726,10 @@ fn spawn_self_check_runtime(
                 false
             }
             SelfCheckHealth::Unhealthy(error) => {
+                let observed_healthy_once = *observed_healthy_once.lock().unwrap();
+                if !self_check_failure_counts_for_restart(observed_healthy_once, &error) {
+                    return false;
+                }
                 consecutive_unhealthy = consecutive_unhealthy.saturating_add(1);
                 if consecutive_unhealthy >= supervisor_timings.self_check_restart_threshold {
                     warn!(
@@ -2034,6 +2050,42 @@ mod tests {
                 Ok(())
             });
 
+            Ok(StartedTask::new(shutdown, task))
+        }
+    }
+
+    /// TimeoutPeerConnector fails every dial with one retryable timeout-style error.
+    #[derive(Default)]
+    struct TimeoutPeerConnector;
+
+    #[async_trait]
+    impl PeerConnector for TimeoutPeerConnector {
+        async fn connect(
+            &self,
+            _peer_onion: &str,
+            _client_private_key: &ed25519_dalek::SecretKey,
+        ) -> anyhow::Result<transport::PeerClient> {
+            bail!("timed out waiting for peer rendezvous");
+        }
+    }
+
+    /// TimeoutingSelfCheckRuntimeFactory always exposes one retryable timeouting connector.
+    struct TimeoutingSelfCheckRuntimeFactory {
+        connector: Arc<TimeoutPeerConnector>,
+        starts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl PeerRuntimeFactory for TimeoutingSelfCheckRuntimeFactory {
+        async fn start(&self, node: Arc<Node>) -> Result<StartedTask> {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            node.set_peer_connector(self.connector.clone());
+            let shutdown = CancellationToken::new();
+            let shutdown_signal = shutdown.clone();
+            let task = tokio::spawn(async move {
+                shutdown_signal.cancelled().await;
+                Ok(())
+            });
             Ok(StartedTask::new(shutdown, task))
         }
     }
@@ -2559,6 +2611,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn prehealthy_timeout_self_check_failures_do_not_count_for_restart() {
+        assert!(!self_check_failure_counts_for_restart(
+            false,
+            "status: 'Deadline expired before operation could complete', self: \"connect peer timed out\"",
+        ));
+        assert!(!self_check_failure_counts_for_restart(
+            false,
+            "status: 'The service is currently unavailable', self: \"connect peer: transport error\"",
+        ));
+        assert!(self_check_failure_counts_for_restart(
+            false,
+            "status: 'The system is not in a state required for the operation\\'s execution', self: \"peer connector is not configured\"",
+        ));
+        assert!(self_check_failure_counts_for_restart(
+            true,
+            "status: 'Deadline expired before operation could complete', self: \"connect peer timed out\"",
+        ));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn daemon_and_bbcli_round_trip_over_local_mtls() -> Result<()> {
         let temp_dir = TempDir::new()?;
@@ -2998,6 +3070,56 @@ mod tests {
 
         wait_for_public_peer_runtime(&service, Duration::from_secs(5)).await?;
         assert!(starts.load(Ordering::SeqCst) >= 2);
+
+        service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prehealthy_timeout_self_checks_do_not_restart_peer_runtime() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = DaemonService::with_maintenance_config(
+            temp_dir.path().to_path_buf(),
+            Arc::new(TimeoutingSelfCheckRuntimeFactory {
+                connector: Arc::new(TimeoutPeerConnector),
+                starts: starts.clone(),
+            }),
+            MaintenanceConfig::with_interval(Duration::from_secs(3600))
+                .with_supervisor_timings(fast_supervisor_timings()),
+        );
+        init_service(&service, "prehealthy-timeout").await?;
+
+        service
+            .unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: "prehealthy-timeout".to_string(),
+            }))
+            .await?;
+
+        wait_for_async(Duration::from_secs(5), || async {
+            let state = service
+                .state(tonic::Request::new(clirpc::StateRequest {}))
+                .await?
+                .into_inner();
+            Ok(state.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32)
+        })
+        .await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let state = service
+            .state(tonic::Request::new(clirpc::StateRequest {}))
+            .await?
+            .into_inner();
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.peer_runtime_state,
+            clirpc::PeerRuntimeState::Ready as i32
+        );
+        assert_eq!(
+            state.self_peer_check_state,
+            clirpc::SelfPeerCheckState::Unhealthy as i32
+        );
+        assert!(state.self_peer_check_error.contains("timed out"));
 
         service.shutdown().await?;
         Ok(())
