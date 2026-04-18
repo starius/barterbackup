@@ -793,7 +793,16 @@ impl Store {
             }
         }
 
-        Ok(())
+        self.peers = decoded
+            .metadata
+            .peers
+            .into_iter()
+            .map(|mut peer| {
+                migrate_peer(&mut peer);
+                peer
+            })
+            .collect();
+        self.persist_peer_state()
     }
 
     /// Remove non-local blobs that are not in the supplied valid set.
@@ -1545,6 +1554,49 @@ mod tests {
         );
         assert_eq!(reloaded.archived_conflicts()[0].resolved_at, 50);
         assert_eq!(reloaded.archived_conflicts()[0].resolved_at_ns, 60);
+    }
+
+    #[test]
+    fn restore_current_content_blob_restores_embedded_peer_snapshot() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+
+        store.ensure_peer(b"peer-b").unwrap();
+        store.set_file("alpha.txt", b"version-1".to_vec()).unwrap();
+
+        store.ensure_peer(b"peer-c").unwrap();
+        store.set_file("alpha.txt", b"version-2".to_vec()).unwrap();
+        let blob_with_bc = store.current_blob().unwrap();
+
+        store.ensure_peer(b"peer-d").unwrap();
+        assert_eq!(
+            store
+                .peers()
+                .into_iter()
+                .map(|peer| peer.onion_pubkey)
+                .collect::<Vec<_>>(),
+            vec![b"peer-b".to_vec(), b"peer-c".to_vec(), b"peer-d".to_vec()]
+        );
+
+        store.restore_current_content_blob(&blob_with_bc).unwrap();
+        assert_eq!(
+            store
+                .peers()
+                .into_iter()
+                .map(|peer| peer.onion_pubkey)
+                .collect::<Vec<_>>(),
+            vec![b"peer-b".to_vec(), b"peer-c".to_vec()]
+        );
+
+        let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        assert_eq!(
+            reloaded
+                .peers()
+                .into_iter()
+                .map(|peer| peer.onion_pubkey)
+                .collect::<Vec<_>>(),
+            vec![b"peer-b".to_vec(), b"peer-c".to_vec()]
+        );
     }
 
     #[test]
