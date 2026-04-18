@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::fs;
+use std::io::ErrorKind;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -1134,7 +1135,7 @@ pub async fn unlock_with_keys_dir(
 async fn wait_for_cli_keys_until(keys_dir: &Path, deadline: Instant) -> Result<()> {
     let server_pub = keys_dir.join("server.pub");
     let client_key = keys_dir.join("client.key");
-    if server_pub.is_file() && client_key.is_file() {
+    if cli_keys_are_ready(keys_dir, &server_pub, &client_key)? {
         return Ok(());
     }
 
@@ -1144,7 +1145,7 @@ async fn wait_for_cli_keys_until(keys_dir: &Path, deadline: Instant) -> Result<(
     );
 
     loop {
-        if server_pub.is_file() && client_key.is_file() {
+        if cli_keys_are_ready(keys_dir, &server_pub, &client_key)? {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -1157,6 +1158,29 @@ async fn wait_for_cli_keys_until(keys_dir: &Path, deadline: Instant) -> Result<(
         }
 
         sleep(UNLOCK_RETRY_INTERVAL).await;
+    }
+}
+
+/// Return whether the daemon session keys are present and readable.
+fn cli_keys_are_ready(keys_dir: &Path, server_pub: &Path, client_key: &Path) -> Result<bool> {
+    let server_ready = expected_cli_key_file_ready(keys_dir, server_pub)?;
+    let client_ready = expected_cli_key_file_ready(keys_dir, client_key)?;
+    Ok(server_ready && client_ready)
+}
+
+/// Return whether one expected daemon session key file exists and is readable.
+fn expected_cli_key_file_ready(keys_dir: &Path, path: &Path) -> Result<bool> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+            bail!(
+                "daemon created local cli keys in {} but the current user cannot read them; check permissions on {}",
+                keys_dir.display(),
+                keys_dir.display()
+            );
+        }
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
     }
 }
 
@@ -1201,6 +1225,11 @@ fn friendly_cli_error(error: anyhow::Error, daemon_addr: &str) -> anyhow::Error 
     if message.contains("did not create local cli keys") {
         return anyhow!(
             "bbd is not running yet or has not created its session cli keys; start `bbd` and retry"
+        );
+    }
+    if message.contains("current user cannot read them") {
+        return anyhow!(
+            "bbcli cannot read the daemon session cli keys; check the data directory permissions or run bbd with the same user"
         );
     }
     if message.contains("Connection refused")
@@ -1727,6 +1756,17 @@ mod tests {
         wait_for_cli_keys_until(&keys_dir, Instant::now() + Duration::from_secs(1))
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn friendly_cli_error_maps_unreadable_cli_keys() {
+        let error = friendly_cli_error(
+            anyhow!(
+                "daemon created local cli keys in /tmp/x but the current user cannot read them; check permissions on /tmp/x"
+            ),
+            DEFAULT_LOCAL_ADDR,
+        );
+        assert!(error.to_string().contains("cannot read the daemon session cli keys"));
     }
 
     #[test]
