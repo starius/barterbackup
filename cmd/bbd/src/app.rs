@@ -35,6 +35,9 @@ const BACKGROUND_FAILURE_MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
 const BACKGROUND_PEER_MAINTENANCE_CONCURRENCY: usize = 4;
 const PEER_RUNTIME_RESTART_INITIAL_BACKOFF: Duration = Duration::from_secs(5);
 const PEER_RUNTIME_RESTART_MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
+const TIMER_LABEL_MAINTENANCE_INTERVAL: &str = "maintenance.interval";
+const TIMER_LABEL_SELF_CHECK_INTERVAL: &str = "self-check.interval";
+const TIMER_LABEL_PEER_RUNTIME_RESTART_BACKOFF: &str = "peer-runtime.restart-backoff";
 
 /// Config configures the BarterBackup daemon process.
 #[derive(Clone, Debug, Parser)]
@@ -302,8 +305,15 @@ fn peer_runtime_restart_backoff(
 
 /// MaintenanceSchedule owns the live wait state for one maintenance loop.
 enum MaintenanceSchedule {
-    /// Interval waits on a real tokio timer.
-    Interval(tokio::time::Interval),
+    /// Interval waits on the injected application clock.
+    Interval {
+        /// clock drives the logical maintenance cadence.
+        clock: Arc<dyn Clock>,
+        /// interval is the delay between maintenance passes.
+        interval: Duration,
+        /// initial_immediate preserves the current immediate first pass.
+        initial_immediate: bool,
+    },
     /// Manual waits on an explicit trigger notification.
     #[cfg(test)]
     Manual(Arc<Notify>),
@@ -311,13 +321,13 @@ enum MaintenanceSchedule {
 
 impl MaintenanceSchedule {
     /// Build one schedule from a maintenance configuration.
-    fn new(config: &MaintenanceConfig) -> Self {
+    fn new(config: &MaintenanceConfig, clock: Arc<dyn Clock>) -> Self {
         match &config.mode {
-            MaintenanceMode::Interval => {
-                let mut interval = tokio::time::interval(config.interval);
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                Self::Interval(interval)
-            }
+            MaintenanceMode::Interval => Self::Interval {
+                clock,
+                interval: config.interval,
+                initial_immediate: true,
+            },
             #[cfg(test)]
             MaintenanceMode::Manual(tick) => Self::Manual(tick.clone()),
         }
@@ -330,10 +340,18 @@ impl MaintenanceSchedule {
         shutdown: &CancellationToken,
     ) -> bool {
         match self {
-            Self::Interval(interval) => {
+            Self::Interval {
+                clock,
+                interval,
+                initial_immediate,
+            } => {
+                if *initial_immediate {
+                    *initial_immediate = false;
+                    return true;
+                }
                 tokio::select! {
                     _ = shutdown.cancelled() => false,
-                    _ = interval.tick() => true,
+                    _ = clock.wait_for(*interval, TIMER_LABEL_MAINTENANCE_INTERVAL) => true,
                     _ = maintenance_wakeup.notified() => true,
                 }
             }
@@ -494,6 +512,7 @@ impl BackgroundPeerRuntime {
     /// Start peer bootstrap in the background and return its supervisor handle.
     fn start(
         node: Arc<Node>,
+        clock: Arc<dyn Clock>,
         peer_runtime_factory: Arc<dyn PeerRuntimeFactory>,
         maintenance_wakeup: Arc<Notify>,
         maintenance_config: MaintenanceConfig,
@@ -533,7 +552,7 @@ impl BackgroundPeerRuntime {
                         );
                         tokio::select! {
                             _ = shutdown_signal.cancelled() => return,
-                            _ = tokio::time::sleep(restart_delay) => {}
+                            _ = clock.wait_for(restart_delay, TIMER_LABEL_PEER_RUNTIME_RESTART_BACKOFF) => {}
                         }
                         continue;
                     }
@@ -545,6 +564,7 @@ impl BackgroundPeerRuntime {
                 // Start maintenance only after outbound peer connectivity is available.
                 let maintenance_runtime = spawn_maintenance_runtime(
                     node.clone(),
+                    clock.clone(),
                     self_check_for_task.clone(),
                     maintenance_wakeup.clone(),
                     maintenance_config.clone(),
@@ -553,6 +573,7 @@ impl BackgroundPeerRuntime {
                 let observed_healthy_once = Arc::new(StdMutex::new(false));
                 let self_check_runtime = spawn_self_check_runtime(
                     node.clone(),
+                    clock.clone(),
                     self_check_for_task.clone(),
                     maintenance_config.clone(),
                     restart_requested.clone(),
@@ -636,7 +657,7 @@ impl BackgroundPeerRuntime {
 
                 tokio::select! {
                     _ = shutdown_signal.cancelled() => return,
-                    _ = tokio::time::sleep(restart_delay) => {}
+                    _ = clock.wait_for(restart_delay, TIMER_LABEL_PEER_RUNTIME_RESTART_BACKOFF) => {}
                 }
             }
         });
@@ -864,6 +885,7 @@ impl DaemonService {
         // Arti finishes bootstrapping and publishing the onion service.
         let peer_runtime = BackgroundPeerRuntime::start(
             node.clone(),
+            self.clock.clone(),
             self.peer_runtime_factory.clone(),
             self.maintenance_wakeup.clone(),
             self.maintenance_config.clone(),
@@ -1817,6 +1839,7 @@ async fn run_maintenance_pass(
 /// Run the daemon maintenance loop until shutdown is requested.
 async fn run_maintenance_loop(
     node: Arc<Node>,
+    clock: Arc<dyn Clock>,
     self_check: Arc<StdMutex<SelfCheckHealth>>,
     maintenance_wakeup: Arc<Notify>,
     shutdown: CancellationToken,
@@ -1824,7 +1847,7 @@ async fn run_maintenance_loop(
 ) -> Result<()> {
     // Use one schedule for both recovery and contract maintenance for now.
     // The loop also wakes immediately after local mutations.
-    let mut schedule = MaintenanceSchedule::new(&maintenance_config);
+    let mut schedule = MaintenanceSchedule::new(&maintenance_config, clock);
     let peer_failures = BackgroundPeerFailures::default();
 
     loop {
@@ -1851,6 +1874,7 @@ async fn run_maintenance_loop(
 /// Start the background maintenance loop for one unlocked node.
 fn spawn_maintenance_runtime(
     node: Arc<Node>,
+    clock: Arc<dyn Clock>,
     self_check: Arc<StdMutex<SelfCheckHealth>>,
     maintenance_wakeup: Arc<Notify>,
     maintenance_config: MaintenanceConfig,
@@ -1860,6 +1884,7 @@ fn spawn_maintenance_runtime(
     let task = tokio::spawn(async move {
         run_maintenance_loop(
             node,
+            clock,
             self_check,
             maintenance_wakeup,
             shutdown_signal,
@@ -1900,6 +1925,7 @@ async fn run_self_check_pass(
 /// Start periodic self-checks for the daemon's own public peer RPC path.
 fn spawn_self_check_runtime(
     node: Arc<Node>,
+    clock: Arc<dyn Clock>,
     self_check: Arc<StdMutex<SelfCheckHealth>>,
     maintenance_config: MaintenanceConfig,
     restart_requested: CancellationToken,
@@ -1954,13 +1980,10 @@ fn spawn_self_check_runtime(
                 // the maintenance interval would leave the public runtime
                 // marked unhealthy for hours on deployments that run
                 // maintenance rarely.
-                let mut interval = tokio::time::interval(supervisor_timings.self_check_interval);
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                interval.tick().await;
                 loop {
                     tokio::select! {
                         _ = shutdown_signal.cancelled() => break,
-                        _ = interval.tick() => {
+                        _ = clock.wait_for(supervisor_timings.self_check_interval, TIMER_LABEL_SELF_CHECK_INTERVAL) => {
                             let Some(outcome) =
                                 run_self_check_pass(node.as_ref(), self_check.as_ref(), &shutdown_signal).await
                             else {
@@ -2321,6 +2344,21 @@ mod tests {
             temp_dir.path().to_path_buf(),
             Arc::new(NoopPeerRuntimeFactory),
             MaintenanceConfig::with_interval(Duration::from_secs(60)),
+            initial_time,
+        )
+    }
+
+    /// Build a daemon service with the hidden manual test clock and custom runtime wiring.
+    fn test_service_with_test_clock_and_config(
+        temp_dir: &TempDir,
+        peer_runtime_factory: Arc<dyn PeerRuntimeFactory>,
+        maintenance_config: MaintenanceConfig,
+        initial_time: Timestamp,
+    ) -> DaemonService {
+        DaemonService::with_test_clock(
+            temp_dir.path().to_path_buf(),
+            peer_runtime_factory,
+            maintenance_config,
             initial_time,
         )
     }
@@ -3042,6 +3080,169 @@ mod tests {
             .await?;
         waiter.await.unwrap();
 
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn maintenance_interval_uses_test_clock() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let service = test_service_with_test_clock(&temp_dir, Timestamp::new(500, 0).unwrap());
+        init_and_unlock_service(&service, "maintenance-clock").await?;
+
+        let mut stream = service
+            .timer_intercept(tonic::Request::new(clirpc::TimerInterceptRequest {
+                label: TIMER_LABEL_MAINTENANCE_INTERVAL.to_string(),
+            }))
+            .await?
+            .into_inner();
+
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await?
+            .transpose()?
+            .unwrap();
+        assert_eq!(first.wait_seconds, 60);
+        assert_eq!(first.wait_nanoseconds, 0);
+        assert_eq!(first.registered_unix_seconds, 500);
+        assert_eq!(first.registered_nanoseconds, 0);
+
+        service
+            .advance_test_time(tonic::Request::new(clirpc::AdvanceTestTimeRequest {
+                seconds: 60,
+                nanoseconds: 0,
+            }))
+            .await?;
+
+        let second = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await?
+            .transpose()?
+            .unwrap();
+        assert_eq!(second.wait_seconds, 60);
+        assert_eq!(second.wait_nanoseconds, 0);
+        assert_eq!(second.registered_unix_seconds, 560);
+        assert_eq!(second.registered_nanoseconds, 0);
+
+        service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn self_check_interval_uses_test_clock() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let service = test_service_with_test_clock(&temp_dir, Timestamp::new(700, 0).unwrap());
+        init_and_unlock_service(&service, "self-check-clock").await?;
+
+        let mut stream = service
+            .timer_intercept(tonic::Request::new(clirpc::TimerInterceptRequest {
+                label: TIMER_LABEL_SELF_CHECK_INTERVAL.to_string(),
+            }))
+            .await?
+            .into_inner();
+
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await?
+            .transpose()?
+            .unwrap();
+        assert_eq!(first.wait_seconds, SELF_CHECK_INTERVAL.as_secs());
+        assert_eq!(first.wait_nanoseconds, SELF_CHECK_INTERVAL.subsec_nanos());
+        assert_eq!(first.registered_unix_seconds, 700);
+        assert_eq!(first.registered_nanoseconds, 0);
+
+        service
+            .advance_test_time(tonic::Request::new(clirpc::AdvanceTestTimeRequest {
+                seconds: SELF_CHECK_INTERVAL.as_secs(),
+                nanoseconds: SELF_CHECK_INTERVAL.subsec_nanos(),
+            }))
+            .await?;
+
+        let second = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await?
+            .transpose()?
+            .unwrap();
+        assert_eq!(second.wait_seconds, SELF_CHECK_INTERVAL.as_secs());
+        assert_eq!(second.wait_nanoseconds, SELF_CHECK_INTERVAL.subsec_nanos());
+        assert_eq!(
+            second.registered_unix_seconds,
+            700 + SELF_CHECK_INTERVAL.as_secs()
+        );
+        assert_eq!(
+            second.registered_nanoseconds,
+            SELF_CHECK_INTERVAL.subsec_nanos()
+        );
+
+        service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_runtime_restart_backoff_uses_test_clock() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = test_service_with_test_clock_and_config(
+            &temp_dir,
+            Arc::new(FlakyStartupPeerRuntimeFactory {
+                connector,
+                starts: starts.clone(),
+            }),
+            MaintenanceConfig::with_interval(Duration::from_secs(60)),
+            Timestamp::new(900, 0).unwrap(),
+        );
+        init_service(&service, "restart-backoff-clock").await?;
+
+        service
+            .unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: "restart-backoff-clock".to_string(),
+            }))
+            .await?;
+
+        let mut stream = service
+            .timer_intercept(tonic::Request::new(clirpc::TimerInterceptRequest {
+                label: TIMER_LABEL_PEER_RUNTIME_RESTART_BACKOFF.to_string(),
+            }))
+            .await?
+            .into_inner();
+
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await?
+            .transpose()?
+            .unwrap();
+        assert_eq!(
+            first.wait_seconds,
+            PEER_RUNTIME_RESTART_INITIAL_BACKOFF.as_secs()
+        );
+        assert_eq!(
+            first.wait_nanoseconds,
+            PEER_RUNTIME_RESTART_INITIAL_BACKOFF.subsec_nanos()
+        );
+        assert_eq!(first.registered_unix_seconds, 900);
+        assert_eq!(first.registered_nanoseconds, 0);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        service
+            .advance_test_time(tonic::Request::new(clirpc::AdvanceTestTimeRequest {
+                seconds: PEER_RUNTIME_RESTART_INITIAL_BACKOFF.as_secs(),
+                nanoseconds: PEER_RUNTIME_RESTART_INITIAL_BACKOFF.subsec_nanos(),
+            }))
+            .await?;
+
+        wait_for_async(Duration::from_secs(1), || {
+            let starts = starts.clone();
+            async move { Ok(starts.load(Ordering::SeqCst) >= 2) }
+        })
+        .await?;
+        wait_for_async(Duration::from_secs(1), || {
+            let service = &service;
+            async move {
+                let health = service
+                    .state(tonic::Request::new(clirpc::StateRequest {}))
+                    .await?
+                    .into_inner();
+                Ok(health.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32)
+            }
+        })
+        .await?;
+
+        service.shutdown().await?;
         Ok(())
     }
 
