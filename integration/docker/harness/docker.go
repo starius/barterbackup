@@ -11,13 +11,14 @@ import (
 
 // Node represents one bbd container plus its host-side bind-mounted state.
 type Node struct {
-	suite         *Suite
-	name          string
-	containerName string
-	dataDir       string
-	localAddr     string
-	password      string
-	testClock     bool
+	suite              *Suite
+	name               string
+	containerName      string
+	dataDir            string
+	localAddr          string
+	password           string
+	testClock          bool
+	disableMaintenance bool
 }
 
 // Name returns the logical test node name.
@@ -38,6 +39,11 @@ func (n *Node) DataDir() string {
 // EnableTestClock starts this node with the hidden daemon test clock enabled.
 func (n *Node) EnableTestClock() {
 	n.testClock = true
+}
+
+// DisableMaintenance starts this node with hidden background maintenance disabled.
+func (n *Node) DisableMaintenance() {
+	n.disableMaintenance = true
 }
 
 // StartLocked starts the daemon container without initializing or unlocking it.
@@ -68,6 +74,9 @@ func (n *Node) StartLocked(ctx context.Context) error {
 	}
 	if n.testClock {
 		args = append(args, "--test-clock")
+	}
+	if n.disableMaintenance {
+		args = append(args, "--disable-maintenance")
 	}
 	_, err := runCommand(
 		ctx,

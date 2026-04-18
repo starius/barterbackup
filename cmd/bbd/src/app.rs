@@ -60,6 +60,10 @@ pub struct Config {
     /// test_clock enables the hidden daemon test clock control RPCs.
     #[arg(long, env = "BBD_TEST_CLOCK", hide = true)]
     pub test_clock: bool,
+
+    /// disable_maintenance disables the background maintenance loop for tests.
+    #[arg(long, env = "BBD_DISABLE_MAINTENANCE", hide = true)]
+    pub disable_maintenance: bool,
 }
 
 impl Config {
@@ -128,6 +132,8 @@ enum MaintenanceMode {
 /// MaintenanceConfig configures the daemon's periodic background maintenance.
 #[derive(Clone)]
 pub struct MaintenanceConfig {
+    /// enabled controls whether the background maintenance loop should run.
+    enabled: bool,
     /// interval is the delay between maintenance passes.
     interval: Duration,
     /// mode selects the scheduling strategy used by the loop.
@@ -164,6 +170,7 @@ impl MaintenanceConfig {
     /// Create a real-time maintenance configuration.
     fn with_interval(interval: Duration) -> Self {
         Self {
+            enabled: true,
             interval,
             mode: MaintenanceMode::Interval,
             supervisor_timings: PeerRuntimeSupervisorTimings::default(),
@@ -174,10 +181,17 @@ impl MaintenanceConfig {
     #[cfg(test)]
     fn manual(tick: Arc<Notify>) -> Self {
         Self {
+            enabled: true,
             interval: Duration::from_secs(60),
             mode: MaintenanceMode::Manual(tick),
             supervisor_timings: PeerRuntimeSupervisorTimings::default(),
         }
+    }
+
+    /// Return a copy with background maintenance disabled.
+    fn disabled(mut self) -> Self {
+        self.enabled = false;
+        self
     }
 
     /// Override supervisor timings for deterministic daemon tests.
@@ -1888,6 +1902,13 @@ fn spawn_maintenance_runtime(
 ) -> StartedTask {
     let shutdown = CancellationToken::new();
     let shutdown_signal = shutdown.clone();
+    if !maintenance_config.enabled {
+        let task = tokio::spawn(async move {
+            shutdown_signal.cancelled().await;
+            Ok(())
+        });
+        return StartedTask::new(shutdown, task);
+    }
     let task = tokio::spawn(async move {
         run_maintenance_loop(
             node,
@@ -2067,10 +2088,15 @@ where
     // Prepare local CLI auth material before we accept any local connections.
     let local_cli_tls = prepare_local_cli_tls(&data_dir)?;
     let (clock, test_clock) = daemon_runtime_clock(&config);
+    let maintenance_config = if config.disable_maintenance {
+        MaintenanceConfig::default().disabled()
+    } else {
+        MaintenanceConfig::default()
+    };
     let service = Arc::new(DaemonService::with_clock(
         data_dir.clone(),
         peer_runtime_factory,
-        MaintenanceConfig::default(),
+        maintenance_config,
         clock,
         test_clock,
     ));
@@ -2736,12 +2762,19 @@ mod tests {
     }
 
     #[test]
+    fn config_accepts_hidden_disable_maintenance_flag() {
+        let parsed = Config::parse_from(["bbd", "--disable-maintenance"]);
+        assert!(parsed.disable_maintenance);
+    }
+
+    #[test]
     fn help_hides_test_flags() {
         let mut command = Config::command();
         let rendered = command.render_long_help().to_string();
 
         assert!(!rendered.contains("--arti-config"));
         assert!(!rendered.contains("--test-clock"));
+        assert!(!rendered.contains("--disable-maintenance"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3235,6 +3268,7 @@ mod tests {
             data_dir: Some(temp_dir.path().to_path_buf()),
             arti_config: None,
             test_clock: false,
+            disable_maintenance: false,
         };
         let daemon_task = tokio::spawn(async move {
             run_with_peer_runtime_until(config, Arc::new(NoopPeerRuntimeFactory), async move {
@@ -3291,6 +3325,7 @@ mod tests {
             data_dir: Some(temp_dir.path().to_path_buf()),
             arti_config: None,
             test_clock: false,
+            disable_maintenance: false,
         };
         let daemon_task = tokio::spawn(async move {
             run_with_peer_runtime_until(config, Arc::new(NoopPeerRuntimeFactory), async move {
