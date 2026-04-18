@@ -37,6 +37,8 @@ Build and test
 - When preparing commits, run `make fmt` regularly so formatter output stays
   grouped with the code changes that caused it rather than leaking into later
   unrelated commits.
+- Keep test-only CLI flags and options hidden from help output so normal users
+  do not discover and invoke them accidentally.
 - Main commands:
   - `cargo build --workspace`
   - `cargo test --workspace`

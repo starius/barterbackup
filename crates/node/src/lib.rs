@@ -3068,6 +3068,33 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         }))
     }
 
+    async fn get_test_time(
+        &self,
+        _request: tonic::Request<clirpc::GetTestTimeRequest>,
+    ) -> Result<tonic::Response<clirpc::GetTestTimeResponse>, tonic::Status> {
+        Err(Status::unimplemented(
+            "test clock control is only supported by the daemon",
+        ))
+    }
+
+    async fn set_test_time(
+        &self,
+        _request: tonic::Request<clirpc::SetTestTimeRequest>,
+    ) -> Result<tonic::Response<clirpc::SetTestTimeResponse>, tonic::Status> {
+        Err(Status::unimplemented(
+            "test clock control is only supported by the daemon",
+        ))
+    }
+
+    async fn advance_test_time(
+        &self,
+        _request: tonic::Request<clirpc::AdvanceTestTimeRequest>,
+    ) -> Result<tonic::Response<clirpc::AdvanceTestTimeResponse>, tonic::Status> {
+        Err(Status::unimplemented(
+            "test clock control is only supported by the daemon",
+        ))
+    }
+
     async fn init(
         &self,
         request: tonic::Request<clirpc::InitRequest>,

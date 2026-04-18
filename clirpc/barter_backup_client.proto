@@ -7,6 +7,19 @@ service BarterBackupClient {
     // State returns the current local daemon status.
     rpc State(StateRequest) returns (StateResponse);
 
+    // GetTestTime returns the daemon's current injected application clock when
+    // test-clock mode is enabled.
+    rpc GetTestTime(GetTestTimeRequest) returns (GetTestTimeResponse);
+
+    // SetTestTime overwrites the daemon's injected application clock when
+    // test-clock mode is enabled.
+    rpc SetTestTime(SetTestTimeRequest) returns (SetTestTimeResponse);
+
+    // AdvanceTestTime advances the daemon's injected application clock when
+    // test-clock mode is enabled.
+    rpc AdvanceTestTime(AdvanceTestTimeRequest)
+        returns (AdvanceTestTimeResponse);
+
     // Init initializes the daemon storage with the main password before the
     // first unlock.
     rpc Init(InitRequest) returns (InitResponse);
@@ -100,6 +113,57 @@ service BarterBackupClient {
 
 // StateRequest is an empty local state request.
 message StateRequest {}
+
+// GetTestTimeRequest is an empty request for the daemon test clock.
+message GetTestTimeRequest {}
+
+// GetTestTimeResponse returns the daemon's current injected application time.
+message GetTestTimeResponse {
+    // unix_seconds is the current whole Unix second.
+    uint64 unix_seconds = 1;
+
+    // nanoseconds is the sub-second nanosecond component.
+    uint32 nanoseconds = 2;
+}
+
+// SetTestTimeRequest overwrites the daemon's injected application time.
+message SetTestTimeRequest {
+    // unix_seconds is the target whole Unix second.
+    uint64 unix_seconds = 1;
+
+    // nanoseconds is the target sub-second nanosecond component.
+    uint32 nanoseconds = 2;
+}
+
+// SetTestTimeResponse returns the updated injected application time.
+message SetTestTimeResponse {
+    // unix_seconds is the current whole Unix second after the update.
+    uint64 unix_seconds = 1;
+
+    // nanoseconds is the current sub-second nanosecond component after the
+    // update.
+    uint32 nanoseconds = 2;
+}
+
+// AdvanceTestTimeRequest advances the daemon's injected application time.
+message AdvanceTestTimeRequest {
+    // seconds is the whole-second part of the requested duration.
+    uint64 seconds = 1;
+
+    // nanoseconds is the sub-second nanosecond part of the requested
+    // duration.
+    uint32 nanoseconds = 2;
+}
+
+// AdvanceTestTimeResponse returns the updated injected application time.
+message AdvanceTestTimeResponse {
+    // unix_seconds is the current whole Unix second after the advance.
+    uint64 unix_seconds = 1;
+
+    // nanoseconds is the current sub-second nanosecond component after the
+    // advance.
+    uint32 nanoseconds = 2;
+}
 
 // PeerRuntimeState reports whether the public peer runtime is ready yet.
 enum PeerRuntimeState

@@ -671,6 +671,27 @@ mod tests {
                 self_peer_check_error: String::new(),
             }))
         }
+        async fn get_test_time(
+            &self,
+            _: Request<protos::clirpc::GetTestTimeRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::GetTestTimeResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
+        async fn set_test_time(
+            &self,
+            _: Request<protos::clirpc::SetTestTimeRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::SetTestTimeResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
+        async fn advance_test_time(
+            &self,
+            _: Request<protos::clirpc::AdvanceTestTimeRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::AdvanceTestTimeResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
         type ProposeContractStream = std::pin::Pin<
             Box<
                 dyn tokio_stream::Stream<

@@ -1,6 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use clap::Parser;
+use clock::{Clock, ManualClock, SystemClock, Timestamp};
 use dirs::home_dir;
 use fs2::FileExt;
 use futures_util::StreamExt;
@@ -47,8 +48,12 @@ pub struct Config {
     pub data_dir: Option<PathBuf>,
 
     /// arti_config is one optional Arti TOML file for custom test networks.
-    #[arg(long, env = "BBD_ARTI_CONFIG")]
+    #[arg(long, env = "BBD_ARTI_CONFIG", hide = true)]
     pub arti_config: Option<PathBuf>,
+
+    /// test_clock enables the hidden daemon test clock control RPCs.
+    #[arg(long, env = "BBD_TEST_CLOCK", hide = true)]
+    pub test_clock: bool,
 }
 
 impl Config {
@@ -683,8 +688,12 @@ struct UnlockedNode {
 pub struct DaemonService {
     /// data_dir is the base directory for persistent daemon state.
     data_dir: PathBuf,
-    /// started_at tracks daemon uptime for local health checks.
-    started_at: Instant,
+    /// clock provides the daemon's injected application clock.
+    clock: Arc<dyn Clock>,
+    /// test_clock stores the hidden manual test clock when test mode is enabled.
+    test_clock: Option<Arc<ManualClock>>,
+    /// started_at tracks daemon uptime for local state responses.
+    started_at: Timestamp,
     /// peer_runtime_factory starts the peer-facing runtime during unlock.
     peer_runtime_factory: Arc<dyn PeerRuntimeFactory>,
     /// maintenance_config configures background maintenance cadence.
@@ -705,26 +714,60 @@ struct DaemonRpcService {
 }
 
 impl DaemonService {
-    /// Create a daemon service rooted at `data_dir`.
-    pub fn new(data_dir: PathBuf, peer_runtime_factory: Arc<dyn PeerRuntimeFactory>) -> Self {
-        Self::with_maintenance_config(data_dir, peer_runtime_factory, MaintenanceConfig::default())
-    }
-
     /// Create a daemon service with an explicit maintenance configuration.
     pub fn with_maintenance_config(
         data_dir: PathBuf,
         peer_runtime_factory: Arc<dyn PeerRuntimeFactory>,
         maintenance_config: MaintenanceConfig,
     ) -> Self {
+        Self::with_clock(
+            data_dir,
+            peer_runtime_factory,
+            maintenance_config,
+            Arc::new(SystemClock),
+            None,
+        )
+    }
+
+    /// Create a daemon service with an explicit application clock.
+    fn with_clock(
+        data_dir: PathBuf,
+        peer_runtime_factory: Arc<dyn PeerRuntimeFactory>,
+        maintenance_config: MaintenanceConfig,
+        clock: Arc<dyn Clock>,
+        test_clock: Option<Arc<ManualClock>>,
+    ) -> Self {
+        let started_at = clock.now();
         Self {
             data_dir,
-            started_at: Instant::now(),
+            clock,
+            test_clock,
+            started_at,
             peer_runtime_factory,
             maintenance_config,
             maintenance_wakeup: Arc::new(Notify::new()),
             node_state: Mutex::new(DaemonNodeState::Locked),
             shutdown_request: CancellationToken::new(),
         }
+    }
+
+    /// Create a daemon service with a hidden manual test clock.
+    #[cfg(test)]
+    fn with_test_clock(
+        data_dir: PathBuf,
+        peer_runtime_factory: Arc<dyn PeerRuntimeFactory>,
+        maintenance_config: MaintenanceConfig,
+        initial_time: Timestamp,
+    ) -> Self {
+        let test_clock = Arc::new(ManualClock::new(initial_time));
+        let clock: Arc<dyn Clock> = test_clock.clone();
+        Self::with_clock(
+            data_dir,
+            peer_runtime_factory,
+            maintenance_config,
+            clock,
+            Some(test_clock),
+        )
     }
 
     /// Return the unlocked node or a clear gRPC error if the daemon is locked.
@@ -809,7 +852,11 @@ impl DaemonService {
         // runtime so RPCs can serve real content immediately after unlock.
         let store_dir = self.data_dir.join("local");
         let filesystem = Arc::new(OsFilesystem::new(&store_dir)?);
-        let node = Arc::new(Node::with_local_storage(password, filesystem)?);
+        let node = Arc::new(Node::with_local_storage_and_clock(
+            password,
+            filesystem,
+            self.clock.clone(),
+        )?);
         node.mark_started();
 
         // Start peer bootstrap in the background so unlock returns before
@@ -842,10 +889,38 @@ impl DaemonService {
         self.maintenance_wakeup.notify_one();
     }
 
+    /// Return the hidden manual test clock or a clear RPC error.
+    fn enabled_test_clock(&self) -> Result<Arc<ManualClock>, Status> {
+        self.test_clock
+            .clone()
+            .ok_or_else(|| Status::unimplemented("test clock control is disabled"))
+    }
+
     /// Return the cancellation token used to stop the local daemon runtime.
     fn shutdown_request(&self) -> CancellationToken {
         self.shutdown_request.clone()
     }
+}
+
+/// Convert one internal timestamp into the clirpc wire shape.
+fn proto_test_time(timestamp: Timestamp) -> (u64, u32) {
+    (timestamp.secs, timestamp.nanos)
+}
+
+/// Decode one clirpc timestamp, rejecting invalid nanosecond values.
+fn decode_test_timestamp(unix_seconds: u64, nanoseconds: u32) -> Result<Timestamp, Status> {
+    Timestamp::new(unix_seconds, nanoseconds)
+        .ok_or_else(|| Status::invalid_argument("nanoseconds must be below 1_000_000_000"))
+}
+
+/// Decode one clirpc duration, rejecting invalid nanosecond values.
+fn decode_test_duration(seconds: u64, nanoseconds: u32) -> Result<Duration, Status> {
+    if nanoseconds >= 1_000_000_000 {
+        return Err(Status::invalid_argument(
+            "nanoseconds must be below 1_000_000_000",
+        ));
+    }
+    Ok(Duration::new(seconds, nanoseconds))
 }
 
 #[tonic::async_trait]
@@ -901,11 +976,55 @@ impl BarterBackupClient for DaemonService {
         Ok(Response::new(clirpc::StateResponse {
             storage_initialized,
             server_onion,
-            uptime_seconds: i64::try_from(self.started_at.elapsed().as_secs()).unwrap_or(i64::MAX),
+            uptime_seconds: i64::try_from(
+                self.clock.now().secs.saturating_sub(self.started_at.secs),
+            )
+            .unwrap_or(i64::MAX),
             peer_runtime_state,
             peer_runtime_error,
             self_peer_check_state,
             self_peer_check_error,
+        }))
+    }
+
+    async fn get_test_time(
+        &self,
+        _request: tonic::Request<clirpc::GetTestTimeRequest>,
+    ) -> Result<Response<clirpc::GetTestTimeResponse>, Status> {
+        let clock = self.enabled_test_clock()?;
+        let (unix_seconds, nanoseconds) = proto_test_time(clock.now());
+        Ok(Response::new(clirpc::GetTestTimeResponse {
+            unix_seconds,
+            nanoseconds,
+        }))
+    }
+
+    async fn set_test_time(
+        &self,
+        request: tonic::Request<clirpc::SetTestTimeRequest>,
+    ) -> Result<Response<clirpc::SetTestTimeResponse>, Status> {
+        let clock = self.enabled_test_clock()?;
+        let request = request.into_inner();
+        let timestamp = decode_test_timestamp(request.unix_seconds, request.nanoseconds)?;
+        clock.set(timestamp);
+        let (unix_seconds, nanoseconds) = proto_test_time(clock.now());
+        Ok(Response::new(clirpc::SetTestTimeResponse {
+            unix_seconds,
+            nanoseconds,
+        }))
+    }
+
+    async fn advance_test_time(
+        &self,
+        request: tonic::Request<clirpc::AdvanceTestTimeRequest>,
+    ) -> Result<Response<clirpc::AdvanceTestTimeResponse>, Status> {
+        let clock = self.enabled_test_clock()?;
+        let request = request.into_inner();
+        let duration = decode_test_duration(request.seconds, request.nanoseconds)?;
+        let (unix_seconds, nanoseconds) = proto_test_time(clock.advance(duration));
+        Ok(Response::new(clirpc::AdvanceTestTimeResponse {
+            unix_seconds,
+            nanoseconds,
         }))
     }
 
@@ -1195,6 +1314,27 @@ impl BarterBackupClient for DaemonRpcService {
         request: tonic::Request<clirpc::StateRequest>,
     ) -> Result<Response<clirpc::StateResponse>, Status> {
         self.daemon.state(request).await
+    }
+
+    async fn get_test_time(
+        &self,
+        request: tonic::Request<clirpc::GetTestTimeRequest>,
+    ) -> Result<Response<clirpc::GetTestTimeResponse>, Status> {
+        self.daemon.get_test_time(request).await
+    }
+
+    async fn set_test_time(
+        &self,
+        request: tonic::Request<clirpc::SetTestTimeRequest>,
+    ) -> Result<Response<clirpc::SetTestTimeResponse>, Status> {
+        self.daemon.set_test_time(request).await
+    }
+
+    async fn advance_test_time(
+        &self,
+        request: tonic::Request<clirpc::AdvanceTestTimeRequest>,
+    ) -> Result<Response<clirpc::AdvanceTestTimeResponse>, Status> {
+        self.daemon.advance_test_time(request).await
     }
 
     async fn init(
@@ -1825,6 +1965,18 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
+/// Build the daemon's application clock from runtime config.
+fn daemon_runtime_clock(config: &Config) -> (Arc<dyn Clock>, Option<Arc<ManualClock>>) {
+    if config.test_clock {
+        let initial = SystemClock.now();
+        let test_clock = Arc::new(ManualClock::new(initial));
+        let clock: Arc<dyn Clock> = test_clock.clone();
+        (clock, Some(test_clock))
+    } else {
+        (Arc::new(SystemClock), None)
+    }
+}
+
 /// Run the daemon until the local server exits or `shutdown_signal` resolves.
 async fn run_with_peer_runtime_until<F>(
     config: Config,
@@ -1843,7 +1995,14 @@ where
 
     // Prepare local CLI auth material before we accept any local connections.
     let local_cli_tls = prepare_local_cli_tls(&data_dir)?;
-    let service = Arc::new(DaemonService::new(data_dir.clone(), peer_runtime_factory));
+    let (clock, test_clock) = daemon_runtime_clock(&config);
+    let service = Arc::new(DaemonService::with_clock(
+        data_dir.clone(),
+        peer_runtime_factory,
+        MaintenanceConfig::default(),
+        clock,
+        test_clock,
+    ));
     let shutdown = service.shutdown_request();
     let listener = tokio::net::TcpListener::bind(config.resolved_local_addr()).await?;
     let local_addr = listener.local_addr()?;
@@ -1943,6 +2102,7 @@ mod tests {
         connect_client_with_keys_dir, get_file_with_client, init_with_keys_dir,
         list_files_with_client, set_file_with_client, stop_with_client, unlock_with_keys_dir,
     };
+    use clap::CommandFactory;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -2111,6 +2271,16 @@ mod tests {
             temp_dir.path().to_path_buf(),
             Arc::new(NoopPeerRuntimeFactory),
             MaintenanceConfig::with_interval(Duration::from_secs(60)),
+        )
+    }
+
+    /// Build a daemon service with the hidden manual test clock enabled.
+    fn test_service_with_test_clock(temp_dir: &TempDir, initial_time: Timestamp) -> DaemonService {
+        DaemonService::with_test_clock(
+            temp_dir.path().to_path_buf(),
+            Arc::new(NoopPeerRuntimeFactory),
+            MaintenanceConfig::with_interval(Duration::from_secs(60)),
+            initial_time,
         )
     }
 
@@ -2503,6 +2673,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn config_accepts_hidden_test_clock_flag() {
+        let parsed = Config::parse_from(["bbd", "--test-clock"]);
+        assert!(parsed.test_clock);
+    }
+
+    #[test]
+    fn help_hides_test_flags() {
+        let mut command = Config::command();
+        let rendered = command.render_long_help().to_string();
+
+        assert!(!rendered.contains("--arti-config"));
+        assert!(!rendered.contains("--test-clock"));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn dir_lock_blocks_second_owner() -> Result<()> {
         let temp_dir = TempDir::new()?;
@@ -2657,6 +2842,87 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_clock_rpcs_require_hidden_mode() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let service = test_service(&temp_dir);
+
+        let error = service
+            .get_test_time(tonic::Request::new(clirpc::GetTestTimeRequest {}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Unimplemented);
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_clock_rpcs_control_daemon_time() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let service = test_service_with_test_clock(&temp_dir, Timestamp::new(100, 5).unwrap());
+
+        let initial = service
+            .get_test_time(tonic::Request::new(clirpc::GetTestTimeRequest {}))
+            .await?
+            .into_inner();
+        assert_eq!(initial.unix_seconds, 100);
+        assert_eq!(initial.nanoseconds, 5);
+
+        let state = service
+            .state(tonic::Request::new(clirpc::StateRequest {}))
+            .await?
+            .into_inner();
+        assert_eq!(state.uptime_seconds, 0);
+
+        let set = service
+            .set_test_time(tonic::Request::new(clirpc::SetTestTimeRequest {
+                unix_seconds: 120,
+                nanoseconds: 10,
+            }))
+            .await?
+            .into_inner();
+        assert_eq!(set.unix_seconds, 120);
+        assert_eq!(set.nanoseconds, 10);
+
+        service
+            .init(tonic::Request::new(clirpc::InitRequest {
+                main_password: "correct horse battery staple".to_string(),
+            }))
+            .await?;
+        service
+            .unlock(tonic::Request::new(clirpc::UnlockRequest {
+                main_password: "correct horse battery staple".to_string(),
+            }))
+            .await?;
+
+        let advanced = service
+            .advance_test_time(tonic::Request::new(clirpc::AdvanceTestTimeRequest {
+                seconds: 7,
+                nanoseconds: 20,
+            }))
+            .await?
+            .into_inner();
+        assert_eq!(advanced.unix_seconds, 127);
+        assert_eq!(advanced.nanoseconds, 30);
+
+        let state = service
+            .state(tonic::Request::new(clirpc::StateRequest {}))
+            .await?
+            .into_inner();
+        assert_eq!(state.uptime_seconds, 27);
+
+        let error = service
+            .set_test_time(tonic::Request::new(clirpc::SetTestTimeRequest {
+                unix_seconds: 1,
+                nanoseconds: 1_000_000_000,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn daemon_and_bbcli_round_trip_over_local_mtls() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let cli_addr = reserve_loopback_addr()?;
@@ -2667,6 +2933,7 @@ mod tests {
             local_addr: Some(cli_addr),
             data_dir: Some(temp_dir.path().to_path_buf()),
             arti_config: None,
+            test_clock: false,
         };
         let daemon_task = tokio::spawn(async move {
             run_with_peer_runtime_until(config, Arc::new(NoopPeerRuntimeFactory), async move {
@@ -2722,6 +2989,7 @@ mod tests {
             local_addr: Some(cli_addr),
             data_dir: Some(temp_dir.path().to_path_buf()),
             arti_config: None,
+            test_clock: false,
         };
         let daemon_task = tokio::spawn(async move {
             run_with_peer_runtime_until(config, Arc::new(NoopPeerRuntimeFactory), async move {

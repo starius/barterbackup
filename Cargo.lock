@@ -536,6 +536,7 @@ dependencies = [
  "async-trait",
  "bbcli",
  "clap",
+ "clock",
  "dirs 5.0.1",
  "ed25519-dalek 1.0.1",
  "fs2",
