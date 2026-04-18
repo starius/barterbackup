@@ -628,6 +628,18 @@ impl Store {
         Ok(())
     }
 
+    /// Replace the persisted peer metadata set without touching current content.
+    pub fn replace_peers(&mut self, peers: Vec<storedpb::Peer>) -> Result<(), StorageError> {
+        self.peers = peers
+            .into_iter()
+            .map(|mut peer| {
+                migrate_peer(&mut peer);
+                peer
+            })
+            .collect();
+        self.persist_peer_state()
+    }
+
     /// Read one locally stored revision blob, whether it is current or archived.
     pub fn read_revision_blob(&self, content_id: &[u8]) -> Result<Vec<u8>, StorageError> {
         if self

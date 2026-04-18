@@ -2155,9 +2155,12 @@ impl Node {
                 )
             })?;
         }
+        let preserved_peers = self.tracked_peers()?;
         let selected_blob = self.with_store(|store| store.read_revision_blob(content_id))?;
         self.restore_current_blob(&selected_blob)?;
         self.with_store(|store| {
+            // Keep the latest peer bookkeeping when selecting a file revision.
+            store.replace_peers(preserved_peers.clone())?;
             store.resolve_active_conflict(
                 content_id,
                 i64::try_from(now.secs).unwrap_or(i64::MAX),
@@ -2165,7 +2168,7 @@ impl Node {
             )?;
             Ok(())
         })?;
-        Ok(())
+        self.refresh_known_peers_from_store()
     }
 
     /// Return the stored blob length for a peer's mirrored content, if any.
@@ -3595,6 +3598,7 @@ fn map_storage_error(error: StorageError) -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
     use async_trait::async_trait;
     use clock::{ManualClock, Timestamp};
     use futures::TryStreamExt;
@@ -7590,6 +7594,154 @@ mod tests {
 
         server_b.abort();
         server_a.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resolve_conflict_keeps_newer_peer_metadata() -> anyhow::Result<()> {
+        let owner_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner_node = Arc::new(Node::with_local_storage_and_clock(
+            "resolve-conflict-owner",
+            owner_filesystem,
+            owner_clock.clone(),
+        )?);
+        let recovered_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let recovered_node = Arc::new(Node::with_local_storage(
+            "resolve-conflict-owner",
+            recovered_filesystem,
+        )?);
+        let peer_b_identity = Node::new("resolve-conflict-peer-b")?;
+        let peer_c_identity = Node::new("resolve-conflict-peer-c")?;
+        let peer_d_identity = Node::new("resolve-conflict-peer-d")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        recovered_node.set_peer_connector(connector.clone());
+
+        owner_node.add_known_peer(peer_b_identity.address())?;
+        CliService::new(owner_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"version-1".to_vec(),
+                }),
+            }))
+            .await?;
+        let (version_1, blob_1) = current_content_snapshot(owner_node.as_ref())?;
+
+        owner_node.add_known_peer(peer_c_identity.address())?;
+        owner_clock.set(Timestamp::new(200, 0).unwrap());
+        CliService::new(owner_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"version-2".to_vec(),
+                }),
+            }))
+            .await?;
+        let (version_2, blob_2) = current_content_snapshot(owner_node.as_ref())?;
+
+        let (endpoint_b, server_b) = spawn_plain_peer_server(StaticPeerService::new(
+            bbrpc::GetContentRevisionResponse {
+                requester_content: Some(version_1.clone()),
+                requester_remaining_seconds: 0,
+                responder_content: None,
+                requester_latest_known_content: Some(version_1.clone()),
+            },
+            DownloadBehavior::Response(bbrpc::DownloadResponse {
+                total_length: i64::try_from(blob_1.len()).unwrap_or(i64::MAX),
+                sha256: Sha256::digest(&blob_1).to_vec(),
+                section: Some(bbrpc::download_response::Section::RawBytes(
+                    bbrpc::RawBytes {
+                        value: blob_1.clone(),
+                    },
+                )),
+            }),
+        ))
+        .await?;
+        connector.register_peer(peer_b_identity.address(), &endpoint_b);
+        recovered_node.add_known_peer(peer_b_identity.address())?;
+
+        let initial_update = recovered_node.recover_content_update().await?;
+        assert!(initial_update.recovered_most_recent_version);
+        assert_eq!(
+            recovered_node.with_store(|store| store.get_file("alpha.txt"))?,
+            b"version-1".to_vec()
+        );
+
+        CliService::new(recovered_node.clone())
+            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: peer_d_identity.address().to_string(),
+                }),
+            }))
+            .await?;
+        assert!(peer_entry(recovered_node.as_ref(), peer_d_identity.address())?.is_some());
+
+        CliService::new(recovered_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"local-branch".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let (endpoint_c, server_c) = spawn_plain_peer_server(StaticPeerService::new(
+            bbrpc::GetContentRevisionResponse {
+                requester_content: Some(version_2.clone()),
+                requester_remaining_seconds: 0,
+                responder_content: None,
+                requester_latest_known_content: Some(version_2.clone()),
+            },
+            DownloadBehavior::Response(bbrpc::DownloadResponse {
+                total_length: i64::try_from(blob_2.len()).unwrap_or(i64::MAX),
+                sha256: Sha256::digest(&blob_2).to_vec(),
+                section: Some(bbrpc::download_response::Section::RawBytes(
+                    bbrpc::RawBytes {
+                        value: blob_2.clone(),
+                    },
+                )),
+            }),
+        ))
+        .await?;
+        connector.register_peer(peer_c_identity.address(), &endpoint_c);
+        recovered_node.add_known_peer(peer_c_identity.address())?;
+
+        let update = recovered_node.recover_content_update().await?;
+        assert!(!update.recovered_most_recent_version);
+        assert_eq!(update.total_downloaded_bytes, 0);
+        assert!(peer_entry(recovered_node.as_ref(), peer_c_identity.address())?.is_some());
+
+        let cli = CliService::new(recovered_node.clone());
+        let conflicts = cli
+            .list_conflicts(tonic::Request::new(clirpc::ListConflictsRequest {}))
+            .await?
+            .into_inner()
+            .revisions;
+        let local_revision = conflicts
+            .iter()
+            .find(|revision| revision.source_is_local)
+            .cloned()
+            .context("missing local conflict revision")?;
+
+        cli.resolve_conflict(tonic::Request::new(clirpc::ResolveConflictRequest {
+            content_id: local_revision.content_id.clone(),
+        }))
+        .await?;
+
+        assert_eq!(
+            recovered_node.with_store(|store| store.get_file("alpha.txt"))?,
+            b"local-branch".to_vec()
+        );
+        let final_inventory = peer_inventory_onions(recovered_node.as_ref())?;
+        assert!(final_inventory.contains(&peer_b_identity.address().to_string()));
+        assert!(final_inventory.contains(&peer_c_identity.address().to_string()));
+        assert!(final_inventory.contains(&peer_d_identity.address().to_string()));
+        assert!(peer_entry(recovered_node.as_ref(), peer_c_identity.address())?.is_some());
+        assert!(peer_entry(recovered_node.as_ref(), peer_d_identity.address())?.is_some());
+
+        server_c.abort();
+        server_b.abort();
         Ok(())
     }
 
