@@ -19,6 +19,26 @@ import (
 	"google.golang.org/grpc/credentials"
 )
 
+// TimerInterceptStream wraps one streaming timer-intercept RPC plus its connection.
+type TimerInterceptStream struct {
+	conn   *grpc.ClientConn
+	stream clirpc.BarterBackupClient_TimerInterceptClient
+	cancel context.CancelFunc
+}
+
+// Recv reads the next timer-intercept event from the stream.
+func (s *TimerInterceptStream) Recv() (*clirpc.TimerInterceptEvent, error) {
+	return s.stream.Recv()
+}
+
+// Close closes the underlying gRPC connection.
+func (s *TimerInterceptStream) Close() error {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	return s.conn.Close()
+}
+
 // DialLocalClient connects to one daemon's local clirpc endpoint using the
 // session keys in keysDir.
 func DialLocalClient(

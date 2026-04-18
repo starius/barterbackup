@@ -17,6 +17,7 @@ type Node struct {
 	dataDir       string
 	localAddr     string
 	password      string
+	testClock     bool
 }
 
 // Name returns the logical test node name.
@@ -34,6 +35,11 @@ func (n *Node) DataDir() string {
 	return n.dataDir
 }
 
+// EnableTestClock starts this node with the hidden daemon test clock enabled.
+func (n *Node) EnableTestClock() {
+	n.testClock = true
+}
+
 // StartLocked starts the daemon container without initializing or unlocking it.
 func (n *Node) StartLocked(ctx context.Context) error {
 	n.ForceRemove(ctx)
@@ -41,11 +47,7 @@ func (n *Node) StartLocked(ctx context.Context) error {
 		return err
 	}
 	dockerUser := currentDockerUser()
-	_, err := runCommand(
-		ctx,
-		n.suite.repoRoot,
-		nil,
-		"docker",
+	args := []string{
 		"run",
 		"-d",
 		"--name",
@@ -63,6 +65,16 @@ func (n *Node) StartLocked(ctx context.Context) error {
 		n.localAddr,
 		"--arti-config",
 		"/data/arti.toml",
+	}
+	if n.testClock {
+		args = append(args, "--test-clock")
+	}
+	_, err := runCommand(
+		ctx,
+		n.suite.repoRoot,
+		nil,
+		"docker",
+		args...,
 	)
 	if err != nil {
 		return fmt.Errorf("start %s container: %w", n.name, err)

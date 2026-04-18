@@ -142,6 +142,82 @@ func TestDockerBackupPeerRestartAndRecover(t *testing.T) {
 	assertFileEquals(t, recovered, "payload.bin", payload)
 }
 
+func TestDockerLogicalClockDrivesMaintenance(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	owner := addTestClockNode(t, scenario, "owner", "correct horse battery staple")
+	peer := addTestClockNode(t, scenario, "peer", "peer password")
+
+	startLockedNode(t, owner)
+	waitForReadyNode(t, owner)
+	setNodeTime(t, owner, 1000, 0)
+	initNode(t, owner)
+
+	startLockedNode(t, peer)
+	waitForReadyNode(t, peer)
+	setNodeTime(t, peer, 1000, 0)
+	initNode(t, peer)
+	unlockNode(t, owner)
+	unlockNode(t, peer)
+	readyStates := waitForTestClockNodesReady(t, owner, peer)
+	ownerOnion := readyStates[0].GetServerOnion()
+	peerOnion := readyStates[1].GetServerOnion()
+
+	connectPeer(t, owner, peerOnion)
+	connectPeer(t, peer, ownerOnion)
+
+	payloadV1 := randomPayload(128 * 1024)
+	setFile(t, owner, "payload.bin", payloadV1)
+	proposeContract(t, owner, peerOnion)
+	waitForPeerStorage(t, peer, ownerOnion, int64(len(payloadV1)))
+
+	currentTime := getNodeTime(t, owner)
+	stream := openTimerIntercept(t, owner, "maintenance.interval")
+	defer func() {
+		if err := stream.Close(); err != nil {
+			t.Fatalf("close timer intercept: %v", err)
+		}
+	}()
+	first := recvTimerEventAtOrAfter(t, stream, currentTime.GetUnixSeconds())
+	if first.GetLabel() != "maintenance.interval" {
+		t.Fatalf("unexpected timer label: %s", first.GetLabel())
+	}
+
+	payloadV2 := randomPayload(256 * 1024)
+	advanceNodeTime(t, owner, 60, 0)
+	advanceNodeTime(t, peer, 60, 0)
+	second := recvTimerEventAtOrAfter(t, stream, first.GetRegisteredUnixSeconds()+60)
+	if second.GetRegisteredUnixSeconds() < first.GetRegisteredUnixSeconds()+60 {
+		t.Fatalf(
+			"unexpected second maintenance registration time: got %d, want at least %d",
+			second.GetRegisteredUnixSeconds(),
+			first.GetRegisteredUnixSeconds()+60,
+		)
+	}
+	setFile(t, owner, "payload.bin", payloadV2)
+
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	peerInfo, err := peer.Peers(ctx)
+	if err != nil {
+		t.Fatalf("get peer inventory from peer: %v", err)
+	}
+	for _, info := range peerInfo.GetPeers() {
+		if info.GetPeer().GetOnionServiceId() == ownerOnion && info.StoredContentBytes >= int64(len(payloadV2)) {
+			t.Fatalf("peer stored the larger payload before the owner maintenance interval advanced")
+		}
+	}
+
+	advanceNodeTime(t, owner, 60, 0)
+	advanceNodeTime(t, peer, 60, 0)
+	next := recvTimerEventAtOrAfter(t, stream, second.GetRegisteredUnixSeconds()+60)
+	if next.GetLabel() != "maintenance.interval" {
+		t.Fatalf("unexpected timer label after advance: %s", next.GetLabel())
+	}
+	waitForPeerStorage(t, peer, ownerOnion, int64(len(payloadV2)))
+}
+
 func newScenario(t *testing.T) *harness.Scenario {
 	t.Helper()
 	scenario, err := testSuite.NewScenario(t)
@@ -157,6 +233,13 @@ func addNode(t *testing.T, scenario *harness.Scenario, name string, password str
 	if err != nil {
 		t.Fatalf("add node %s: %v", name, err)
 	}
+	return node
+}
+
+func addTestClockNode(t *testing.T, scenario *harness.Scenario, name string, password string) *harness.Node {
+	t.Helper()
+	node := addNode(t, scenario, name, password)
+	node.EnableTestClock()
 	return node
 }
 
@@ -200,16 +283,61 @@ func initNode(t *testing.T, node *harness.Node) {
 
 func unlockAndWaitReady(t *testing.T, node *harness.Node) *clirpc.StateResponse {
 	t.Helper()
+	unlockNode(t, node)
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
 	defer cancel()
-	if err := node.Unlock(ctx); err != nil {
-		t.Fatalf("unlock %s: %v", node.Name(), err)
-	}
 	state, err := node.WaitForReady(ctx)
 	if err != nil {
 		t.Fatalf("wait for ready on %s: %v", node.Name(), err)
 	}
 	return state
+}
+
+func unlockNode(t *testing.T, node *harness.Node) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	if err := node.Unlock(ctx); err != nil {
+		t.Fatalf("unlock %s: %v", node.Name(), err)
+	}
+}
+
+func waitForTestClockNodesReady(
+	t *testing.T,
+	nodes ...*harness.Node,
+) []*clirpc.StateResponse {
+	t.Helper()
+	deadline := time.Now().Add(harnessDefaultTimeout())
+
+	for {
+		states := make([]*clirpc.StateResponse, len(nodes))
+		allReady := true
+		for index, node := range nodes {
+			ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+			state, err := node.WaitForState(ctx)
+			cancel()
+			if err != nil {
+				t.Fatalf("wait for state on %s: %v", node.Name(), err)
+			}
+			states[index] = state
+			if state.GetPeerRuntimeState() == clirpc.PeerRuntimeState_PEER_RUNTIME_STATE_FAILED {
+				t.Fatalf("peer runtime failed on %s: %s", node.Name(), state.GetPeerRuntimeError())
+			}
+			if state.GetPeerRuntimeState() != clirpc.PeerRuntimeState_PEER_RUNTIME_STATE_READY {
+				allReady = false
+			}
+		}
+		if allReady {
+			return states
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for test-clock nodes to become ready")
+		}
+		for _, node := range nodes {
+			advanceNodeTime(t, node, 5, 0)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
 }
 
 func connectPeer(t *testing.T, node *harness.Node, peerOnion string) {
@@ -258,6 +386,69 @@ func stopNode(t *testing.T, node *harness.Node) {
 	defer cancel()
 	if err := node.Stop(ctx); err != nil {
 		t.Fatalf("stop %s: %v", node.Name(), err)
+	}
+}
+
+func advanceNodeTime(t *testing.T, node *harness.Node, seconds uint64, nanoseconds uint32) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	if _, err := node.AdvanceTestTime(ctx, seconds, nanoseconds); err != nil {
+		t.Fatalf("advance test time on %s: %v", node.Name(), err)
+	}
+}
+
+func setNodeTime(t *testing.T, node *harness.Node, seconds uint64, nanoseconds uint32) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	if _, err := node.SetTestTime(ctx, seconds, nanoseconds); err != nil {
+		t.Fatalf("set test time on %s: %v", node.Name(), err)
+	}
+}
+
+func getNodeTime(t *testing.T, node *harness.Node) *clirpc.GetTestTimeResponse {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	response, err := node.GetTestTime(ctx)
+	if err != nil {
+		t.Fatalf("get test time on %s: %v", node.Name(), err)
+	}
+	return response
+}
+
+func openTimerIntercept(t *testing.T, node *harness.Node, label string) *harness.TimerInterceptStream {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	stream, err := node.TimerIntercept(ctx, label)
+	if err != nil {
+		t.Fatalf("open timer intercept %s on %s: %v", label, node.Name(), err)
+	}
+	return stream
+}
+
+func recvTimerEvent(t *testing.T, stream *harness.TimerInterceptStream) *clirpc.TimerInterceptEvent {
+	t.Helper()
+	event, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("receive timer intercept event: %v", err)
+	}
+	return event
+}
+
+func recvTimerEventAtOrAfter(
+	t *testing.T,
+	stream *harness.TimerInterceptStream,
+	minRegisteredSeconds uint64,
+) *clirpc.TimerInterceptEvent {
+	t.Helper()
+	for {
+		event := recvTimerEvent(t, stream)
+		if event.GetRegisteredUnixSeconds() >= minRegisteredSeconds {
+			return event
+		}
 	}
 }
 

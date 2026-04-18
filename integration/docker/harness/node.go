@@ -90,6 +90,78 @@ func (n *Node) WaitForReady(ctx context.Context) (*clirpc.StateResponse, error) 
 	}
 }
 
+// GetTestTime returns the daemon's hidden logical test time.
+func (n *Node) GetTestTime(ctx context.Context) (*clirpc.GetTestTimeResponse, error) {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	response, err := client.GetTestTime(ctx, &clirpc.GetTestTimeRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("get test time on %s: %w", n.name, err)
+	}
+	return response, nil
+}
+
+// SetTestTime sets the daemon's hidden logical test time exactly.
+func (n *Node) SetTestTime(
+	ctx context.Context,
+	seconds uint64,
+	nanoseconds uint32,
+) (*clirpc.SetTestTimeResponse, error) {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	response, err := client.SetTestTime(ctx, &clirpc.SetTestTimeRequest{
+		UnixSeconds: seconds,
+		Nanoseconds: nanoseconds,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("set test time on %s: %w", n.name, err)
+	}
+	return response, nil
+}
+
+// AdvanceTestTime advances the daemon's hidden logical test time.
+func (n *Node) AdvanceTestTime(
+	ctx context.Context,
+	seconds uint64,
+	nanoseconds uint32,
+) (*clirpc.AdvanceTestTimeResponse, error) {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	response, err := client.AdvanceTestTime(ctx, &clirpc.AdvanceTestTimeRequest{
+		Seconds:     seconds,
+		Nanoseconds: nanoseconds,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("advance test time on %s: %w", n.name, err)
+	}
+	return response, nil
+}
+
+// TimerIntercept opens one hidden timer-intercept stream for the given label.
+func (n *Node) TimerIntercept(ctx context.Context, label string) (*TimerInterceptStream, error) {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return nil, err
+	}
+	streamCtx, cancel := context.WithCancel(context.Background())
+	stream, err := client.TimerIntercept(streamCtx, &clirpc.TimerInterceptRequest{Label: label})
+	if err != nil {
+		cancel()
+		_ = conn.Close()
+		return nil, fmt.Errorf("timer intercept %s on %s: %w", label, n.name, err)
+	}
+	return &TimerInterceptStream{conn: conn, stream: stream, cancel: cancel}, nil
+}
+
 // WaitForPeerStorage waits until the peer inventory reports mirrored content.
 func (n *Node) WaitForPeerStorage(
 	ctx context.Context,

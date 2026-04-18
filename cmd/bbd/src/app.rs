@@ -18,7 +18,9 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 use storage::OsFilesystem;
 use tlsutil::{build_server_tls, generate_ed25519, write_keys};
 use tokio::net::TcpStream;
@@ -737,6 +739,7 @@ struct DaemonRpcService {
 
 impl DaemonService {
     /// Create a daemon service with an explicit maintenance configuration.
+    #[cfg(test)]
     pub fn with_maintenance_config(
         data_dir: PathBuf,
         peer_runtime_factory: Arc<dyn PeerRuntimeFactory>,
@@ -2676,36 +2679,6 @@ mod tests {
         }
     }
 
-    /// Drive one manual maintenance loop until the expected mirrored content appears.
-    async fn wait_for_mirrored_content_after_manual_tick(
-        service: &DaemonService,
-        tick: &Notify,
-        peer_onion: &str,
-        expected_content_id: &[u8],
-        timeout: Duration,
-    ) -> anyhow::Result<()> {
-        let start = Instant::now();
-
-        loop {
-            // Manual maintenance uses a one-shot notify. On a loaded builder
-            // the loop may still be between waits when a single tick is sent,
-            // so keep nudging it until the expected mirrored state appears.
-            tick.notify_one();
-
-            let mirrored =
-                mirrored_peer_content_id(unlocked_node(service).await.as_ref(), peer_onion)?;
-            if mirrored == Some(expected_content_id.to_vec()) {
-                return Ok(());
-            }
-
-            if start.elapsed() >= timeout {
-                anyhow::bail!("timed out waiting for mirrored peer content after manual tick");
-            }
-
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    }
-
     /// Reserve a loopback port and return its address string for the daemon.
     fn reserve_loopback_addr() -> Result<String> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -4120,113 +4093,6 @@ mod tests {
 
         local_service.shutdown().await?;
         remote_service.shutdown().await?;
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn manual_maintenance_tick_refreshes_restarted_peer() -> Result<()> {
-        let connector = Arc::new(netmock::MockPeerConnector::new());
-        let (local_maintenance, local_tick) = manual_maintenance();
-        let (remote_maintenance, _remote_tick) = manual_maintenance();
-        let (restarted_remote_maintenance, _restarted_remote_tick) = manual_maintenance();
-        let local_dir = TempDir::new()?;
-        let remote_dir = TempDir::new()?;
-        let local_service = DaemonService::with_maintenance_config(
-            local_dir.path().to_path_buf(),
-            Arc::new(MockPeerRuntimeFactory {
-                connector: connector.clone(),
-            }),
-            local_maintenance,
-        );
-        let remote_service = DaemonService::with_maintenance_config(
-            remote_dir.path().to_path_buf(),
-            Arc::new(MockPeerRuntimeFactory {
-                connector: connector.clone(),
-            }),
-            remote_maintenance,
-        );
-
-        init_and_unlock_service(&local_service, "local-manual").await?;
-        init_and_unlock_service(&remote_service, "remote-manual").await?;
-        wait_for_public_peer_runtime(&local_service, Duration::from_secs(30)).await?;
-        wait_for_public_peer_runtime(&remote_service, Duration::from_secs(30)).await?;
-
-        // Seed the remote peer with one revision and connect it locally.
-        remote_service
-            .set_file(tonic::Request::new(clirpc::SetFileRequest {
-                file: Some(clirpc::File {
-                    name: "peer.txt".to_string(),
-                    data: b"peer-v1".to_vec(),
-                }),
-            }))
-            .await?;
-        let remote_onion = unlocked_node(&remote_service).await.address().to_string();
-        let remote_v1 = unlocked_node(&remote_service)
-            .await
-            .current_content_info()?
-            .unwrap()
-            .content_id;
-        local_service
-            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
-                peer: Some(clirpc::Peer {
-                    onion_service_id: remote_onion.clone(),
-                }),
-            }))
-            .await?;
-
-        // One explicit tick mirrors the remote revision into the local store.
-        wait_for_mirrored_content_after_manual_tick(
-            &local_service,
-            local_tick.as_ref(),
-            &remote_onion,
-            &remote_v1,
-            Duration::from_secs(30),
-        )
-        .await?;
-
-        remote_service.shutdown().await?;
-
-        let restarted_remote = DaemonService::with_maintenance_config(
-            remote_dir.path().to_path_buf(),
-            Arc::new(MockPeerRuntimeFactory {
-                connector: connector.clone(),
-            }),
-            restarted_remote_maintenance,
-        );
-        unlock_service(&restarted_remote, "remote-manual").await?;
-        wait_for_public_peer_runtime(&restarted_remote, Duration::from_secs(30)).await?;
-
-        // Change the remote content after restart. The local mirror should stay
-        // stale until the explicit maintenance tick fires.
-        restarted_remote
-            .set_file(tonic::Request::new(clirpc::SetFileRequest {
-                file: Some(clirpc::File {
-                    name: "peer.txt".to_string(),
-                    data: b"peer-v2".to_vec(),
-                }),
-            }))
-            .await?;
-        let remote_v2 = unlocked_node(&restarted_remote)
-            .await
-            .current_content_info()?
-            .unwrap()
-            .content_id;
-        assert_eq!(
-            mirrored_peer_content_id(unlocked_node(&local_service).await.as_ref(), &remote_onion)?,
-            Some(remote_v1.clone())
-        );
-
-        wait_for_mirrored_content_after_manual_tick(
-            &local_service,
-            local_tick.as_ref(),
-            &remote_onion,
-            &remote_v2,
-            Duration::from_secs(30),
-        )
-        .await?;
-
-        restarted_remote.shutdown().await?;
-        local_service.shutdown().await?;
         Ok(())
     }
 
