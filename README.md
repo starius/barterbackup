@@ -1,8 +1,9 @@
 # BarterBackup
 
 BarterBackup is a Rust mutual-backup system built around a daemon (`bbd`) and
-a CLI (`bbcli`). It also includes a Go Docker/Chutney integration harness for
-end-to-end testing against `clirpc`.
+a CLI (`bbcli`). It also includes a Go Docker integration harness for
+end-to-end testing against `clirpc`, with a fast Chutney-backed lane and a
+separate public-Tor smoke lane.
 
 Each node keeps one encrypted content blob derived from the user's file set,
 stores encrypted blobs for peers, and recovers the newest revision from peers
@@ -29,7 +30,7 @@ cached blob belongs to without exposing plaintext user data.
 - `cmd/bbcli`: CLI binary
 - `crates/*`: Rust libraries
 - `bbrpc`, `clirpc`, `storedpb`: protobuf definitions
-- `integration/docker`: Go Docker/Chutney integration harness
+- `integration/docker`: Go Docker integration harness
 - `flake.nix`: Nix development shell
 - `Makefile`: convenience targets for build/test/fmt/clippy/install
 
@@ -48,6 +49,7 @@ Any `make` target can be run inside it directly, for example:
 nix develop --command make test
 nix develop --command make build-static
 nix develop --command make integration-test-docker
+nix develop --command make integration-test-docker-tor-smoke
 ```
 
 Without Nix, use a current stable Rust toolchain. Protobuf compilation uses a
@@ -81,6 +83,7 @@ make build-windows
 make sanitize-address
 make rpc
 make integration-test-docker
+make integration-test-docker-tor-smoke
 ```
 
 `make build-static` produces musl-linked Linux binaries for the current Linux
@@ -124,13 +127,22 @@ Docker integration:
 
 ```bash
 make integration-test-docker
+make integration-test-docker-tor-smoke
 ```
 
-This target:
+`make integration-test-docker`:
 
 - builds static `bbd` and `bbcli` binaries for the current Linux host
 - regenerates the Go `clirpc` stubs
-- runs the Go test module under `integration/docker`
+- runs the fast Go Docker suite under `integration/docker`
+
+It runs `bbd` inside Docker containers against a private Chutney Tor network.
+
+`make integration-test-docker-tor-smoke`:
+
+- builds the same static binaries
+- regenerates the Go `clirpc` stubs
+- runs one basic public-Tor recovery smoke test in Docker
 
 The Docker integration harness requires:
 
@@ -138,10 +150,10 @@ The Docker integration harness requires:
 - a working Docker daemon
 - the dev-shell tools from `nix develop`
 
-It creates a private Chutney Tor network and runs `bbd` inside Docker
-containers while the Go harness drives `clirpc` directly. Runtime state lives
-outside the repository under `/tmp/barterbackup-integration` by default. Set
-`BB_DOCKER_TEST_WORKDIR` to override that path. Use
+It runs `bbd` inside Docker containers while the Go harness drives `clirpc`
+directly. The fast lane creates a private Chutney Tor network. Runtime state
+lives outside the repository under `/tmp/barterbackup-integration` by default.
+Set `BB_DOCKER_TEST_WORKDIR` to override that path. Use
 `BB_KEEP_INTEGRATION_ARTIFACTS=1` to keep per-test scenario files after a run.
 
 ## Configuration

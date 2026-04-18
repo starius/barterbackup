@@ -49,9 +49,6 @@ func (n *Node) DisableMaintenance() {
 // StartLocked starts the daemon container without initializing or unlocking it.
 func (n *Node) StartLocked(ctx context.Context) error {
 	n.ForceRemove(ctx)
-	if _, err := n.suite.network.WriteNodeConfig(n.dataDir); err != nil {
-		return err
-	}
 	dockerUser := currentDockerUser()
 	args := []string{
 		"run",
@@ -69,8 +66,12 @@ func (n *Node) StartLocked(ctx context.Context) error {
 		"/data",
 		"--local-addr",
 		n.localAddr,
-		"--arti-config",
-		"/data/arti.toml",
+	}
+	if n.suite.artiConfig != nil {
+		if _, err := n.suite.artiConfig.WriteNodeConfig(n.dataDir); err != nil {
+			return err
+		}
+		args = append(args, "--arti-config", "/data/arti.toml")
 	}
 	if n.testClock {
 		args = append(args, "--test-clock")

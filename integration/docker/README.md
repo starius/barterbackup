@@ -5,8 +5,8 @@ BarterBackup.
 
 It runs real `bbd` daemons in Docker containers and talks to their local
 `clirpc` endpoints directly. Peer traffic goes through a private Chutney Tor
-network, so the integration tests exercise Arti, onion services, gRPC, TLS,
-and recovery together.
+network in the fast lane, and there is also a separate public-Tor smoke lane.
+Together they exercise Arti, onion services, gRPC, TLS, and recovery.
 
 ## Run
 
@@ -14,13 +14,20 @@ From the repository root:
 
 ```bash
 nix develop --command make integration-test-docker
+nix develop --command make integration-test-docker-tor-smoke
 ```
 
-That target:
+`make integration-test-docker`:
 
 - builds static Linux binaries for `bbd` and `bbcli`
 - regenerates the Go `clirpc` stubs with `make rpc`
-- runs `go test ./...` in this module
+- runs `go test ./...` in this module against the private Chutney network
+
+`make integration-test-docker-tor-smoke`:
+
+- builds the same static binaries
+- regenerates the Go `clirpc` stubs
+- runs `TestDockerRealTorRecoverySmoke` against public Tor
 
 ## Runtime Layout
 
@@ -123,3 +130,5 @@ so it is easy to match them to the timed-out test.
 - `BB_DOCKER_TEST_PARALLEL=<n>`: limit how many scenarios run in parallel
 - `BB_DOCKER_TEST_TIMEOUT=<duration>`: per-operation harness timeout used
   inside the Go tests, separate from the outer `go test -timeout`
+- `BB_DOCKER_REAL_TOR=1`: enable the public-Tor smoke test when running the
+  Go package directly

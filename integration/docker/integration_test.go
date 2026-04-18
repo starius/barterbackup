@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,7 +17,15 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 )
 
-var testSuite *harness.Suite
+var (
+	chutneySuite     *harness.Suite
+	chutneySuiteErr  error
+	chutneySuiteOnce sync.Once
+
+	publicTorSuite     *harness.Suite
+	publicTorSuiteErr  error
+	publicTorSuiteOnce sync.Once
+)
 
 type conflictScenario struct {
 	scenario   *harness.Scenario
@@ -32,24 +41,93 @@ type conflictScenario struct {
 }
 
 func TestMain(m *testing.M) {
-	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	defer cancel()
-
-	suite, err := harness.PrepareSuite(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "prepare integration suite: %v\n", err)
-		os.Exit(1)
-	}
-	testSuite = suite
-
 	code := m.Run()
-	if err := suite.Close(); err != nil {
-		fmt.Fprintf(os.Stderr, "close integration suite: %v\n", err)
-		if code == 0 {
-			code = 1
+	if chutneySuite != nil {
+		if err := chutneySuite.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "close Chutney integration suite: %v\n", err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
+	if publicTorSuite != nil {
+		if err := publicTorSuite.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "close public-Tor integration suite: %v\n", err)
+			if code == 0 {
+				code = 1
+			}
 		}
 	}
 	os.Exit(code)
+}
+
+func chutneyHarnessSuite(t *testing.T) *harness.Suite {
+	t.Helper()
+	chutneySuiteOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+		defer cancel()
+		chutneySuite, chutneySuiteErr = harness.PrepareChutneySuite(ctx)
+	})
+	if chutneySuiteErr != nil {
+		t.Fatalf("prepare Chutney integration suite: %v", chutneySuiteErr)
+	}
+	return chutneySuite
+}
+
+func publicTorHarnessSuite(t *testing.T) *harness.Suite {
+	t.Helper()
+	publicTorSuiteOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+		defer cancel()
+		publicTorSuite, publicTorSuiteErr = harness.PreparePublicTorSuite(ctx)
+	})
+	if publicTorSuiteErr != nil {
+		t.Fatalf("prepare public-Tor integration suite: %v", publicTorSuiteErr)
+	}
+	return publicTorSuite
+}
+
+func requireRealTorSmoke(t *testing.T) {
+	t.Helper()
+	if os.Getenv("BB_DOCKER_REAL_TOR") == "" {
+		t.Skip("set BB_DOCKER_REAL_TOR=1 to run public-Tor Docker smoke tests")
+	}
+}
+
+func TestDockerRealTorRecoverySmoke(t *testing.T) {
+	requireRealTorSmoke(t)
+
+	scenario := newPublicTorScenario(t)
+	owner := addNode(t, scenario, "owner", "correct horse battery staple")
+	peer := addNode(t, scenario, "peer", "peer password")
+	recovered := addNode(t, scenario, "recovered", "correct horse battery staple")
+	owner.DisableMaintenance()
+	peer.DisableMaintenance()
+	recovered.DisableMaintenance()
+
+	ownerOnion := startInitializedReadyNode(t, owner)
+	peerOnion := startInitializedReadyNode(t, peer)
+
+	connectPeer(t, owner, peerOnion)
+	connectPeer(t, peer, ownerOnion)
+
+	payload := randomPayload(256 * 1024)
+	setFile(t, owner, "payload.bin", payload)
+	proposeContract(t, owner, peerOnion)
+	waitForPeerStorage(t, peer, ownerOnion, int64(len(payload)))
+
+	stopNode(t, owner)
+	assertCLIKeysRemoved(t, owner)
+
+	startLockedNode(t, recovered)
+	waitForReadyNode(t, recovered)
+	initNode(t, recovered)
+	unlockAndWaitReady(t, recovered)
+	assertNoFiles(t, recovered)
+
+	connectPeer(t, recovered, peerOnion)
+	recoverContent(t, recovered)
+	assertFileEquals(t, recovered, "payload.bin", payload)
 }
 
 func TestDockerNodeLifecycle(t *testing.T) {
@@ -389,9 +467,18 @@ func TestDockerMetadataOnlyRecoveryAutoResolves(t *testing.T) {
 
 func newScenario(t *testing.T) *harness.Scenario {
 	t.Helper()
-	scenario, err := testSuite.NewScenario(t)
+	scenario, err := chutneyHarnessSuite(t).NewScenario(t)
 	if err != nil {
 		t.Fatalf("create scenario: %v", err)
+	}
+	return scenario
+}
+
+func newPublicTorScenario(t *testing.T) *harness.Scenario {
+	t.Helper()
+	scenario, err := publicTorHarnessSuite(t).NewScenario(t)
+	if err != nil {
+		t.Fatalf("create public-Tor scenario: %v", err)
 	}
 	return scenario
 }

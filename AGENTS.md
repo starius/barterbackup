@@ -4,7 +4,8 @@ Scope
 
 - This file guides agents working in this repository.
 - The product implementation is Rust.
-- `integration/docker` contains a Go Docker/Chutney integration harness.
+- `integration/docker` contains a Go Docker integration harness with a fast
+  private-Chutney lane and a separate public-Tor smoke lane.
 
 Repository layout
 
@@ -52,6 +53,7 @@ Build and test
   - `make install`
   - `make rpc`
   - `make integration-test-docker`
+  - `make integration-test-docker-tor-smoke`
   - `make build-static`
   - `make build-static-linux-amd64`
   - `make build-static-linux-arm64`
@@ -110,10 +112,11 @@ Testing
 - Use `clock::ManualClock` for long-horizon behavior.
 - Use `netmock` for multi-node transport tests that do not need real Tor.
 - Cover malformed peer responses and recovery edge cases, not just happy paths.
-- Docker integration tests use the Go harness under `integration/docker` plus
-  a private Chutney network. The harness keeps runtime state outside the repo
-  under `/tmp/barterbackup-integration` unless `BB_DOCKER_TEST_WORKDIR`
-  overrides it.
+- Docker integration tests use the Go harness under `integration/docker`.
+  The fast lane uses a private Chutney network, and the public-Tor smoke lane
+  runs separately behind `make integration-test-docker-tor-smoke`. The harness
+  keeps runtime state outside the repo under `/tmp/barterbackup-integration`
+  unless `BB_DOCKER_TEST_WORKDIR` overrides it.
 
 Open product gaps
 

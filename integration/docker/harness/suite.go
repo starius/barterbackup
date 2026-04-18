@@ -20,12 +20,20 @@ const (
 	defaultLongTimeout  = 10 * time.Minute
 )
 
-// Suite owns the shared Docker image and Chutney network for one test run.
+// artiConfigProvider writes one per-node Arti config when a suite needs a
+// private network.
+type artiConfigProvider interface {
+	WriteNodeConfig(nodeDataDir string) (string, error)
+	Close() error
+}
+
+// Suite owns the shared Docker image and optional Arti config source for one
+// test run.
 type Suite struct {
 	repoRoot     string
 	workRoot     string
 	imageTag     string
-	network      *ChutneyNetwork
+	artiConfig   artiConfigProvider
 	parallelGate chan struct{}
 }
 
@@ -40,8 +48,14 @@ type Scenario struct {
 }
 
 // PrepareSuite boots the shared image and private Tor network used by the
-// Docker integration tests.
+// default Docker integration tests.
 func PrepareSuite(ctx context.Context) (*Suite, error) {
+	return PrepareChutneySuite(ctx)
+}
+
+// PrepareChutneySuite boots the shared image and private Tor network used by
+// the Chutney-backed Docker integration tests.
+func PrepareChutneySuite(ctx context.Context) (*Suite, error) {
 	repoRoot, err := findRepoRoot()
 	if err != nil {
 		return nil, err
@@ -71,16 +85,47 @@ func PrepareSuite(ctx context.Context) (*Suite, error) {
 	if err != nil {
 		return nil, err
 	}
-	suite.network = network
+	suite.artiConfig = network
 	return suite, nil
 }
 
-// Close tears down the shared private Tor network.
+// PreparePublicTorSuite boots the shared image for Docker smoke tests that use
+// the default public Tor network instead of a private Chutney network.
+func PreparePublicTorSuite(ctx context.Context) (*Suite, error) {
+	repoRoot, err := findRepoRoot()
+	if err != nil {
+		return nil, err
+	}
+	workRoot, err := configuredWorkRoot()
+	if err != nil {
+		return nil, err
+	}
+	if runtime.GOOS != "linux" {
+		return nil, fmt.Errorf("Docker integration tests require Linux hosts")
+	}
+	if _, err := execLookPath("docker"); err != nil {
+		return nil, err
+	}
+
+	suite := &Suite{
+		repoRoot:     repoRoot,
+		workRoot:     workRoot,
+		imageTag:     "barterbackup-integration:local",
+		parallelGate: make(chan struct{}, configuredParallelism()),
+	}
+
+	if err := suite.buildImage(ctx); err != nil {
+		return nil, err
+	}
+	return suite, nil
+}
+
+// Close tears down any shared Arti config provider owned by the suite.
 func (s *Suite) Close() error {
-	if s.network == nil {
+	if s.artiConfig == nil {
 		return nil
 	}
-	return s.network.Close()
+	return s.artiConfig.Close()
 }
 
 // NewScenario allocates one per-test scenario with isolated node state.
