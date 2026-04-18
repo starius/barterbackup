@@ -137,6 +137,8 @@ make integration-test-docker-tor-smoke
 - runs the fast Go Docker suite under `integration/docker`
 
 It runs `bbd` inside Docker containers against a private Chutney Tor network.
+That lane also includes logical-clock scenarios driven through hidden local
+test-clock RPCs.
 
 `make integration-test-docker-tor-smoke`:
 

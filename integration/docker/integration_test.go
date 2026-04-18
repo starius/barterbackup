@@ -130,6 +130,40 @@ func TestDockerRealTorRecoverySmoke(t *testing.T) {
 	assertFileEquals(t, recovered, "payload.bin", payload)
 }
 
+func TestDockerLogicalClockAccumulatesLongTermPeerScore(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	owner := addTestClockNode(t, scenario, "owner", "correct horse battery staple")
+	peer := addTestClockNode(t, scenario, "peer", "peer password")
+
+	ownerOnion := startInitializedReadyTestClockNode(t, owner, 1000)
+	peerOnion := startInitializedReadyTestClockNode(t, peer, 1000)
+
+	connectPeer(t, owner, peerOnion)
+	connectPeer(t, peer, ownerOnion)
+
+	payload := randomPayload(96 * 1024)
+	setFile(t, owner, "payload.bin", payload)
+	proposeContract(t, owner, peerOnion)
+	waitForPeerStorage(t, peer, ownerOnion, int64(len(payload)))
+
+	checkContract(t, owner, peerOnion)
+	waitForPeerScoreSeconds(t, owner, peerOnion, 0)
+
+	const thirtyDays = 30 * 24 * 60 * 60
+
+	advanceNodeTime(t, owner, thirtyDays, 0)
+	advanceNodeTime(t, peer, thirtyDays, 0)
+	checkContract(t, owner, peerOnion)
+	waitForPeerScoreSeconds(t, owner, peerOnion, thirtyDays)
+
+	advanceNodeTime(t, owner, thirtyDays, 0)
+	advanceNodeTime(t, peer, thirtyDays, 0)
+	checkContract(t, owner, peerOnion)
+	waitForPeerScoreSeconds(t, owner, peerOnion, 2*thirtyDays)
+}
+
 func TestDockerNodeLifecycle(t *testing.T) {
 	t.Parallel()
 
@@ -724,12 +758,47 @@ func proposeContract(t *testing.T, node *harness.Node, peerOnion string) {
 	}
 }
 
+func checkContract(t *testing.T, node *harness.Node, peerOnion string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	update, err := node.CheckContractUntilSuccess(ctx, peerOnion)
+	if err != nil {
+		t.Fatalf("check contract from %s to %s: %v", node.Name(), peerOnion, err)
+	}
+	if !update.GetSuccess() {
+		t.Fatalf("contract check from %s to %s did not succeed", node.Name(), peerOnion)
+	}
+}
+
 func waitForPeerStorage(t *testing.T, node *harness.Node, peerOnion string, expectedBytes int64) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
 	defer cancel()
 	if _, err := node.WaitForPeerStorage(ctx, peerOnion, expectedBytes); err != nil {
 		t.Fatalf("wait for peer storage on %s for %s: %v", node.Name(), peerOnion, err)
+	}
+}
+
+func waitForPeerScoreSeconds(t *testing.T, node *harness.Node, peerOnion string, expected int64) {
+	t.Helper()
+	deadline := time.Now().Add(harnessDefaultTimeout())
+
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+		response, err := node.Peers(ctx)
+		cancel()
+		if err == nil {
+			for _, peer := range response.GetPeers() {
+				if peer.GetPeer().GetOnionServiceId() == peerOnion && peer.GetScoreSeconds() == expected {
+					return
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s score on %s to become %d", peerOnion, node.Name(), expected)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 

@@ -281,6 +281,23 @@ func (n *Node) ProposeContractUntilSuccess(ctx context.Context, peerOnion string
 	}
 }
 
+// CheckContractUntilSuccess retries one contract check until it succeeds or times out.
+func (n *Node) CheckContractUntilSuccess(ctx context.Context, peerOnion string) (*clirpc.CheckContractUpdate, error) {
+	deadline, cancel := context.WithTimeout(ctx, defaultLongTimeout)
+	defer cancel()
+
+	for {
+		update, err := n.checkContractOnce(deadline, peerOnion)
+		if err == nil {
+			return update, nil
+		}
+		if err := ctxErr(deadline); err != nil {
+			return nil, err
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
 // RecoverContentUntilRecovered retries recovery until one update reports success.
 func (n *Node) RecoverContentUntilRecovered(ctx context.Context) (*clirpc.RecoverContentUpdate, error) {
 	deadline, cancel := context.WithTimeout(ctx, defaultLongTimeout)
@@ -408,6 +425,37 @@ func (n *Node) proposeContractOnce(ctx context.Context, peerOnion string) (*clir
 	}
 	if last == nil || !last.Success {
 		return nil, fmt.Errorf("proposal from %s to %s did not finish successfully", n.name, peerOnion)
+	}
+	return last, nil
+}
+
+func (n *Node) checkContractOnce(ctx context.Context, peerOnion string) (*clirpc.CheckContractUpdate, error) {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	stream, err := client.CheckContract(ctx, &clirpc.CheckContractRequest{
+		Peer: &clirpc.Peer{OnionServiceId: peerOnion},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("check contract from %s to %s: %w", n.name, peerOnion, err)
+	}
+
+	var last *clirpc.CheckContractUpdate
+	for {
+		update, recvErr := stream.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		if recvErr != nil {
+			return nil, fmt.Errorf("receive check update from %s: %w", n.name, recvErr)
+		}
+		last = update
+	}
+	if last == nil || !last.Success {
+		return nil, fmt.Errorf("contract check from %s to %s did not finish successfully", n.name, peerOnion)
 	}
 	return last, nil
 }
