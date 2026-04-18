@@ -4,7 +4,7 @@ use clap::Parser;
 use clock::{Clock, ManualClock, SystemClock, Timestamp};
 use dirs::home_dir;
 use fs2::FileExt;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use node::{CliService, Node, P2pService};
 use protos::bbrpc::barter_backup_server_server::BarterBackupServerServer;
 use protos::clirpc;
@@ -16,6 +16,7 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use storage::OsFilesystem;
@@ -23,7 +24,7 @@ use tlsutil::{build_server_tls, generate_ed25519, write_keys};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify};
 use tokio_rustls::server::TlsStream;
-use tokio_stream::wrappers::TcpListenerStream;
+use tokio_stream::wrappers::{TcpListenerStream, UnboundedReceiverStream};
 use tokio_util::sync::CancellationToken;
 use tonic::{Response, Status};
 use tracing::{error, info, warn};
@@ -907,6 +908,17 @@ fn proto_test_time(timestamp: Timestamp) -> (u64, u32) {
     (timestamp.secs, timestamp.nanos)
 }
 
+/// Convert one internal timer intercept event into the clirpc wire shape.
+fn proto_timer_intercept_event(event: clock::TimerInterceptEvent) -> clirpc::TimerInterceptEvent {
+    clirpc::TimerInterceptEvent {
+        label: event.label,
+        wait_seconds: event.duration.as_secs(),
+        wait_nanoseconds: event.duration.subsec_nanos(),
+        registered_unix_seconds: event.registered_at.secs,
+        registered_nanoseconds: event.registered_at.nanos,
+    }
+}
+
 /// Decode one clirpc timestamp, rejecting invalid nanosecond values.
 fn decode_test_timestamp(unix_seconds: u64, nanoseconds: u32) -> Result<Timestamp, Status> {
     Timestamp::new(unix_seconds, nanoseconds)
@@ -925,6 +937,10 @@ fn decode_test_duration(seconds: u64, nanoseconds: u32) -> Result<Duration, Stat
 
 #[tonic::async_trait]
 impl BarterBackupClient for DaemonService {
+    /// TimerInterceptStream streams hidden labeled timer registrations.
+    type TimerInterceptStream =
+        Pin<Box<dyn Stream<Item = Result<clirpc::TimerInterceptEvent, tonic::Status>> + Send>>;
+
     /// ProposeContractStream streams contract proposal progress updates.
     type ProposeContractStream = <CliService as BarterBackupClient>::ProposeContractStream;
 
@@ -1026,6 +1042,21 @@ impl BarterBackupClient for DaemonService {
             unix_seconds,
             nanoseconds,
         }))
+    }
+
+    async fn timer_intercept(
+        &self,
+        request: tonic::Request<clirpc::TimerInterceptRequest>,
+    ) -> Result<Response<Self::TimerInterceptStream>, Status> {
+        let label = request.into_inner().label;
+        if label.is_empty() {
+            return Err(Status::invalid_argument("timer label is required"));
+        }
+        let clock = self.enabled_test_clock()?;
+        let receiver = clock.subscribe_timer_intercepts(&label);
+        let stream = UnboundedReceiverStream::new(receiver)
+            .map(|event| Ok(proto_timer_intercept_event(event)));
+        Ok(Response::new(Box::pin(stream)))
     }
 
     async fn init(
@@ -1300,6 +1331,9 @@ impl BarterBackupClient for DaemonService {
 
 #[tonic::async_trait]
 impl BarterBackupClient for DaemonRpcService {
+    /// TimerInterceptStream streams hidden labeled timer registrations.
+    type TimerInterceptStream = <DaemonService as BarterBackupClient>::TimerInterceptStream;
+
     /// ProposeContractStream streams contract proposal progress updates.
     type ProposeContractStream = <DaemonService as BarterBackupClient>::ProposeContractStream;
 
@@ -1335,6 +1369,13 @@ impl BarterBackupClient for DaemonRpcService {
         request: tonic::Request<clirpc::AdvanceTestTimeRequest>,
     ) -> Result<Response<clirpc::AdvanceTestTimeResponse>, Status> {
         self.daemon.advance_test_time(request).await
+    }
+
+    async fn timer_intercept(
+        &self,
+        request: tonic::Request<clirpc::TimerInterceptRequest>,
+    ) -> Result<Response<Self::TimerInterceptStream>, Status> {
+        self.daemon.timer_intercept(request).await
     }
 
     async fn init(
@@ -2856,6 +2897,25 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn timer_intercept_requires_hidden_mode() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let service = test_service(&temp_dir);
+
+        let result = service
+            .timer_intercept(tonic::Request::new(clirpc::TimerInterceptRequest {
+                label: "maintenance.interval".to_string(),
+            }))
+            .await;
+        let error = match result {
+            Ok(_) => panic!("timer intercept unexpectedly succeeded without test clock"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), tonic::Code::Unimplemented);
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_clock_rpcs_control_daemon_time() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let service = test_service_with_test_clock(&temp_dir, Timestamp::new(100, 5).unwrap());
@@ -2918,6 +2978,69 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timer_intercept_stream_flushes_queued_and_future_events() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let service = test_service_with_test_clock(&temp_dir, Timestamp::new(300, 0).unwrap());
+
+        service
+            .clock
+            .wait_for(Duration::ZERO, "maintenance.interval")
+            .await;
+        service
+            .clock
+            .wait_for(Duration::ZERO, "maintenance.interval")
+            .await;
+
+        let mut stream = service
+            .timer_intercept(tonic::Request::new(clirpc::TimerInterceptRequest {
+                label: "maintenance.interval".to_string(),
+            }))
+            .await?
+            .into_inner();
+
+        let first = stream.next().await.transpose()?.unwrap();
+        assert_eq!(first.label, "maintenance.interval");
+        assert_eq!(first.wait_seconds, 0);
+        assert_eq!(first.wait_nanoseconds, 0);
+        assert_eq!(first.registered_unix_seconds, 300);
+        assert_eq!(first.registered_nanoseconds, 0);
+
+        let second = stream.next().await.transpose()?.unwrap();
+        assert_eq!(second.label, "maintenance.interval");
+        assert_eq!(second.wait_seconds, 0);
+        assert_eq!(second.wait_nanoseconds, 0);
+        assert_eq!(second.registered_unix_seconds, 300);
+        assert_eq!(second.registered_nanoseconds, 0);
+
+        let clock = service.clock.clone();
+        let waiter = tokio::spawn(async move {
+            clock
+                .wait_for(Duration::from_secs(3), "maintenance.interval")
+                .await;
+        });
+
+        let third = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await?
+            .transpose()?
+            .unwrap();
+        assert_eq!(third.label, "maintenance.interval");
+        assert_eq!(third.wait_seconds, 3);
+        assert_eq!(third.wait_nanoseconds, 0);
+        assert_eq!(third.registered_unix_seconds, 300);
+        assert_eq!(third.registered_nanoseconds, 0);
+
+        service
+            .advance_test_time(tonic::Request::new(clirpc::AdvanceTestTimeRequest {
+                seconds: 3,
+                nanoseconds: 0,
+            }))
+            .await?;
+        waiter.await.unwrap();
 
         Ok(())
     }

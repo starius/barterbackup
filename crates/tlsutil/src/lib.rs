@@ -657,6 +657,14 @@ mod tests {
 
     #[tonic::async_trait]
     impl BarterBackupClient for Hc {
+        type TimerInterceptStream = std::pin::Pin<
+            Box<
+                dyn tokio_stream::Stream<
+                        Item = std::result::Result<protos::clirpc::TimerInterceptEvent, Status>,
+                    > + Send
+                    + 'static,
+            >,
+        >;
         async fn state(
             &self,
             _req: Request<StateRequest>,
@@ -690,6 +698,12 @@ mod tests {
             _: Request<protos::clirpc::AdvanceTestTimeRequest>,
         ) -> std::result::Result<tonic::Response<protos::clirpc::AdvanceTestTimeResponse>, Status>
         {
+            Err(Status::unimplemented(""))
+        }
+        async fn timer_intercept(
+            &self,
+            _: Request<protos::clirpc::TimerInterceptRequest>,
+        ) -> std::result::Result<tonic::Response<Self::TimerInterceptStream>, Status> {
             Err(Status::unimplemented(""))
         }
         type ProposeContractStream = std::pin::Pin<

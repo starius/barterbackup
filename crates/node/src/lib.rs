@@ -3032,6 +3032,11 @@ impl CliService {
 
 #[tonic::async_trait]
 impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
+    /// TimerInterceptStream is the streaming response for hidden timer intercepts.
+    type TimerInterceptStream = Pin<
+        Box<dyn Stream<Item = Result<clirpc::TimerInterceptEvent, tonic::Status>> + Send + 'static>,
+    >;
+
     /// ProposeContractStream is the streaming response for contract proposals.
     type ProposeContractStream = Pin<
         Box<
@@ -3090,6 +3095,15 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         &self,
         _request: tonic::Request<clirpc::AdvanceTestTimeRequest>,
     ) -> Result<tonic::Response<clirpc::AdvanceTestTimeResponse>, tonic::Status> {
+        Err(Status::unimplemented(
+            "test clock control is only supported by the daemon",
+        ))
+    }
+
+    async fn timer_intercept(
+        &self,
+        _request: tonic::Request<clirpc::TimerInterceptRequest>,
+    ) -> Result<tonic::Response<Self::TimerInterceptStream>, tonic::Status> {
         Err(Status::unimplemented(
             "test clock control is only supported by the daemon",
         ))

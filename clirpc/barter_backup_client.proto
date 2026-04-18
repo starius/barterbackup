@@ -20,6 +20,11 @@ service BarterBackupClient {
     rpc AdvanceTestTime(AdvanceTestTimeRequest)
         returns (AdvanceTestTimeResponse);
 
+    // TimerIntercept streams labeled logical waits when test-clock mode is
+    // enabled.
+    rpc TimerIntercept(TimerInterceptRequest)
+        returns (stream TimerInterceptEvent);
+
     // Init initializes the daemon storage with the main password before the
     // first unlock.
     rpc Init(InitRequest) returns (InitResponse);
@@ -163,6 +168,32 @@ message AdvanceTestTimeResponse {
     // nanoseconds is the current sub-second nanosecond component after the
     // advance.
     uint32 nanoseconds = 2;
+}
+
+// TimerInterceptRequest subscribes to one hidden timer label.
+message TimerInterceptRequest {
+    // label is the exact internal timer label to observe.
+    string label = 1;
+}
+
+// TimerInterceptEvent reports one observed logical timer registration.
+message TimerInterceptEvent {
+    // label is the internal timer label that was armed.
+    string label = 1;
+
+    // wait_seconds is the whole-second part of the requested duration.
+    uint64 wait_seconds = 2;
+
+    // wait_nanoseconds is the sub-second nanosecond part of the requested
+    // duration.
+    uint32 wait_nanoseconds = 3;
+
+    // registered_unix_seconds is the logical time when the wait was armed.
+    uint64 registered_unix_seconds = 4;
+
+    // registered_nanoseconds is the logical sub-second component when the wait
+    // was armed.
+    uint32 registered_nanoseconds = 5;
 }
 
 // PeerRuntimeState reports whether the public peer runtime is ready yet.
