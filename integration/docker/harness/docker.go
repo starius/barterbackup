@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -39,6 +40,7 @@ func (n *Node) StartLocked(ctx context.Context) error {
 	if _, err := n.suite.network.WriteNodeConfig(n.dataDir); err != nil {
 		return err
 	}
+	dockerUser := currentDockerUser()
 	_, err := runCommand(
 		ctx,
 		n.suite.repoRoot,
@@ -48,6 +50,8 @@ func (n *Node) StartLocked(ctx context.Context) error {
 		"-d",
 		"--name",
 		n.containerName,
+		"--user",
+		dockerUser,
 		"--network",
 		"host",
 		"-v",
@@ -102,4 +106,8 @@ func sanitizeName(value string) string {
 		return "node"
 	}
 	return cleaned
+}
+
+func currentDockerUser() string {
+	return strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid())
 }
