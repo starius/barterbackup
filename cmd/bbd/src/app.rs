@@ -198,9 +198,9 @@ struct BackgroundPeerFailure {
     /// consecutive_failures is the current failure streak length.
     consecutive_failures: u32,
     /// next_retry_at is the earliest time background maintenance should retry.
-    next_retry_at: Instant,
+    next_retry_at: Timestamp,
     /// last_success_at records when background maintenance last succeeded.
-    last_success_at: Option<Instant>,
+    last_success_at: Option<Timestamp>,
 }
 
 /// RecordedBackgroundFailure summarizes one failure update for structured logs.
@@ -222,7 +222,7 @@ struct BackgroundPeerFailures {
 
 impl BackgroundPeerFailures {
     /// Return whether one peer is eligible for a background attempt at `now`.
-    fn should_attempt(&self, peer_onion: &str, now: Instant) -> bool {
+    fn should_attempt(&self, peer_onion: &str, now: Timestamp) -> bool {
         self.peers
             .lock()
             .unwrap()
@@ -234,7 +234,7 @@ impl BackgroundPeerFailures {
     fn record_failure(
         &self,
         peer_onion: &str,
-        now: Instant,
+        now: Timestamp,
         maintenance_interval: Duration,
     ) -> RecordedBackgroundFailure {
         let mut peers = self.peers.lock().unwrap();
@@ -248,7 +248,7 @@ impl BackgroundPeerFailures {
         failure.consecutive_failures = failure.consecutive_failures.saturating_add(1);
         let backoff =
             background_failure_backoff(maintenance_interval, failure.consecutive_failures);
-        failure.next_retry_at = now + backoff;
+        failure.next_retry_at = now.advance(backoff);
         RecordedBackgroundFailure {
             consecutive_failures: failure.consecutive_failures,
             retry_after: backoff,
@@ -259,7 +259,7 @@ impl BackgroundPeerFailures {
     }
 
     /// Clear one peer's failure streak and return the cleared count, if any.
-    fn record_success(&self, peer_onion: &str, now: Instant) -> Option<u32> {
+    fn record_success(&self, peer_onion: &str, now: Timestamp) -> Option<u32> {
         let mut peers = self.peers.lock().unwrap();
         let failure = peers.get_mut(peer_onion)?;
         if failure.consecutive_failures == 0 {
@@ -1702,13 +1702,14 @@ fn self_check_log_fields(self_check: &StdMutex<SelfCheckHealth>) -> (&'static st
 /// Run one peer's background proposal and check workflow.
 async fn run_background_peer_maintenance(
     node: Arc<Node>,
+    clock: Arc<dyn Clock>,
     peer_onion: String,
     peer_failures: BackgroundPeerFailures,
     maintenance_interval: Duration,
     self_check: Arc<StdMutex<SelfCheckHealth>>,
     shutdown: CancellationToken,
 ) {
-    let started_at = Instant::now();
+    let started_at = clock.now();
     if !peer_failures.should_attempt(&peer_onion, started_at) {
         return;
     }
@@ -1761,7 +1762,7 @@ async fn run_background_peer_maintenance(
         return;
     }
 
-    if let Some(cleared_failures) = peer_failures.record_success(&peer_onion, Instant::now()) {
+    if let Some(cleared_failures) = peer_failures.record_success(&peer_onion, clock.now()) {
         info!(
             peer = %peer_onion,
             cleared_failures,
@@ -1773,6 +1774,7 @@ async fn run_background_peer_maintenance(
 /// Run one background maintenance pass for `node`.
 async fn run_maintenance_pass(
     node: Arc<Node>,
+    clock: Arc<dyn Clock>,
     peer_failures: &BackgroundPeerFailures,
     maintenance_interval: Duration,
     self_check: Arc<StdMutex<SelfCheckHealth>>,
@@ -1801,6 +1803,7 @@ async fn run_maintenance_pass(
             };
             in_flight.spawn(run_background_peer_maintenance(
                 node.clone(),
+                clock.clone(),
                 peer_onion,
                 peer_failures.clone(),
                 maintenance_interval,
@@ -1847,7 +1850,7 @@ async fn run_maintenance_loop(
 ) -> Result<()> {
     // Use one schedule for both recovery and contract maintenance for now.
     // The loop also wakes immediately after local mutations.
-    let mut schedule = MaintenanceSchedule::new(&maintenance_config, clock);
+    let mut schedule = MaintenanceSchedule::new(&maintenance_config, clock.clone());
     let peer_failures = BackgroundPeerFailures::default();
 
     loop {
@@ -1860,6 +1863,7 @@ async fn run_maintenance_loop(
 
         run_maintenance_pass(
             node.clone(),
+            clock.clone(),
             &peer_failures,
             maintenance_config.interval,
             self_check.clone(),
@@ -2829,7 +2833,7 @@ mod tests {
     fn background_peer_failures_delay_retries_until_success() {
         let failures = BackgroundPeerFailures::default();
         let peer = "peer.onion";
-        let started_at = Instant::now();
+        let started_at = Timestamp::new(1_000, 0).unwrap();
 
         assert!(failures.should_attempt(peer, started_at));
 
@@ -2837,38 +2841,38 @@ mod tests {
         assert_eq!(first_failure.consecutive_failures, 1);
         assert_eq!(first_failure.retry_after, Duration::from_secs(5));
         assert_eq!(first_failure.last_success_ago, None);
-        assert!(!failures.should_attempt(peer, started_at + Duration::from_secs(4)));
-        assert!(failures.should_attempt(peer, started_at + Duration::from_secs(5)));
+        assert!(!failures.should_attempt(peer, started_at.advance(Duration::from_secs(4))));
+        assert!(failures.should_attempt(peer, started_at.advance(Duration::from_secs(5))));
 
         let second_failure = failures.record_failure(
             peer,
-            started_at + Duration::from_secs(5),
+            started_at.advance(Duration::from_secs(5)),
             Duration::from_secs(5),
         );
         assert_eq!(second_failure.consecutive_failures, 2);
         assert_eq!(second_failure.retry_after, Duration::from_secs(10));
         assert_eq!(second_failure.last_success_ago, None);
-        assert!(!failures.should_attempt(peer, started_at + Duration::from_secs(14)));
-        assert!(failures.should_attempt(peer, started_at + Duration::from_secs(15)));
+        assert!(!failures.should_attempt(peer, started_at.advance(Duration::from_secs(14))));
+        assert!(failures.should_attempt(peer, started_at.advance(Duration::from_secs(15))));
 
         assert_eq!(
-            failures.record_success(peer, started_at + Duration::from_secs(15)),
+            failures.record_success(peer, started_at.advance(Duration::from_secs(15))),
             Some(2)
         );
-        assert!(failures.should_attempt(peer, started_at + Duration::from_secs(15)));
+        assert!(failures.should_attempt(peer, started_at.advance(Duration::from_secs(15))));
         let third_failure = failures.record_failure(
             peer,
-            started_at + Duration::from_secs(18),
+            started_at.advance(Duration::from_secs(18)),
             Duration::from_secs(5),
         );
         assert_eq!(third_failure.consecutive_failures, 1);
         assert_eq!(third_failure.last_success_ago, Some(Duration::from_secs(3)));
         assert_eq!(
-            failures.record_success(peer, started_at + Duration::from_secs(20)),
+            failures.record_success(peer, started_at.advance(Duration::from_secs(20))),
             Some(1)
         );
         assert_eq!(
-            failures.record_success(peer, started_at + Duration::from_secs(21)),
+            failures.record_success(peer, started_at.advance(Duration::from_secs(21))),
             None
         );
     }
