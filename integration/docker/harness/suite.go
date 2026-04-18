@@ -3,18 +3,17 @@ package harness
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
 
 const (
-	defaultBasePort     = 19000
 	defaultParallelRuns = 2
 	defaultDialTimeout  = 30 * time.Second
 	defaultShortTimeout = 2 * time.Minute
@@ -28,7 +27,6 @@ type Suite struct {
 	imageTag     string
 	network      *ChutneyNetwork
 	parallelGate chan struct{}
-	nextPort     atomic.Int64
 }
 
 // Scenario owns the per-test artifacts, nodes, and cleanup behavior.
@@ -65,7 +63,6 @@ func PrepareSuite(ctx context.Context) (*Suite, error) {
 		imageTag:     "barterbackup-integration:local",
 		parallelGate: make(chan struct{}, configuredParallelism()),
 	}
-	suite.nextPort.Store(defaultBasePort)
 
 	if err := suite.buildImage(ctx); err != nil {
 		return nil, err
@@ -121,13 +118,16 @@ func (s *Scenario) AddNode(name string, password string) (*Node, error) {
 		return nil, fmt.Errorf("create node dir for %s: %w", name, err)
 	}
 
-	port := s.suite.nextPort.Add(1)
+	localAddr, err := allocateLocalAddr()
+	if err != nil {
+		return nil, fmt.Errorf("allocate local address for %s: %w", name, err)
+	}
 	node := &Node{
 		suite:         s.suite,
 		name:          name,
 		containerName: makeContainerName(filepath.Base(s.rootDir), name),
 		dataDir:       nodeDir,
-		localAddr:     fmt.Sprintf("127.0.0.1:%d", port),
+		localAddr:     localAddr,
 		password:      password,
 	}
 	s.nodes = append(s.nodes, node)
@@ -221,6 +221,18 @@ func configuredParallelism() int {
 		}
 	}
 	return defaultParallelRuns
+}
+
+func allocateLocalAddr() (string, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", fmt.Errorf("listen for ephemeral local address: %w", err)
+	}
+	address := listener.Addr().String()
+	if closeErr := listener.Close(); closeErr != nil {
+		return "", fmt.Errorf("close ephemeral local address listener: %w", closeErr)
+	}
+	return address, nil
 }
 
 func configuredWorkRoot() (string, error) {

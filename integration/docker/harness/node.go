@@ -298,6 +298,60 @@ func (n *Node) RecoverContentUntilRecovered(ctx context.Context) (*clirpc.Recove
 	}
 }
 
+// RecoverContentOnce runs one recovery pass and returns the last streamed update.
+func (n *Node) RecoverContentOnce(ctx context.Context) (*clirpc.RecoverContentUpdate, error) {
+	return n.recoverContentOnce(ctx)
+}
+
+// ListConflicts returns unresolved and archived conflict revisions.
+func (n *Node) ListConflicts(ctx context.Context) (*clirpc.ListConflictsResponse, error) {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	response, err := client.ListConflicts(ctx, &clirpc.ListConflictsRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("list conflicts on %s: %w", n.name, err)
+	}
+	return response, nil
+}
+
+// CheckoutRevision returns the plaintext file set for one conflicted or archived revision.
+func (n *Node) CheckoutRevision(
+	ctx context.Context,
+	contentID []byte,
+) (*clirpc.CheckoutRevisionResponse, error) {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	response, err := client.CheckoutRevision(ctx, &clirpc.CheckoutRevisionRequest{
+		ContentId: contentID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("checkout revision on %s: %w", n.name, err)
+	}
+	return response, nil
+}
+
+// ResolveConflict chooses which conflicted revision stays active.
+func (n *Node) ResolveConflict(ctx context.Context, contentID []byte) error {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_, err = client.ResolveConflict(ctx, &clirpc.ResolveConflictRequest{
+		ContentId: contentID,
+	})
+	if err != nil {
+		return fmt.Errorf("resolve conflict on %s: %w", n.name, err)
+	}
+	return nil
+}
+
 // Stop asks the daemon to stop gracefully and waits for the container to exit.
 func (n *Node) Stop(ctx context.Context) error {
 	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
