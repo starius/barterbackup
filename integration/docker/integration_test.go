@@ -205,6 +205,9 @@ func TestDockerBackupAndRecoveryOverChutney(t *testing.T) {
 	owner := addNode(t, scenario, "owner", "correct horse battery staple")
 	peer := addNode(t, scenario, "peer", "peer password")
 	recovered := addNode(t, scenario, "recovered", "correct horse battery staple")
+	owner.DisableMaintenance()
+	peer.DisableMaintenance()
+	recovered.DisableMaintenance()
 
 	ownerOnion := startInitializedReadyNode(t, owner)
 	peerOnion := startInitializedReadyNode(t, peer)
@@ -237,6 +240,9 @@ func TestDockerBackupPeerRestartAndRecover(t *testing.T) {
 	owner := addNode(t, scenario, "owner", "correct horse battery staple")
 	peer := addNode(t, scenario, "peer", "peer password")
 	recovered := addNode(t, scenario, "recovered", "correct horse battery staple")
+	owner.DisableMaintenance()
+	peer.DisableMaintenance()
+	recovered.DisableMaintenance()
 
 	ownerOnion := startInitializedReadyNode(t, owner)
 	peerOnion := startInitializedReadyNode(t, peer)
@@ -497,6 +503,424 @@ func TestDockerMetadataOnlyRecoveryAutoResolves(t *testing.T) {
 	proposeContract(t, scenario.recovered, scenario.peerCOnion)
 	waitForPeerStorage(t, scenario.peerB, scenario.ownerOnion, int64(len(postResolve)))
 	waitForPeerStorage(t, scenario.peerC, scenario.ownerOnion, int64(len(postResolve)))
+}
+
+func TestDockerPeerExchangeGossip(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	nodeA := addNode(t, scenario, "node-a", "correct horse battery staple")
+	nodeB := addNode(t, scenario, "node-b", "node-b password")
+	nodeC := addNode(t, scenario, "node-c", "node-c password")
+
+	nodeAOnion := startInitializedReadyNode(t, nodeA)
+	nodeBOnion := startInitializedReadyNode(t, nodeB)
+	nodeCOnion := startInitializedReadyNode(t, nodeC)
+
+	connectPeer(t, nodeA, nodeBOnion)
+	connectPeer(t, nodeB, nodeAOnion)
+	connectPeer(t, nodeB, nodeCOnion)
+	connectPeer(t, nodeB, nodeCOnion)
+
+	setFile(t, nodeA, "gossip.txt", []byte("gossip-seed"))
+	proposeContract(t, nodeA, nodeBOnion)
+
+	waitForPeerVisible(t, nodeA, nodeCOnion)
+	peers := getPeers(t, nodeA)
+	assertPeerInventoryContainsOnce(t, peers, nodeBOnion, nodeCOnion)
+	assertPeerAbsentFromInventory(t, peers, nodeAOnion)
+}
+
+func TestDockerOfflinePeerPenalizedOnCheck(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	owner := addNode(t, scenario, "owner", "correct horse battery staple")
+	peer := addNode(t, scenario, "peer", "peer password")
+
+	ownerOnion := startInitializedReadyNode(t, owner)
+	peerOnion := startInitializedReadyNode(t, peer)
+
+	connectPeer(t, owner, peerOnion)
+	connectPeer(t, peer, ownerOnion)
+
+	payload := randomPayload(160 * 1024)
+	setFile(t, owner, "payload.bin", payload)
+	proposeContract(t, owner, peerOnion)
+	waitForPeerStorage(t, peer, ownerOnion, int64(len(payload)))
+
+	time.Sleep(2 * time.Second)
+	initialCheck := checkContractOnce(t, owner, peerOnion)
+	if !initialCheck.GetSuccess() {
+		t.Fatalf("expected initial contract check to succeed, got %+v", initialCheck)
+	}
+	previousScore := peerScoreSeconds(t, owner, peerOnion)
+	if previousScore <= 0 {
+		t.Fatalf("expected positive peer score after a successful check, got %d", previousScore)
+	}
+
+	stopNode(t, peer)
+	assertCLIKeysRemoved(t, peer)
+	time.Sleep(2 * time.Second)
+
+	failedCheck := checkContractOnce(t, owner, peerOnion)
+	if failedCheck.GetSuccess() {
+		t.Fatalf("expected offline contract check to fail, got %+v", failedCheck)
+	}
+	if failedCheck.GetState() != clirpc.ContractState_PEER_UNAVAILABLE {
+		t.Fatalf("expected peer-unavailable state, got %s", failedCheck.GetState().String())
+	}
+
+	waitForPeerStatus(t, owner, peerOnion, clirpc.PeerStatus_PEER_STATUS_OFFLINE)
+	currentScore := peerScoreSeconds(t, owner, peerOnion)
+	if currentScore >= previousScore {
+		t.Fatalf("expected offline check to reduce score, got before=%d after=%d", previousScore, currentScore)
+	}
+	time.Sleep(time.Second)
+	if peerScoreSeconds(t, owner, peerOnion) != currentScore {
+		t.Fatalf("peer score changed again without another logical check")
+	}
+	assertContractOnlineState(t, owner, peerOnion, false)
+}
+
+func TestDockerRetryAfterTransientDisconnect(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	owner := addNode(t, scenario, "owner", "correct horse battery staple")
+	peer := addNode(t, scenario, "peer", "peer password")
+	recovered := addNode(t, scenario, "recovered", "correct horse battery staple")
+	owner.DisableMaintenance()
+	peer.DisableMaintenance()
+	recovered.DisableMaintenance()
+
+	ownerOnion := startInitializedReadyNode(t, owner)
+	peerOnion := startInitializedReadyNode(t, peer)
+
+	connectPeer(t, owner, peerOnion)
+	connectPeer(t, peer, ownerOnion)
+
+	initialPayload := randomPayload(96 * 1024)
+	setFile(t, owner, "payload.bin", initialPayload)
+	proposeContract(t, owner, peerOnion)
+	waitForPeerStorage(t, peer, ownerOnion, int64(len(initialPayload)))
+
+	updatedPayload := randomPayload(224 * 1024)
+	setFile(t, owner, "payload.bin", updatedPayload)
+	stopNode(t, peer)
+	assertCLIKeysRemoved(t, peer)
+
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	_, err := owner.ProposeContract(ctx, peerOnion)
+	cancel()
+	if err == nil {
+		t.Fatalf("expected proposal to fail while the peer was offline")
+	}
+
+	startLockedNode(t, peer)
+	waitForReadyNode(t, peer)
+	unlockAndWaitReady(t, peer)
+
+	proposeContract(t, owner, peerOnion)
+	waitForPeerStorage(t, peer, ownerOnion, int64(len(updatedPayload)))
+
+	stopNode(t, owner)
+	assertCLIKeysRemoved(t, owner)
+
+	startLockedNode(t, recovered)
+	waitForReadyNode(t, recovered)
+	initNode(t, recovered)
+	unlockAndWaitReady(t, recovered)
+	connectPeer(t, recovered, peerOnion)
+	recoverContent(t, recovered)
+	assertFileEquals(t, recovered, "payload.bin", updatedPayload)
+}
+
+func TestDockerStorageBudgetAndEviction(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	holder := addNode(t, scenario, "holder", "correct horse battery staple")
+	bestEffort := addNode(t, scenario, "best-effort", "best-effort password")
+	reserved := addNode(t, scenario, "reserved", "reserved password")
+	holder.DisableMaintenance()
+	bestEffort.DisableMaintenance()
+	reserved.DisableMaintenance()
+
+	holderOnion := startInitializedReadyNode(t, holder)
+	bestEffortOnion := startInitializedReadyNode(t, bestEffort)
+	reservedOnion := startInitializedReadyNode(t, reserved)
+
+	connectPeer(t, holder, bestEffortOnion)
+	connectPeer(t, holder, reservedOnion)
+	connectPeer(t, bestEffort, holderOnion)
+	connectPeer(t, reserved, holderOnion)
+
+	holderSeedPayload := bytes.Repeat([]byte("holder-seed\n"), 256)
+	setFile(t, holder, "holder-seed.bin", holderSeedPayload)
+	proposeContract(t, holder, reservedOnion)
+	bestEffortPayload := bytes.Repeat([]byte("best-effort-payload\n"), 4096)
+	setFile(t, bestEffort, "payload.bin", bestEffortPayload)
+	proposeContract(t, bestEffort, holderOnion)
+	bestEffortInfo := waitForPeerStorageInfo(t, holder, bestEffortOnion, 1)
+	bestEffortBudget := bestEffortInfo.GetLatestCachedContentLength()
+	if bestEffortBudget <= 0 {
+		t.Fatalf("expected best-effort cached length to be positive, got %d", bestEffortBudget)
+	}
+
+	if !checkContractOnce(t, holder, reservedOnion).GetSuccess() {
+		t.Fatalf("expected reserved peer check to succeed")
+	}
+	time.Sleep(2 * time.Second)
+	if !checkContractOnce(t, holder, reservedOnion).GetSuccess() {
+		t.Fatalf("expected repeated reserved peer check to succeed")
+	}
+	if peerScoreSeconds(t, holder, reservedOnion) <= 0 {
+		t.Fatalf("expected reserved peer to gain positive score before storage pressure")
+	}
+
+	setStorageBudget(t, holder, bestEffortBudget)
+	reservedPayloadV1 := bytes.Repeat([]byte("reserved-v1\n"), 3072)
+	setFile(t, reserved, "payload.bin", reservedPayloadV1)
+	proposeContract(t, reserved, holderOnion)
+	reservedInfo := waitForPeerStorageInfo(t, holder, reservedOnion, 1)
+	reservedCachedV1 := reservedInfo.GetLatestCachedContentLength()
+	if reservedCachedV1 <= 0 {
+		t.Fatalf("expected reserved peer cached length to be positive")
+	}
+
+	bestEffortAfterEviction := waitForPeerInfo(
+		t,
+		holder,
+		bestEffortOnion,
+		"best-effort cache eviction",
+		func(info *clirpc.PeerInfo) bool {
+			return info.GetLatestKnownContentLength() > 0 &&
+				info.GetLatestCachedContentLength() == 0 &&
+				info.GetStaleCache()
+		},
+	)
+	if bestEffortAfterEviction.GetLatestKnownContentLength() <= 0 {
+		t.Fatalf("expected best-effort peer latest-known length to remain tracked")
+	}
+	if bestEffortAfterEviction.GetLatestCachedContentLength() != 0 {
+		t.Fatalf("expected best-effort cached revision to be evicted, got %d", bestEffortAfterEviction.GetLatestCachedContentLength())
+	}
+	if !bestEffortAfterEviction.GetStaleCache() {
+		t.Fatalf("expected best-effort peer cache to be stale after eviction")
+	}
+
+	setStorageBudget(t, holder, reservedCachedV1)
+	reservedPayloadV2 := randomPayload(1024 * 1024)
+	setFile(t, reserved, "payload.bin", reservedPayloadV2)
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	_, err := reserved.ProposeContract(ctx, holderOnion)
+	cancel()
+	if grpcstatus.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("expected oversized reserved proposal to fail with resource exhausted, got %v", err)
+	}
+
+	reservedAfterOverflow := waitForPeerInfo(
+		t,
+		holder,
+		reservedOnion,
+		"reserved stale cached revision after overflow",
+		func(info *clirpc.PeerInfo) bool {
+			return info.GetLatestKnownContentLength() > reservedCachedV1 &&
+				info.GetLatestCachedContentLength() == reservedCachedV1 &&
+				info.GetStaleCache()
+		},
+	)
+	if reservedAfterOverflow.GetLatestKnownContentLength() <= reservedCachedV1 {
+		t.Fatalf(
+			"expected reserved peer latest-known revision to move forward, got known=%d cached=%d",
+			reservedAfterOverflow.GetLatestKnownContentLength(),
+			reservedAfterOverflow.GetLatestCachedContentLength(),
+		)
+	}
+	if reservedAfterOverflow.GetLatestCachedContentLength() != reservedCachedV1 {
+		t.Fatalf(
+			"expected reserved peer to keep best cached revision, got %d want %d",
+			reservedAfterOverflow.GetLatestCachedContentLength(),
+			reservedCachedV1,
+		)
+	}
+	if !reservedAfterOverflow.GetStaleCache() {
+		t.Fatalf("expected reserved peer cache to be stale after oversized revision")
+	}
+}
+
+func TestDockerSelfPeerRejected(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	node := addNode(t, scenario, "node", "correct horse battery staple")
+	peer := addNode(t, scenario, "peer", "peer password")
+
+	nodeOnion := startInitializedReadyNode(t, node)
+	peerOnion := startInitializedReadyNode(t, peer)
+
+	err := connectPeerRPC(t, node, nodeOnion)
+	assertStatusMessage(t, err, codes.FailedPrecondition, "local node cannot act as its own peer")
+
+	connectPeer(t, node, peerOnion)
+	connectPeer(t, peer, nodeOnion)
+	setFile(t, node, "payload.bin", []byte("self-filter"))
+	proposeContract(t, node, peerOnion)
+	peers := getPeers(t, node)
+	assertPeerAbsentFromInventory(t, peers, nodeOnion)
+	assertPeerInventoryContainsOnce(t, peers, peerOnion)
+}
+
+func TestDockerOperatorErrorsAreHuman(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	node := addNode(t, scenario, "node", "correct horse battery staple")
+
+	startLockedNode(t, node)
+	waitForReadyNode(t, node)
+
+	client, conn := dialNodeClient(t, node)
+	_, err := client.Unlock(context.Background(), &clirpc.UnlockRequest{MainPassword: "wrong password"})
+	_ = conn.Close()
+	assertStatusMessage(t, err, codes.FailedPrecondition, "daemon storage is not initialized; run init first")
+
+	stopNode(t, node)
+	assertCLIKeysRemoved(t, node)
+
+	startLockedNode(t, node)
+	waitForReadyNode(t, node)
+	initNode(t, node)
+
+	client, conn = dialNodeClient(t, node)
+	_, err = client.Init(context.Background(), &clirpc.InitRequest{MainPassword: "correct horse battery staple"})
+	_ = conn.Close()
+	assertStatusMessage(t, err, codes.FailedPrecondition, "daemon storage is already initialized")
+
+	client, conn = dialNodeClient(t, node)
+	_, err = client.Unlock(context.Background(), &clirpc.UnlockRequest{MainPassword: "wrong password"})
+	_ = conn.Close()
+	assertStatusMessage(t, err, codes.PermissionDenied, "invalid password for this data directory")
+
+	state := unlockAndWaitReady(t, node)
+	err = connectPeerRPC(t, node, "not-an-onion")
+	assertStatusMessage(t, err, codes.InvalidArgument, "peer onion is invalid")
+	err = connectPeerRPC(t, node, state.GetServerOnion())
+	assertStatusMessage(t, err, codes.FailedPrecondition, "local node cannot act as its own peer")
+
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	update, err := node.RecoverContentOnce(ctx)
+	cancel()
+	if err != nil {
+		t.Fatalf("recover content with no peers: %v", err)
+	}
+	if update.GetRecoveredMostRecentVersion() || update.GetTotalVersionsFound() != 0 || update.GetNumPeersWithAnyVersions() != 0 {
+		t.Fatalf("unexpected recovery result without peers: %+v", update)
+	}
+}
+
+func TestDockerLargePayloadRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	owner := addNode(t, scenario, "owner", "correct horse battery staple")
+	peer := addNode(t, scenario, "peer", "peer password")
+	recovered := addNode(t, scenario, "recovered", "correct horse battery staple")
+	owner.DisableMaintenance()
+	peer.DisableMaintenance()
+	recovered.DisableMaintenance()
+
+	ownerOnion := startInitializedReadyNode(t, owner)
+	peerOnion := startInitializedReadyNode(t, peer)
+
+	connectPeer(t, owner, peerOnion)
+	connectPeer(t, peer, ownerOnion)
+
+	payload := randomPayload(3*1024*1024 + 256*1024)
+	setFile(t, owner, "payload.bin", payload)
+	proposeContract(t, owner, peerOnion)
+	waitForPeerStorage(t, peer, ownerOnion, int64(len(payload)))
+	if !checkContractOnce(t, owner, peerOnion).GetSuccess() {
+		t.Fatalf("expected large-payload contract check to succeed")
+	}
+
+	stopNode(t, owner)
+	assertCLIKeysRemoved(t, owner)
+
+	startLockedNode(t, recovered)
+	waitForReadyNode(t, recovered)
+	initNode(t, recovered)
+	unlockAndWaitReady(t, recovered)
+	connectPeer(t, recovered, peerOnion)
+	recoverContent(t, recovered)
+	assertFileEquals(t, recovered, "payload.bin", payload)
+}
+
+func TestDockerPeerStatusInventory(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	requester := addTestClockNode(t, scenario, "requester", "correct horse battery staple")
+	connectedPeer := addTestClockNode(t, scenario, "connected-peer", "connected password")
+	onlinePeer := addTestClockNode(t, scenario, "online-peer", "online password")
+	offlinePeer := addTestClockNode(t, scenario, "offline-peer", "offline password")
+	requester.DisableMaintenance()
+	connectedPeer.DisableMaintenance()
+	onlinePeer.DisableMaintenance()
+	offlinePeer.DisableMaintenance()
+
+	requesterOnion := startInitializedReadyTestClockNode(t, requester, 1000)
+	connectedOnion := startInitializedReadyTestClockNode(t, connectedPeer, 1000)
+	onlineOnion := startInitializedReadyTestClockNode(t, onlinePeer, 1000)
+	offlineOnion := startInitializedReadyTestClockNode(t, offlinePeer, 1000)
+
+	connectPeer(t, requester, connectedOnion)
+	connectPeer(t, requester, onlineOnion)
+	connectPeer(t, requester, offlineOnion)
+	connectPeer(t, connectedPeer, requesterOnion)
+	connectPeer(t, onlinePeer, requesterOnion)
+	connectPeer(t, offlinePeer, requesterOnion)
+
+	setFile(t, connectedPeer, "remote.bin", randomPayload(48*1024))
+	proposeContract(t, connectedPeer, requesterOnion)
+	waitForPeerStorage(t, requester, connectedOnion, 1)
+
+	payload := randomPayload(96 * 1024)
+	setFile(t, requester, "payload.bin", payload)
+	proposeContract(t, requester, connectedOnion)
+	proposeContract(t, requester, onlineOnion)
+	proposeContract(t, requester, offlineOnion)
+
+	advanceNodeTime(t, requester, 360, 0)
+	advanceNodeTime(t, connectedPeer, 360, 0)
+	advanceNodeTime(t, onlinePeer, 360, 0)
+	advanceNodeTime(t, offlinePeer, 360, 0)
+
+	proposeContract(t, requester, connectedOnion)
+	stopNode(t, offlinePeer)
+	assertCLIKeysRemoved(t, offlinePeer)
+	offlineUpdate := checkContractOnce(t, requester, offlineOnion)
+	if offlineUpdate.GetSuccess() || offlineUpdate.GetState() != clirpc.ContractState_PEER_UNAVAILABLE {
+		t.Fatalf("expected offline peer check to finish unavailable, got %+v", offlineUpdate)
+	}
+
+	peers := getPeers(t, requester)
+	assertPeerStatus(t, peers, connectedOnion, clirpc.PeerStatus_PEER_STATUS_CONNECTED)
+	assertPeerStatus(t, peers, onlineOnion, clirpc.PeerStatus_PEER_STATUS_ONLINE)
+	assertPeerStatus(t, peers, offlineOnion, clirpc.PeerStatus_PEER_STATUS_OFFLINE)
+	connectedInfo := peerInfoFromResponse(t, peers, connectedOnion)
+	if connectedInfo.GetLatestKnownContentLength() <= 0 {
+		t.Fatalf("expected connected peer to report latest-known content")
+	}
+	if connectedInfo.GetLatestCachedContentLength() <= 0 {
+		t.Fatalf("expected connected peer to report a cached content length")
+	}
+	for _, onion := range []string{connectedOnion, onlineOnion} {
+		if peerInfoFromResponse(t, peers, onion).GetLastLiveAt() == 0 {
+			t.Fatalf("expected %s to report a live timestamp", onion)
+		}
+	}
 }
 
 func newScenario(t *testing.T) *harness.Scenario {
@@ -1085,6 +1509,253 @@ func assertPeerAbsent(t *testing.T, node *harness.Node, peerOnion string) {
 		if peer.GetPeer().GetOnionServiceId() == peerOnion {
 			t.Fatalf("expected %s to disappear from peer inventory for %s", peerOnion, node.Name())
 		}
+	}
+}
+
+func getPeers(t *testing.T, node *harness.Node) *clirpc.PeersResponse {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	response, err := node.Peers(ctx)
+	if err != nil {
+		t.Fatalf("get peers from %s: %v", node.Name(), err)
+	}
+	return response
+}
+
+func peerInfoFromResponse(
+	t *testing.T,
+	response *clirpc.PeersResponse,
+	peerOnion string,
+) *clirpc.PeerInfo {
+	t.Helper()
+	for _, peer := range response.GetPeers() {
+		if peer.GetPeer().GetOnionServiceId() == peerOnion {
+			return peer
+		}
+	}
+	t.Fatalf("missing peer %s in inventory", peerOnion)
+	return nil
+}
+
+func peerInfoByOnion(t *testing.T, node *harness.Node, peerOnion string) *clirpc.PeerInfo {
+	t.Helper()
+	return peerInfoFromResponse(t, getPeers(t, node), peerOnion)
+}
+
+func waitForPeerStorageInfo(
+	t *testing.T,
+	node *harness.Node,
+	peerOnion string,
+	expectedBytes int64,
+) *clirpc.PeerInfo {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	info, err := node.WaitForPeerStorage(ctx, peerOnion, expectedBytes)
+	if err != nil {
+		t.Fatalf("wait for peer storage on %s for %s: %v", node.Name(), peerOnion, err)
+	}
+	return info
+}
+
+func peerScoreSeconds(t *testing.T, node *harness.Node, peerOnion string) int64 {
+	t.Helper()
+	return peerInfoByOnion(t, node, peerOnion).GetScoreSeconds()
+}
+
+func waitForPeerStatus(
+	t *testing.T,
+	node *harness.Node,
+	peerOnion string,
+	expected clirpc.PeerStatus,
+) *clirpc.PeerInfo {
+	t.Helper()
+	deadline := time.Now().Add(harnessDefaultTimeout())
+	for {
+		info := peerInfoByOnion(t, node, peerOnion)
+		if clirpc.PeerStatus(info.GetStatus()) == expected {
+			return info
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s on %s to become %s", peerOnion, node.Name(), expected.String())
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func waitForPeerVisible(
+	t *testing.T,
+	node *harness.Node,
+	peerOnion string,
+) *clirpc.PeerInfo {
+	t.Helper()
+	deadline := time.Now().Add(harnessDefaultTimeout())
+	for {
+		response := getPeers(t, node)
+		for _, peer := range response.GetPeers() {
+			if peer.GetPeer().GetOnionServiceId() == peerOnion {
+				return peer
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s to appear in %s peer inventory", peerOnion, node.Name())
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func waitForPeerInfo(
+	t *testing.T,
+	node *harness.Node,
+	peerOnion string,
+	description string,
+	predicate func(*clirpc.PeerInfo) bool,
+) *clirpc.PeerInfo {
+	t.Helper()
+	deadline := time.Now().Add(harnessDefaultTimeout())
+	for {
+		info := peerInfoByOnion(t, node, peerOnion)
+		if predicate(info) {
+			return info
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s on %s: %+v", description, node.Name(), info)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func checkContractOnce(t *testing.T, node *harness.Node, peerOnion string) *clirpc.CheckContractUpdate {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	update, err := node.CheckContract(ctx, peerOnion)
+	if err != nil {
+		t.Fatalf("check contract from %s to %s: %v", node.Name(), peerOnion, err)
+	}
+	return update
+}
+
+func setStorageBudget(t *testing.T, node *harness.Node, allocatedBytes int64) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	if err := node.SetStorageConfig(ctx, &clirpc.StorageConfig{
+		AllocatedStorageForPeers: allocatedBytes,
+		MinReplicas:              0,
+	}); err != nil {
+		t.Fatalf("set storage budget on %s: %v", node.Name(), err)
+	}
+}
+
+func getContracts(t *testing.T, node *harness.Node) *clirpc.GetContractsResponse {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	response, err := node.GetContracts(ctx)
+	if err != nil {
+		t.Fatalf("get contracts from %s: %v", node.Name(), err)
+	}
+	return response
+}
+
+func assertContractOnlineState(t *testing.T, node *harness.Node, peerOnion string, expected bool) {
+	t.Helper()
+	response := getContracts(t, node)
+	for _, contract := range response.GetContracts() {
+		if contract.GetPeer().GetOnionServiceId() != peerOnion {
+			continue
+		}
+		if contract.GetOnline() != expected {
+			t.Fatalf("unexpected online state for %s on %s: got %v want %v", peerOnion, node.Name(), contract.GetOnline(), expected)
+		}
+		return
+	}
+	t.Fatalf("missing contract for %s on %s", peerOnion, node.Name())
+}
+
+func dialNodeClient(
+	t *testing.T,
+	node *harness.Node,
+) (clirpc.BarterBackupClientClient, interface{ Close() error }) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	client, conn, err := harness.DialLocalClient(ctx, node.LocalAddr(), filepath.Join(node.DataDir(), "cli-keys"))
+	if err != nil {
+		t.Fatalf("dial local client for %s: %v", node.Name(), err)
+	}
+	return client, conn
+}
+
+func connectPeerRPC(t *testing.T, node *harness.Node, onion string) error {
+	t.Helper()
+	client, conn := dialNodeClient(t, node)
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	_, err := client.ConnectPeer(ctx, &clirpc.ConnectPeerRequest{
+		Peer: &clirpc.Peer{OnionServiceId: onion},
+	})
+	return err
+}
+
+func assertStatusMessage(t *testing.T, err error, code codes.Code, message string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected gRPC error %s: %s", code.String(), message)
+	}
+	status, ok := grpcstatus.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %T: %v", err, err)
+	}
+	if status.Code() != code {
+		t.Fatalf("unexpected gRPC code: got %s want %s (%v)", status.Code(), code, err)
+	}
+	if status.Message() != message {
+		t.Fatalf("unexpected gRPC message: got %q want %q", status.Message(), message)
+	}
+}
+
+func assertPeerAbsentFromInventory(t *testing.T, response *clirpc.PeersResponse, peerOnion string) {
+	t.Helper()
+	for _, peer := range response.GetPeers() {
+		if peer.GetPeer().GetOnionServiceId() == peerOnion {
+			t.Fatalf("expected %s to be absent from peer inventory", peerOnion)
+		}
+	}
+}
+
+func assertPeerInventoryContainsOnce(
+	t *testing.T,
+	response *clirpc.PeersResponse,
+	expectedOnions ...string,
+) {
+	t.Helper()
+	for _, expected := range expectedOnions {
+		count := 0
+		for _, peer := range response.GetPeers() {
+			if peer.GetPeer().GetOnionServiceId() == expected {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("expected peer %s to appear exactly once, got %d", expected, count)
+		}
+	}
+}
+
+func assertPeerStatus(
+	t *testing.T,
+	response *clirpc.PeersResponse,
+	onion string,
+	expected clirpc.PeerStatus,
+) {
+	t.Helper()
+	info := peerInfoFromResponse(t, response, onion)
+	if clirpc.PeerStatus(info.GetStatus()) != expected {
+		t.Fatalf("unexpected peer status for %s: got %s want %s", onion, clirpc.PeerStatus(info.GetStatus()).String(), expected.String())
 	}
 }
 

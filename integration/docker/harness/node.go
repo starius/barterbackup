@@ -222,6 +222,20 @@ func (n *Node) SetFile(ctx context.Context, name string, data []byte) error {
 	return nil
 }
 
+// DeleteFile removes one plaintext file from the daemon's current content set.
+func (n *Node) DeleteFile(ctx context.Context, name string) error {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_, err = client.DeleteFile(ctx, &clirpc.DeleteFileRequest{Name: name})
+	if err != nil {
+		return fmt.Errorf("delete file %s on %s: %w", name, n.name, err)
+	}
+	return nil
+}
+
 // ListFiles returns the current file list from the daemon.
 func (n *Node) ListFiles(ctx context.Context) (*clirpc.ListFilesResponse, error) {
 	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
@@ -250,6 +264,20 @@ func (n *Node) GetFile(ctx context.Context, name string) (*clirpc.File, error) {
 	return response.File, nil
 }
 
+// ExportBuiltInPeers renders the full Rust source for the built-in peer list.
+func (n *Node) ExportBuiltInPeers(ctx context.Context) (*clirpc.ExportBuiltInPeersResponse, error) {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	response, err := client.ExportBuiltInPeers(ctx, &clirpc.ExportBuiltInPeersRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("export built-in peers from %s: %w", n.name, err)
+	}
+	return response, nil
+}
+
 // Peers returns the current peer inventory without live probing.
 func (n *Node) Peers(ctx context.Context) (*clirpc.PeersResponse, error) {
 	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
@@ -262,6 +290,59 @@ func (n *Node) Peers(ctx context.Context) (*clirpc.PeersResponse, error) {
 		return nil, fmt.Errorf("get peers from %s: %w", n.name, err)
 	}
 	return response, nil
+}
+
+// SetStorageConfig updates the local peer-storage policy.
+func (n *Node) SetStorageConfig(
+	ctx context.Context,
+	config *clirpc.StorageConfig,
+) error {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_, err = client.SetStorageConfig(ctx, &clirpc.SetStorageConfigRequest{Config: config})
+	if err != nil {
+		return fmt.Errorf("set storage config on %s: %w", n.name, err)
+	}
+	return nil
+}
+
+// GetStorageConfig returns the current storage policy and derived usage info.
+func (n *Node) GetStorageConfig(ctx context.Context) (*clirpc.GetStorageConfigResponse, error) {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	response, err := client.GetStorageConfig(ctx, &clirpc.GetStorageConfigRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("get storage config from %s: %w", n.name, err)
+	}
+	return response, nil
+}
+
+// GetContracts returns the current live contract snapshot.
+func (n *Node) GetContracts(ctx context.Context) (*clirpc.GetContractsResponse, error) {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	response, err := client.GetContracts(ctx, &clirpc.GetContractsRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("get contracts from %s: %w", n.name, err)
+	}
+	return response, nil
+}
+
+// ProposeContract runs one contract proposal and returns the last update.
+func (n *Node) ProposeContract(
+	ctx context.Context,
+	peerOnion string,
+) (*clirpc.ProposeContractUpdate, error) {
+	return n.proposeContractOnce(ctx, peerOnion)
 }
 
 // ProposeContractUntilSuccess retries one contract proposal until it succeeds or times out.
@@ -279,6 +360,41 @@ func (n *Node) ProposeContractUntilSuccess(ctx context.Context, peerOnion string
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+// CheckContract runs one contract check and returns the last update.
+func (n *Node) CheckContract(
+	ctx context.Context,
+	peerOnion string,
+) (*clirpc.CheckContractUpdate, error) {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	stream, err := client.CheckContract(ctx, &clirpc.CheckContractRequest{
+		Peer: &clirpc.Peer{OnionServiceId: peerOnion},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("check contract from %s to %s: %w", n.name, peerOnion, err)
+	}
+
+	var last *clirpc.CheckContractUpdate
+	for {
+		update, recvErr := stream.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		if recvErr != nil {
+			return nil, fmt.Errorf("receive check update from %s: %w", n.name, recvErr)
+		}
+		last = update
+	}
+	if last == nil {
+		return nil, fmt.Errorf("contract check from %s to %s returned no updates", n.name, peerOnion)
+	}
+	return last, nil
 }
 
 // CheckContractUntilSuccess retries one contract check until it succeeds or times out.
