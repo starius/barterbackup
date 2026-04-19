@@ -776,7 +776,19 @@ impl Store {
     }
 
     /// Remove a mirrored peer blob if it exists.
-    pub fn remove_mirrored_blob(&self, content_id: &[u8]) -> Result<(), StorageError> {
+    pub fn remove_mirrored_blob(&mut self, content_id: &[u8]) -> Result<(), StorageError> {
+        let mut changed = false;
+        for peer in &mut self.peers {
+            if peer_content_id(peer.latest_cached_content.as_ref())
+                .is_some_and(|cached_content_id| cached_content_id == content_id)
+            {
+                peer.latest_cached_content = None;
+                changed = true;
+            }
+        }
+        if changed {
+            self.persist_peer_state()?;
+        }
         let file_name = self.mirrored_blob_file_name(content_id)?;
         self.fs.remove(&file_name)
     }
@@ -1733,5 +1745,41 @@ mod tests {
             reloaded.read_mirrored_blob(&content_id).unwrap(),
             mirrored_blob
         );
+    }
+
+    #[test]
+    fn remove_mirrored_blob_clears_cached_peer_reference() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let peer_key = vec![0x7b; 32];
+        let content_id = b"cached-content-id".to_vec();
+        let mirrored_blob = b"opaque-peer-ciphertext".to_vec();
+
+        let mut store = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        store
+            .set_peer_content_state(
+                &peer_key,
+                Some(&content_id),
+                Some(i64::try_from(mirrored_blob.len()).unwrap()),
+                Some(&content_id),
+                Some(i64::try_from(mirrored_blob.len()).unwrap()),
+            )
+            .unwrap();
+        store
+            .write_mirrored_blob(&content_id, &mirrored_blob)
+            .unwrap();
+        store.remove_mirrored_blob(&content_id).unwrap();
+
+        let peer = &store.peers()[0];
+        assert_eq!(
+            peer.latest_known_content
+                .as_ref()
+                .map(|content| content.content_id.clone()),
+            Some(content_id.clone())
+        );
+        assert!(peer.latest_cached_content.is_none());
+        assert!(matches!(
+            store.read_mirrored_blob(&content_id),
+            Err(StorageError::FileNotFound)
+        ));
     }
 }
