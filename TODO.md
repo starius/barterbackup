@@ -6,11 +6,12 @@ These items are grouped by practical product priority.
 
 - Decide the final grouped CLI command layout before renaming the surface.
   Proposed grouping for review:
-  - `bbcli node state|init|unlock|stop|connect-peer|peers`
+  - `bbcli init|unlock|state|stop`
+  - `bbcli peer connect|list`
   - `bbcli file list|get|set|delete`
   - `bbcli contract list|propose|check`
   - `bbcli recovery run|list-conflicts|checkout|resolve`
-  - `bbcli storage get-config|set-config`
+  - `bbcli config get|set peers-storage|min-replicas`
 - Decide where the configurable local-content size limit belongs and what the
   default policy should be. `bbcli set-file` should reject changes that exceed
   that limit once the config surface is fixed.
