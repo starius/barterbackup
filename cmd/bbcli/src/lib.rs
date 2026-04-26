@@ -136,42 +136,49 @@ enum Command {
     /// Ask the daemon to shut down gracefully.
     Stop,
 
-    /// Print the names of all files in the latest encrypted content blob.
-    ListFiles,
-
-    /// Add or replace a file in the latest encrypted content blob.
-    SetFile {
-        /// name is the stable file name inside the encrypted content set.
-        name: String,
-
-        /// path is the plaintext file path to upload.
-        path: PathBuf,
+    /// Manage known peers.
+    Peer {
+        #[command(subcommand)]
+        cmd: PeerCommand,
     },
 
-    /// Download a file from the latest encrypted content blob.
-    GetFile {
-        /// name is the stable file name inside the encrypted content set.
-        name: String,
-
-        /// out is the optional output path for the downloaded plaintext file.
-        out: Option<PathBuf>,
+    /// Manage files in the latest encrypted content blob.
+    File {
+        #[command(subcommand)]
+        cmd: FileCommand,
     },
 
-    /// Delete a file from the latest encrypted content blob.
-    DeleteFile {
-        /// name is the stable file name inside the encrypted content set.
-        name: String,
+    /// Inspect and drive contracts with peers.
+    Contract {
+        #[command(subcommand)]
+        cmd: ContractCommand,
     },
 
+    /// Run recovery and resolve divergent revisions.
+    Recovery {
+        #[command(subcommand)]
+        cmd: RecoveryCommand,
+    },
+
+    /// Read or update daemon configuration.
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCommand,
+    },
+}
+
+/// PeerCommand is one `bbcli peer` subcommand.
+#[derive(Subcommand, Debug)]
+enum PeerCommand {
     /// Add a peer onion identifier to the daemon's known peer list.
-    ConnectPeer {
+    Connect {
         /// onion_service_id is the peer onion service identifier.
         onion_service_id: String,
     },
 
     /// Print the daemon's current peer inventory.
     #[command(alias = "connected-peers")]
-    Peers {
+    List {
         /// status filters peers by current local transport state.
         #[arg(long, value_enum)]
         status: Vec<PeerStatusFilter>,
@@ -186,14 +193,71 @@ enum Command {
     },
 
     /// Print the Rust source file for the compiled built-in peer list.
-    #[command(hide = true)]
-    ExportBuiltInPeers,
+    #[command(hide = true, name = "export-built-in")]
+    ExportBuiltIn,
+}
+
+/// FileCommand is one `bbcli file` subcommand.
+#[derive(Subcommand, Debug)]
+enum FileCommand {
+    /// Print the names of all files in the latest encrypted content blob.
+    List,
+
+    /// Add or replace a file in the latest encrypted content blob.
+    Set {
+        /// name is the stable file name inside the encrypted content set.
+        name: String,
+
+        /// path is the plaintext file path to upload.
+        path: PathBuf,
+    },
+
+    /// Download a file from the latest encrypted content blob.
+    Get {
+        /// name is the stable file name inside the encrypted content set.
+        name: String,
+
+        /// out is the optional output path for the downloaded plaintext file.
+        out: Option<PathBuf>,
+    },
+
+    /// Delete a file from the latest encrypted content blob.
+    Delete {
+        /// name is the stable file name inside the encrypted content set.
+        name: String,
+    },
+}
+
+/// ContractCommand is one `bbcli contract` subcommand.
+#[derive(Subcommand, Debug)]
+enum ContractCommand {
+    /// Print current contract state for known peers.
+    List,
+
+    /// Form or renew a contract with a peer and print streamed updates.
+    Propose {
+        /// onion_service_id is the peer onion service identifier.
+        onion_service_id: String,
+    },
+
+    /// Verify a peer contract and print streamed updates.
+    Check {
+        /// onion_service_id is the peer onion service identifier.
+        onion_service_id: String,
+    },
+}
+
+/// RecoveryCommand is one `bbcli recovery` subcommand.
+#[derive(Subcommand, Debug)]
+enum RecoveryCommand {
+    /// Recover the newest known local content version from peers.
+    Run,
 
     /// List unresolved and archived conflicting revisions.
-    ListConflicts,
+    Conflicts,
 
     /// Write one conflicting or archived revision to a local directory.
-    CheckoutRevision {
+    Checkout {
         /// content_id is the hex-encoded revision identifier.
         content_id: String,
 
@@ -202,40 +266,36 @@ enum Command {
     },
 
     /// Choose the conflicting revision that should stay active.
-    ResolveConflict {
+    Resolve {
         /// content_id is the hex-encoded revision identifier to keep active.
         content_id: String,
     },
+}
 
-    /// Update local storage policy values.
-    SetStorageConfig {
-        /// allocated_storage_for_peers is the total bytes allocated to peers.
-        allocated_storage_for_peers: i64,
+/// ConfigCommand is one `bbcli config` subcommand.
+#[derive(Subcommand, Debug)]
+enum ConfigCommand {
+    /// Print the current configuration and derived storage usage data.
+    Get {
+        /// peers_storage prints only the peer-storage budget field.
+        #[arg(long)]
+        peers_storage: bool,
 
-        /// min_replicas is the minimum replica target for our content.
-        min_replicas: i64,
+        /// min_replicas prints only the minimum replica target field.
+        #[arg(long)]
+        min_replicas: bool,
     },
 
-    /// Print the current storage policy and derived usage data.
-    GetStorageConfig,
+    /// Update one or more configuration fields.
+    Set {
+        /// peers_storage sets the total bytes allocated to peer storage.
+        #[arg(long)]
+        peers_storage: Option<i64>,
 
-    /// Print current contract state for known peers.
-    GetContracts,
-
-    /// Form or renew a contract with a peer and print streamed updates.
-    ProposeContract {
-        /// onion_service_id is the peer onion service identifier.
-        onion_service_id: String,
+        /// min_replicas sets the minimum replica target for our content.
+        #[arg(long)]
+        min_replicas: Option<i64>,
     },
-
-    /// Verify a peer contract and print streamed updates.
-    CheckContract {
-        /// onion_service_id is the peer onion service identifier.
-        onion_service_id: String,
-    },
-
-    /// Recover the newest known local content version from peers.
-    RecoverContent,
 }
 
 /// RawModeGuard restores the terminal mode after password entry.
@@ -290,6 +350,30 @@ impl PeerListFilter {
         self.statuses
             .iter()
             .any(|status| peer_status_matches_filter(peer, *status))
+    }
+}
+
+/// ConfigFieldFilter selects which config fields to print.
+#[derive(Clone, Copy, Debug, Default)]
+struct ConfigFieldFilter {
+    /// peers_storage keeps only the peer-storage budget field.
+    peers_storage: bool,
+    /// min_replicas keeps only the minimum replica target field.
+    min_replicas: bool,
+}
+
+impl ConfigFieldFilter {
+    /// Build one config field filter from parsed CLI flags.
+    fn new(peers_storage: bool, min_replicas: bool) -> Self {
+        Self {
+            peers_storage,
+            min_replicas,
+        }
+    }
+
+    /// Return whether the caller requested any explicit subset.
+    fn any(self) -> bool {
+        self.peers_storage || self.min_replicas
     }
 }
 
@@ -349,42 +433,60 @@ async fn run_parsed(args: Args) -> Result<()> {
             unlock(&target, &password, Duration::from_secs(wait_seconds)).await
         }
         Command::Stop => stop(&target).await,
-        Command::ListFiles => list_files(&target).await,
-        Command::SetFile { name, path } => set_file(&target, &name, &path).await,
-        Command::GetFile { name, out } => get_file(&target, &name, out.as_deref()).await,
-        Command::DeleteFile { name } => delete_file(&target, &name).await,
-        Command::ConnectPeer { onion_service_id } => connect_peer(&target, &onion_service_id).await,
-        Command::Peers {
-            status,
-            with_contract,
-            without_contract,
-        } => {
-            peers(
-                &target,
-                PeerListFilter::new(status, with_contract, without_contract),
-            )
-            .await
-        }
-        Command::ExportBuiltInPeers => export_built_in_peers(&target).await,
-        Command::ListConflicts => list_conflicts(&target).await,
-        Command::CheckoutRevision {
-            content_id,
-            out_dir,
-        } => checkout_revision(&target, &content_id, &out_dir).await,
-        Command::ResolveConflict { content_id } => resolve_conflict(&target, &content_id).await,
-        Command::SetStorageConfig {
-            allocated_storage_for_peers,
-            min_replicas,
-        } => set_storage_config(&target, allocated_storage_for_peers, min_replicas).await,
-        Command::GetStorageConfig => get_storage_config(&target).await,
-        Command::GetContracts => get_contracts(&target).await,
-        Command::ProposeContract { onion_service_id } => {
-            propose_contract(&target, &onion_service_id).await
-        }
-        Command::CheckContract { onion_service_id } => {
-            check_contract(&target, &onion_service_id).await
-        }
-        Command::RecoverContent => recover_content(&target).await,
+        Command::Peer { cmd } => match cmd {
+            PeerCommand::Connect { onion_service_id } => {
+                connect_peer(&target, &onion_service_id).await
+            }
+            PeerCommand::List {
+                status,
+                with_contract,
+                without_contract,
+            } => {
+                peers(
+                    &target,
+                    PeerListFilter::new(status, with_contract, without_contract),
+                )
+                .await
+            }
+            PeerCommand::ExportBuiltIn => export_built_in_peers(&target).await,
+        },
+        Command::File { cmd } => match cmd {
+            FileCommand::List => list_files(&target).await,
+            FileCommand::Set { name, path } => set_file(&target, &name, &path).await,
+            FileCommand::Get { name, out } => get_file(&target, &name, out.as_deref()).await,
+            FileCommand::Delete { name } => delete_file(&target, &name).await,
+        },
+        Command::Contract { cmd } => match cmd {
+            ContractCommand::List => get_contracts(&target).await,
+            ContractCommand::Propose { onion_service_id } => {
+                propose_contract(&target, &onion_service_id).await
+            }
+            ContractCommand::Check { onion_service_id } => {
+                check_contract(&target, &onion_service_id).await
+            }
+        },
+        Command::Recovery { cmd } => match cmd {
+            RecoveryCommand::Run => recover_content(&target).await,
+            RecoveryCommand::Conflicts => list_conflicts(&target).await,
+            RecoveryCommand::Checkout {
+                content_id,
+                out_dir,
+            } => checkout_revision(&target, &content_id, &out_dir).await,
+            RecoveryCommand::Resolve { content_id } => resolve_conflict(&target, &content_id).await,
+        },
+        Command::Config { cmd } => match cmd {
+            ConfigCommand::Get {
+                peers_storage,
+                min_replicas,
+            } => {
+                get_storage_config(&target, ConfigFieldFilter::new(peers_storage, min_replicas))
+                    .await
+            }
+            ConfigCommand::Set {
+                peers_storage,
+                min_replicas,
+            } => set_storage_config(&target, peers_storage, min_replicas).await,
+        },
     };
     result.map_err(|error| friendly_cli_error(error, &target.local_addr))
 }
@@ -638,7 +740,7 @@ async fn get_file(target: &LocalCliTarget, name: &str, out: Option<&Path>) -> Re
     Ok(())
 }
 
-/// Decide whether `bbcli get-file` may print a file body directly to stdout.
+/// Decide whether `bbcli file get` may print a file body directly to stdout.
 fn get_file_stdout_bytes(data: Vec<u8>, stdout_is_terminal: bool) -> Result<Vec<u8>> {
     if !stdout_is_terminal || std::str::from_utf8(&data).is_ok() {
         return Ok(data);
@@ -739,18 +841,28 @@ async fn resolve_conflict(target: &LocalCliTarget, content_id: &str) -> Result<(
 /// Update the storage policy.
 async fn set_storage_config(
     target: &LocalCliTarget,
-    allocated_storage_for_peers: i64,
-    min_replicas: i64,
+    peers_storage: Option<i64>,
+    min_replicas: Option<i64>,
 ) -> Result<()> {
     let mut client = connect_client(target).await?;
-    set_storage_config_with_client(&mut client, allocated_storage_for_peers, min_replicas).await
+    let current = get_storage_config_with_client(&mut client).await?;
+    let current = current
+        .config
+        .context("daemon returned no storage configuration")?;
+    let updated = build_updated_storage_config(&current, peers_storage, min_replicas)?;
+    set_storage_config_with_client(
+        &mut client,
+        updated.allocated_storage_for_peers,
+        updated.min_replicas,
+    )
+    .await
 }
 
 /// Print the storage policy and derived usage data.
-async fn get_storage_config(target: &LocalCliTarget) -> Result<()> {
+async fn get_storage_config(target: &LocalCliTarget, filter: ConfigFieldFilter) -> Result<()> {
     let mut client = connect_client(target).await?;
     let response = get_storage_config_with_client(&mut client).await?;
-    for line in format_storage_config_response(&response) {
+    for line in format_storage_config_response(&response, filter) {
         println!("{line}");
     }
     Ok(())
@@ -850,48 +962,74 @@ fn format_peer_info_line(peer: &PeerInfo) -> String {
     )
 }
 
+/// Merge one sparse config update into the current full config object.
+fn build_updated_storage_config(
+    current: &StorageConfig,
+    peers_storage: Option<i64>,
+    min_replicas: Option<i64>,
+) -> Result<StorageConfig> {
+    if peers_storage.is_none() && min_replicas.is_none() {
+        bail!("at least one config field must be provided");
+    }
+
+    Ok(StorageConfig {
+        allocated_storage_for_peers: peers_storage.unwrap_or(current.allocated_storage_for_peers),
+        min_replicas: min_replicas.unwrap_or(current.min_replicas),
+    })
+}
+
 /// Format one storage-config response for CLI output.
 fn format_storage_config_response(
     response: &protos::clirpc::GetStorageConfigResponse,
+    filter: ConfigFieldFilter,
 ) -> Vec<String> {
     let config = response.config.as_ref();
     let info = response.info.as_ref();
-    vec![
-        format!(
+    let mut lines = Vec::new();
+
+    if !filter.any() || filter.peers_storage {
+        lines.push(format!(
             "allocated_storage_for_peers: {}",
             config
                 .map(|config| config.allocated_storage_for_peers)
                 .unwrap_or_default()
-        ),
-        format!(
+        ));
+    }
+    if !filter.any() || filter.min_replicas {
+        lines.push(format!(
             "min_replicas: {}",
             config.map(|config| config.min_replicas).unwrap_or_default()
-        ),
-        format!(
+        ));
+    }
+
+    if !filter.any() {
+        lines.push(format!(
             "online_peers_storage_obligations_bytes: {}",
             info.map(|info| info.online_peers_storage_obligations_bytes)
                 .unwrap_or_default()
-        ),
-        format!(
+        ));
+        lines.push(format!(
             "offline_peers_storage_obligations_bytes: {}",
             info.map(|info| info.offline_peers_storage_obligations_bytes)
                 .unwrap_or_default()
-        ),
-        format!(
+        ));
+        lines.push(format!(
             "expired_offline_peers_storage_obligations_bytes: {}",
             info.map(|info| info.expired_offline_peers_storage_obligations_bytes)
                 .unwrap_or_default()
-        ),
-        format!(
+        ));
+        lines.push(format!(
             "our_content_bytes: {}",
             info.map(|info| info.our_content_bytes).unwrap_or_default()
-        ),
-        format!(
+        ));
+        lines.push(format!(
             "maximum_peer_content_accepted_bytes: {}",
             info.map(|info| info.maximum_peer_content_accepted_bytes)
                 .unwrap_or_default()
-        ),
-    ]
+        ));
+    }
+
+    lines
 }
 
 /// Format one contracts response for CLI output.
@@ -1766,7 +1904,9 @@ mod tests {
             ),
             DEFAULT_LOCAL_ADDR,
         );
-        assert!(error.to_string().contains("cannot read the daemon session cli keys"));
+        assert!(error
+            .to_string()
+            .contains("cannot read the daemon session cli keys"));
     }
 
     #[test]
@@ -1872,6 +2012,88 @@ mod tests {
     fn args_preserve_explicit_local_addr_scheme() {
         let args = Args::parse_from(["bbcli", "--local-addr", "https://127.0.0.1:10003", "state"]);
         assert_eq!(args.resolved_local_addr(), "https://127.0.0.1:10003");
+    }
+
+    #[test]
+    fn args_parse_grouped_peer_and_file_commands() {
+        let args = Args::parse_from(["bbcli", "peer", "connect", "peer.onion"]);
+        assert!(matches!(
+            args.cmd,
+            Command::Peer {
+                cmd: PeerCommand::Connect { .. }
+            }
+        ));
+
+        let args = Args::parse_from(["bbcli", "file", "set", "alpha.txt", "./alpha.txt"]);
+        assert!(matches!(
+            args.cmd,
+            Command::File {
+                cmd: FileCommand::Set { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn args_parse_grouped_contract_and_recovery_commands() {
+        let args = Args::parse_from(["bbcli", "contract", "propose", "peer.onion"]);
+        assert!(matches!(
+            args.cmd,
+            Command::Contract {
+                cmd: ContractCommand::Propose { .. }
+            }
+        ));
+
+        let args = Args::parse_from(["bbcli", "recovery", "checkout", "aa", "/tmp/out"]);
+        assert!(matches!(
+            args.cmd,
+            Command::Recovery {
+                cmd: RecoveryCommand::Checkout { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn args_parse_grouped_config_commands() {
+        let args = Args::parse_from(["bbcli", "config", "get"]);
+        assert!(matches!(
+            args.cmd,
+            Command::Config {
+                cmd: ConfigCommand::Get {
+                    peers_storage: false,
+                    min_replicas: false
+                }
+            }
+        ));
+
+        let args = Args::parse_from(["bbcli", "config", "get", "--peers-storage"]);
+        assert!(matches!(
+            args.cmd,
+            Command::Config {
+                cmd: ConfigCommand::Get {
+                    peers_storage: true,
+                    min_replicas: false
+                }
+            }
+        ));
+
+        let args = Args::parse_from([
+            "bbcli",
+            "config",
+            "set",
+            "--peers-storage",
+            "1024",
+            "--min-replicas",
+            "3",
+        ]);
+        assert!(matches!(
+            args.cmd,
+            Command::Config {
+                cmd: ConfigCommand::Set {
+                    peers_storage: Some(1024),
+                    min_replicas: Some(3)
+                }
+            }
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2056,7 +2278,7 @@ mod tests {
             }),
         };
 
-        let lines = format_storage_config_response(&response);
+        let lines = format_storage_config_response(&response, ConfigFieldFilter::default());
 
         assert!(lines
             .iter()
@@ -2075,6 +2297,58 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line == "maximum_peer_content_accepted_bytes: 40"));
+    }
+
+    #[test]
+    fn storage_config_output_can_filter_requested_fields() {
+        let response = protos::clirpc::GetStorageConfigResponse {
+            config: Some(protos::clirpc::StorageConfig {
+                allocated_storage_for_peers: 1024,
+                min_replicas: 3,
+            }),
+            info: Some(protos::clirpc::StorageInfo {
+                online_peers_storage_obligations_bytes: 10,
+                offline_peers_storage_obligations_bytes: 20,
+                expired_offline_peers_storage_obligations_bytes: 5,
+                our_content_bytes: 30,
+                maximum_peer_content_accepted_bytes: 40,
+            }),
+        };
+
+        let lines = format_storage_config_response(&response, ConfigFieldFilter::new(true, false));
+
+        assert_eq!(lines, vec!["allocated_storage_for_peers: 1024"]);
+    }
+
+    #[test]
+    fn config_update_builder_requires_at_least_one_field() {
+        let current = StorageConfig {
+            allocated_storage_for_peers: 1024,
+            min_replicas: 3,
+        };
+
+        let error = build_updated_storage_config(&current, None, None).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "at least one config field must be provided"
+        );
+    }
+
+    #[test]
+    fn config_update_builder_overlays_missing_values() {
+        let current = StorageConfig {
+            allocated_storage_for_peers: 1024,
+            min_replicas: 3,
+        };
+
+        let updated = build_updated_storage_config(&current, Some(2048), None).unwrap();
+        assert_eq!(updated.allocated_storage_for_peers, 2048);
+        assert_eq!(updated.min_replicas, 3);
+
+        let updated = build_updated_storage_config(&current, None, Some(7)).unwrap();
+        assert_eq!(updated.allocated_storage_for_peers, 1024);
+        assert_eq!(updated.min_replicas, 7);
     }
 
     #[test]

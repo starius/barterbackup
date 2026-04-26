@@ -4,17 +4,9 @@ These items are grouped by practical product priority.
 
 ## Must do before real users
 
-- Decide the final grouped CLI command layout before renaming the surface.
-  Proposed grouping for review:
-  - `bbcli init|unlock|state|stop`
-  - `bbcli peer connect|list`
-  - `bbcli file list|get|set|delete`
-  - `bbcli contract list|propose|check`
-  - `bbcli recovery run|list-conflicts|checkout|resolve`
-  - `bbcli config get|set peers-storage|min-replicas`
 - Decide where the configurable local-content size limit belongs and what the
-  default policy should be. `bbcli set-file` should reject changes that exceed
-  that limit once the config surface is fixed.
+  default policy should be. `bbcli file set` should reject changes that exceed
+  that limit once the content-size config is added.
 - Finish the remaining operator-facing hardening around observability and
   resource controls. Structured peer logs, peer I/O bounds, timeout handling,
   dedicated fuzz targets, and clearer CLI peer summaries are now in place, but

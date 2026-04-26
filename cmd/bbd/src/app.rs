@@ -2196,8 +2196,9 @@ pub async fn run(config: Config) -> Result<()> {
 mod tests {
     use super::*;
     use bbcli::{
-        connect_client_with_keys_dir, get_file_with_client, init_with_keys_dir,
-        list_files_with_client, set_file_with_client, stop_with_client, unlock_with_keys_dir,
+        connect_client_with_keys_dir, get_file_with_client, get_storage_config_with_client,
+        init_with_keys_dir, list_files_with_client, peers_with_client, run_with_args,
+        set_file_with_client, stop_with_client, unlock_with_keys_dir,
     };
     use clap::CommandFactory;
     #[cfg(unix)]
@@ -3299,6 +3300,219 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn grouped_bbcli_commands_round_trip_over_local_mtls() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let cli_addr = reserve_loopback_addr()?;
+        let daemon_addr = format!("https://{cli_addr}");
+        let shutdown = CancellationToken::new();
+        let shutdown_signal = shutdown.clone();
+        let config = Config {
+            local_addr: Some(cli_addr),
+            data_dir: Some(temp_dir.path().to_path_buf()),
+            arti_config: None,
+            test_clock: false,
+            disable_maintenance: false,
+        };
+        let daemon_task = tokio::spawn(async move {
+            run_with_peer_runtime_until(config, Arc::new(NoopPeerRuntimeFactory), async move {
+                shutdown_signal.cancelled().await;
+            })
+            .await
+        });
+
+        let alpha_path = temp_dir.path().join("alpha.txt");
+        std::fs::write(&alpha_path, b"alpha-body")?;
+        let beta_path = temp_dir.path().join("beta.txt");
+        std::fs::write(&beta_path, b"beta-body")?;
+        let data_dir = temp_dir.path().to_string_lossy().to_string();
+
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
+            "init",
+            "correct horse battery staple",
+        ])
+        .await?;
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
+            "unlock",
+            "correct horse battery staple",
+        ])
+        .await?;
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
+            "file",
+            "set",
+            "alpha.txt",
+            alpha_path.to_str().context("alpha path is not utf-8")?,
+        ])
+        .await?;
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
+            "file",
+            "set",
+            "beta.txt",
+            beta_path.to_str().context("beta path is not utf-8")?,
+        ])
+        .await?;
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
+            "config",
+            "set",
+            "--peers-storage",
+            "2048",
+            "--min-replicas",
+            "3",
+        ])
+        .await?;
+
+        let remote_peer = Node::new("peer-a")?;
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
+            "peer",
+            "connect",
+            remote_peer.address(),
+        ])
+        .await?;
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
+            "peer",
+            "list",
+        ])
+        .await?;
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
+            "file",
+            "list",
+        ])
+        .await?;
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
+            "contract",
+            "list",
+        ])
+        .await?;
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
+            "config",
+            "get",
+        ])
+        .await?;
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
+            "config",
+            "get",
+            "--peers-storage",
+        ])
+        .await?;
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
+            "recovery",
+            "conflicts",
+        ])
+        .await?;
+
+        let keys_dir = temp_dir.path().join("cli-keys");
+        let mut client = connect_client_with_keys_dir(&daemon_addr, &keys_dir).await?;
+        assert_eq!(
+            list_files_with_client(&mut client).await?,
+            vec!["alpha.txt".to_string(), "beta.txt".to_string()]
+        );
+        assert_eq!(
+            get_file_with_client(&mut client, "alpha.txt").await?,
+            b"alpha-body".to_vec()
+        );
+        assert_eq!(
+            get_file_with_client(&mut client, "beta.txt").await?,
+            b"beta-body".to_vec()
+        );
+        let peers = peers_with_client(&mut client).await?;
+        assert_eq!(peers, vec![remote_peer.address().to_string()]);
+        let storage_config = get_storage_config_with_client(&mut client).await?;
+        let storage_config = storage_config
+            .config
+            .context("daemon returned no storage config")?;
+        assert_eq!(storage_config.allocated_storage_for_peers, 2048);
+        assert_eq!(storage_config.min_replicas, 3);
+
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
+            "file",
+            "delete",
+            "alpha.txt",
+        ])
+        .await?;
+        assert_eq!(
+            list_files_with_client(&mut client).await?,
+            vec!["beta.txt".to_string()]
+        );
+
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
+            "stop",
+        ])
+        .await?;
+
+        daemon_task.await??;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn bbcli_stop_gracefully_shuts_down_and_cleans_keys() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let cli_addr = reserve_loopback_addr()?;
@@ -4244,5 +4458,4 @@ mod tests {
             .context("daemon shutdown timed out while maintenance was stuck")??;
         Ok(())
     }
-
 }

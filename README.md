@@ -249,26 +249,26 @@ echo 'correct horse battery staple' | \
 Add a peer:
 
 ```bash
-bbcli connect-peer <peer-onion-id>
+bbcli peer connect <peer-onion-id>
 ```
 
 Manage files:
 
 ```bash
-bbcli set-file alpha.txt ./alpha.txt
-bbcli list-files
-bbcli get-file alpha.txt ./alpha.out
-bbcli get-file alpha.txt > alpha.out
-bbcli delete-file alpha.txt
+bbcli file set alpha.txt ./alpha.txt
+bbcli file list
+bbcli file get alpha.txt ./alpha.out
+bbcli file get alpha.txt > alpha.out
+bbcli file delete alpha.txt
 ```
 
 Plaintext file I/O happens on the CLI side:
 
-- `bbcli set-file <name> <path>` reads the plaintext file from the machine
+- `bbcli file set <name> <path>` reads the plaintext file from the machine
   where `bbcli` runs, then sends the bytes over local `clirpc`
-- `bbcli get-file <name> <path>` writes the plaintext file on the machine
+- `bbcli file get <name> <path>` writes the plaintext file on the machine
   where `bbcli` runs
-- omitting the output path on `bbcli get-file` prints the file to stdout when
+- omitting the output path on `bbcli file get` prints the file to stdout when
   stdout is piped or when the file is valid UTF-8 text
 - binary output is refused on a terminal unless you pass an output path or
   explicitly pipe stdout to another program
@@ -276,11 +276,11 @@ Plaintext file I/O happens on the CLI side:
 Inspect contracts and recovery:
 
 ```bash
-bbcli peers
-bbcli get-contracts
-bbcli propose-contract <peer-onion-id>
-bbcli check-contract <peer-onion-id>
-bbcli recover-content
+bbcli peer list
+bbcli contract list
+bbcli contract propose <peer-onion-id>
+bbcli contract check <peer-onion-id>
+bbcli recovery run
 bbcli stop
 ```
 
@@ -290,7 +290,7 @@ Bootstrap peers:
   [`crates/node/src/builtin_peers.rs`](crates/node/src/builtin_peers.rs)
 - that list is intentionally empty in the repository by default
 - operators can regenerate a new source file from a live node with the hidden
-  `bbcli export-built-in-peers` command
+  `bbcli peer export-built-in` command
 - the export merges the already built-in peers with currently connected live
   peers, deduplicates them, and prints the full Rust source file so it can be
   dropped back into the tree directly
@@ -298,15 +298,15 @@ Bootstrap peers:
 For example:
 
 ```bash
-bbcli export-built-in-peers > crates/node/src/builtin_peers.rs
+bbcli peer export-built-in > crates/node/src/builtin_peers.rs
 ```
 
 Recovery and conflicts:
 
-- `bbcli peers` reports the current local peer inventory without dialing peers
+- `bbcli peer list` reports the current local peer inventory without dialing peers
   live, including status, scores, cached bytes, and whether mirrored peer data
   is stale
-- `bbcli get-contracts` reports both the newest revision the daemon knows a
+- `bbcli contract list` reports both the newest revision the daemon knows a
   peer has and the newest revision it has cached locally for that peer
 - recovery chooses the freshest revision that is actually recoverable across
   all peers
@@ -319,10 +319,10 @@ Recovery and conflicts:
 Conflict workflow:
 
 ```bash
-bbcli list-conflicts
-bbcli checkout-revision <content-id> ./inspect-one
-bbcli checkout-revision <content-id> ./inspect-two
-bbcli resolve-conflict <content-id>
+bbcli recovery conflicts
+bbcli recovery checkout <content-id> ./inspect-one
+bbcli recovery checkout <content-id> ./inspect-two
+bbcli recovery resolve <content-id>
 ```
 
 After resolution the selected revision becomes active again, while the
