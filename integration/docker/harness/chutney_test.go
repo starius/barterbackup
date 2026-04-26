@@ -107,3 +107,55 @@ func TestWaitForHealthyStatusReturnsLastErrorOnTimeout(t *testing.T) {
 		t.Fatalf("expected %v, got %v", expected, err)
 	}
 }
+
+func TestDisableChutneyTorSandboxRewritesTorrcFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	nodeDir := filepath.Join(tempDir, "nodes.123", "000a")
+	if err := os.MkdirAll(nodeDir, 0o755); err != nil {
+		t.Fatalf("create node dir: %v", err)
+	}
+
+	torrcPath := filepath.Join(nodeDir, "torrc")
+	original := []byte("ClientOnly 0\nSandbox 1\nLog notice stdout\n")
+	if err := os.WriteFile(torrcPath, original, 0o600); err != nil {
+		t.Fatalf("write torrc: %v", err)
+	}
+
+	if err := disableChutneyTorSandbox(tempDir); err != nil {
+		t.Fatalf("disableChutneyTorSandbox returned error: %v", err)
+	}
+
+	updated, err := os.ReadFile(torrcPath)
+	if err != nil {
+		t.Fatalf("read torrc: %v", err)
+	}
+	if string(updated) != "ClientOnly 0\nSandbox 0\nLog notice stdout\n" {
+		t.Fatalf("unexpected torrc contents: %q", string(updated))
+	}
+}
+
+func TestDisableChutneyTorSandboxLeavesMissingDirectiveUnchanged(t *testing.T) {
+	tempDir := t.TempDir()
+	nodeDir := filepath.Join(tempDir, "nodes.123", "001r")
+	if err := os.MkdirAll(nodeDir, 0o755); err != nil {
+		t.Fatalf("create node dir: %v", err)
+	}
+
+	torrcPath := filepath.Join(nodeDir, "torrc")
+	original := []byte("ClientOnly 0\nLog notice stdout\n")
+	if err := os.WriteFile(torrcPath, original, 0o600); err != nil {
+		t.Fatalf("write torrc: %v", err)
+	}
+
+	if err := disableChutneyTorSandbox(tempDir); err != nil {
+		t.Fatalf("disableChutneyTorSandbox returned error: %v", err)
+	}
+
+	updated, err := os.ReadFile(torrcPath)
+	if err != nil {
+		t.Fatalf("read torrc: %v", err)
+	}
+	if string(updated) != string(original) {
+		t.Fatalf("expected unchanged torrc, got %q", string(updated))
+	}
+}

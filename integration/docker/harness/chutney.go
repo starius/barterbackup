@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -151,6 +152,9 @@ func (n *ChutneyNetwork) start(ctx context.Context) error {
 	}
 	if _, err := runCommand(ctx, n.repoDir, n.commandEnv, n.chutneyEntry, "configure"); err != nil {
 		return fmt.Errorf("configure chutney network: %w", err)
+	}
+	if err := disableChutneyTorSandbox(n.dataDir); err != nil {
+		return fmt.Errorf("disable Tor sandbox in Chutney network: %w", err)
 	}
 	if _, err := runCommand(ctx, n.repoDir, n.commandEnv, n.chutneyEntry, "start"); err != nil {
 		return fmt.Errorf("start chutney network: %w", err)
@@ -313,5 +317,28 @@ func cleanupStaleChutneyListeners(ctx context.Context) error {
 	for pid := range pids {
 		_, _ = runCommand(ctx, "", nil, "kill", "-KILL", strconv.Itoa(pid))
 	}
+	return nil
+}
+
+func disableChutneyTorSandbox(dataDir string) error {
+	torrcPaths, err := filepath.Glob(filepath.Join(dataDir, "nodes.*", "*", "torrc"))
+	if err != nil {
+		return fmt.Errorf("glob Chutney torrc files: %w", err)
+	}
+
+	for _, torrcPath := range torrcPaths {
+		contents, err := os.ReadFile(torrcPath)
+		if err != nil {
+			return fmt.Errorf("read %s: %w", torrcPath, err)
+		}
+
+		updated := bytes.ReplaceAll(contents, []byte("Sandbox 1\n"), []byte("Sandbox 0\n"))
+		if !bytes.Equal(updated, contents) {
+			if err := os.WriteFile(torrcPath, updated, 0o600); err != nil {
+				return fmt.Errorf("write %s: %w", torrcPath, err)
+			}
+		}
+	}
+
 	return nil
 }
