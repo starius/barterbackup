@@ -149,14 +149,37 @@ test-clock RPCs.
 The Docker integration harness requires:
 
 - a Linux host
-- a working Docker daemon
 - the dev-shell tools from `nix develop`
+- a working Docker daemon
 
 It runs `bbd` inside Docker containers while the Go harness drives `clirpc`
 directly. The fast lane creates a private Chutney Tor network. Runtime state
 lives outside the repository under `/tmp/barterbackup-integration` by default.
 Set `BB_DOCKER_TEST_WORKDIR` to override that path. Use
 `BB_KEEP_INTEGRATION_ARTIFACTS=1` to keep per-test scenario files after a run.
+
+If Docker is not already running on the machine, one generic workflow is:
+
+1. Start `dockerd` from the dev shell in one terminal:
+
+```bash
+nix develop --command sh -lc '
+  mkdir -p /tmp/barterbackup-dockerd
+  dockerd \
+    --host unix:///tmp/barterbackup-docker.sock \
+    --data-root /tmp/barterbackup-dockerd/data \
+    --exec-root /tmp/barterbackup-dockerd/exec \
+    --pidfile /tmp/barterbackup-dockerd/dockerd.pid
+'
+```
+
+2. In another terminal, point the Docker client at that socket and run the
+   integration target:
+
+```bash
+export DOCKER_HOST=unix:///tmp/barterbackup-docker.sock
+nix develop --command make integration-test-docker
+```
 
 ## Configuration
 

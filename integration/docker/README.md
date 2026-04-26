@@ -29,6 +29,27 @@ nix develop --command make integration-test-docker-tor-smoke
 - regenerates the Go `clirpc` stubs
 - runs `TestDockerRealTorRecoverySmoke` against public Tor
 
+If Docker is not already running on the machine, start `dockerd` from the dev
+shell in a separate terminal:
+
+```bash
+nix develop --command sh -lc '
+  mkdir -p /tmp/barterbackup-dockerd
+  dockerd \
+    --host unix:///tmp/barterbackup-docker.sock \
+    --data-root /tmp/barterbackup-dockerd/data \
+    --exec-root /tmp/barterbackup-dockerd/exec \
+    --pidfile /tmp/barterbackup-dockerd/dockerd.pid
+'
+```
+
+Then point the test shell at that socket:
+
+```bash
+export DOCKER_HOST=unix:///tmp/barterbackup-docker.sock
+nix develop --command make integration-test-docker
+```
+
 ## Runtime Layout
 
 The harness keeps its runtime state outside the repository. By default it uses:

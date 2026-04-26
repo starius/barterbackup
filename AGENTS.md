@@ -38,7 +38,9 @@ Build and test
 - Any repository `make` target can be run as
   `nix develop --command make <target>`.
 - The flake is expected to carry the developer-facing tools needed for Rust,
-  Go, protobuf, Arti, Tor, and the Docker/Chutney integration harness.
+  Go, protobuf, Arti, Tor, and the Docker/Chutney integration harness,
+  including Docker client and daemon binaries when integration tests depend on
+  them.
 - Docker integration tests still require a working Docker daemon outside the
   shell; the flake can provide client or daemon binaries, but it does not by
   itself start or supervise Docker for you.

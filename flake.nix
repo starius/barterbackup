@@ -49,7 +49,8 @@
             pkgs.clang
             # Provides clang-format for Makefile proto formatting.
             pkgs.clang-tools
-            pkgs.docker-client
+            pkgs.docker
+            pkgs.gnumake
             pkgs.git
             pkgs.go
             pkgs.nasm
