@@ -33,8 +33,15 @@ Terminology
 Build and test
 
 - Prefer `nix develop` for a ready-to-use toolchain.
+- On clean machines, prefer the flake/dev-shell path to provide repository
+  dependencies before installing ad-hoc system packages by hand.
 - Any repository `make` target can be run as
   `nix develop --command make <target>`.
+- The flake is expected to carry the developer-facing tools needed for Rust,
+  Go, protobuf, Arti, Tor, and the Docker/Chutney integration harness.
+- Docker integration tests still require a working Docker daemon outside the
+  shell; the flake can provide client or daemon binaries, but it does not by
+  itself start or supervise Docker for you.
 - When preparing commits, run `make fmt` regularly so formatter output stays
   grouped with the code changes that caused it rather than leaking into later
   unrelated commits.
