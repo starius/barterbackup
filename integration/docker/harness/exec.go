@@ -8,8 +8,20 @@ import (
 	"strings"
 )
 
+var runCommandFunc = runCommandStd
+
 // runCommand executes one external command and returns combined stdout/stderr.
 func runCommand(
+	ctx context.Context,
+	dir string,
+	env []string,
+	name string,
+	args ...string,
+) ([]byte, error) {
+	return runCommandFunc(ctx, dir, env, name, args...)
+}
+
+func runCommandStd(
 	ctx context.Context,
 	dir string,
 	env []string,

@@ -1,9 +1,12 @@
 package harness
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	toml "github.com/pelletier/go-toml/v2"
 )
@@ -37,5 +40,70 @@ func TestTranslateChutneyConfig(t *testing.T) {
 	}
 	if translated.AddressFilter["allow_local_addrs"] != true {
 		t.Fatalf("allow_local_addrs was not preserved: %#v", translated.AddressFilter)
+	}
+}
+
+func TestWaitForHealthyStatusRetriesUntilSuccess(t *testing.T) {
+	var attempts int
+	network := &ChutneyNetwork{
+		repoDir:      ".",
+		commandEnv:   nil,
+		chutneyEntry: "chutney",
+	}
+
+	originalRunCommand := runCommandFunc
+	runCommandFunc = func(
+		_ context.Context,
+		_ string,
+		_ []string,
+		_ string,
+		_ ...string,
+	) ([]byte, error) {
+		attempts++
+		if attempts < 3 {
+			return nil, errors.New("status failed")
+		}
+		return []byte("ok"), nil
+	}
+	defer func() {
+		runCommandFunc = originalRunCommand
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := network.waitForHealthyStatus(ctx); err != nil {
+		t.Fatalf("waitForHealthyStatus returned error: %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected 3 attempts, got %d", attempts)
+	}
+}
+
+func TestWaitForHealthyStatusReturnsLastErrorOnTimeout(t *testing.T) {
+	network := &ChutneyNetwork{
+		repoDir:      ".",
+		commandEnv:   nil,
+		chutneyEntry: "chutney",
+	}
+
+	originalRunCommand := runCommandFunc
+	expected := errors.New("status failed")
+	runCommandFunc = func(
+		_ context.Context,
+		_ string,
+		_ []string,
+		_ string,
+		_ ...string,
+	) ([]byte, error) {
+		return nil, expected
+	}
+	defer func() {
+		runCommandFunc = originalRunCommand
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := network.waitForHealthyStatus(ctx); !errors.Is(err, expected) {
+		t.Fatalf("expected %v, got %v", expected, err)
 	}
 }

@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -154,7 +155,7 @@ func (n *ChutneyNetwork) start(ctx context.Context) error {
 	if _, err := runCommand(ctx, n.repoDir, n.commandEnv, n.chutneyEntry, "start"); err != nil {
 		return fmt.Errorf("start chutney network: %w", err)
 	}
-	if _, err := runCommand(ctx, n.repoDir, n.commandEnv, n.chutneyEntry, "status"); err != nil {
+	if err := n.waitForHealthyStatus(ctx); err != nil {
 		return fmt.Errorf("check chutney network status: %w", err)
 	}
 
@@ -172,6 +173,31 @@ func (n *ChutneyNetwork) start(ctx context.Context) error {
 	}
 	n.baseConfig = translateChutneyConfig(n.rawConfig)
 	return nil
+}
+
+func (n *ChutneyNetwork) waitForHealthyStatus(ctx context.Context) error {
+	deadline, cancel := context.WithTimeout(ctx, defaultShortTimeout)
+	defer cancel()
+
+	var lastErr error
+	for {
+		if _, err := runCommand(deadline, n.repoDir, n.commandEnv, n.chutneyEntry, "status"); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-deadline.Done():
+			timer.Stop()
+			if lastErr != nil {
+				return lastErr
+			}
+			return errors.New("timed out waiting for chutney network status")
+		case <-timer.C:
+		}
+	}
 }
 
 func (n *ChutneyNetwork) findRawConfigPath() (string, error) {
