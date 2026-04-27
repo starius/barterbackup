@@ -7,11 +7,6 @@ These items are grouped by practical product priority.
 - Decide where the configurable local-content size limit belongs and what the
   default policy should be. `bbcli file set` should reject changes that exceed
   that limit once the content-size config is added.
-- Finish the remaining operator-facing hardening around observability and
-  resource controls. Structured peer logs, peer I/O bounds, timeout handling,
-  dedicated fuzz targets, and clearer CLI peer summaries are now in place, but
-  the daemon still needs a final decision on any future chunking or other
-  operator-facing resource ceilings beyond the current peer cap.
 - Extend storage accounting beyond the fixed 1 GiB peer budget and current
   score-tier policy. Expiration policy, historical visibility, and richer
   operator reporting for mirrored peer storage are still basic.
