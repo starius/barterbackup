@@ -217,6 +217,12 @@ struct BackgroundPeerFailure {
     next_retry_at: Timestamp,
     /// last_success_at records when background maintenance last succeeded.
     last_success_at: Option<Timestamp>,
+    /// last_failure_at records when background maintenance most recently failed.
+    last_failure_at: Timestamp,
+    /// last_error_class classifies the most recent failure.
+    last_error_class: i32,
+    /// last_error_message stores the most recent failure summary.
+    last_error_message: String,
 }
 
 /// RecordedBackgroundFailure summarizes one failure update for structured logs.
@@ -227,6 +233,21 @@ struct RecordedBackgroundFailure {
     retry_after: Duration,
     /// last_success_ago is the elapsed time since the last success, if known.
     last_success_ago: Option<Duration>,
+}
+
+/// BackgroundPeerFailureSnapshot is the local RPC-facing view of one failure record.
+#[derive(Clone)]
+struct BackgroundPeerFailureSnapshot {
+    /// consecutive_failures is the current failure streak length.
+    consecutive_failures: i64,
+    /// next_retry_at is when background maintenance should next retry the peer.
+    next_retry_at: i64,
+    /// last_failure_at is when background maintenance most recently failed.
+    last_failure_at: i64,
+    /// last_error_class classifies the most recent failure.
+    last_error_class: i32,
+    /// last_error_message stores the most recent failure summary.
+    last_error_message: String,
 }
 
 /// BackgroundPeerFailures tracks per-peer backoff for background maintenance.
@@ -251,6 +272,7 @@ impl BackgroundPeerFailures {
         &self,
         peer_onion: &str,
         now: Timestamp,
+        error: &Status,
         maintenance_interval: Duration,
     ) -> RecordedBackgroundFailure {
         let mut peers = self.peers.lock().unwrap();
@@ -260,11 +282,17 @@ impl BackgroundPeerFailures {
                 consecutive_failures: 0,
                 next_retry_at: now,
                 last_success_at: None,
+                last_failure_at: now,
+                last_error_class: clirpc::PeerFailureClass::Unknown as i32,
+                last_error_message: String::new(),
             });
         failure.consecutive_failures = failure.consecutive_failures.saturating_add(1);
         let backoff =
             background_failure_backoff(maintenance_interval, failure.consecutive_failures);
         failure.next_retry_at = now.advance(backoff);
+        failure.last_failure_at = now;
+        failure.last_error_class = classify_peer_failure(error) as i32;
+        failure.last_error_message = error.message().to_string();
         RecordedBackgroundFailure {
             consecutive_failures: failure.consecutive_failures,
             retry_after: backoff,
@@ -288,6 +316,29 @@ impl BackgroundPeerFailures {
         failure.last_success_at = Some(now);
         Some(cleared_failures)
     }
+
+    /// Return a snapshot of the current per-peer failure records.
+    fn snapshots(&self) -> BTreeMap<String, BackgroundPeerFailureSnapshot> {
+        self.peers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(peer_onion, failure)| {
+                (
+                    peer_onion.clone(),
+                    BackgroundPeerFailureSnapshot {
+                        consecutive_failures: i64::from(failure.consecutive_failures),
+                        next_retry_at: i64::try_from(failure.next_retry_at.secs)
+                            .unwrap_or(i64::MAX),
+                        last_failure_at: i64::try_from(failure.last_failure_at.secs)
+                            .unwrap_or(i64::MAX),
+                        last_error_class: failure.last_error_class,
+                        last_error_message: failure.last_error_message.clone(),
+                    },
+                )
+            })
+            .collect()
+    }
 }
 
 /// Compute one exponential background retry delay from the maintenance interval.
@@ -302,6 +353,26 @@ fn background_failure_backoff(
     base.checked_mul(multiplier)
         .unwrap_or(BACKGROUND_FAILURE_MAX_BACKOFF)
         .min(BACKGROUND_FAILURE_MAX_BACKOFF)
+}
+
+/// Classify one background peer-maintenance failure for operator-facing status.
+fn classify_peer_failure(status: &Status) -> clirpc::PeerFailureClass {
+    match status.code() {
+        tonic::Code::DeadlineExceeded => clirpc::PeerFailureClass::Timeout,
+        tonic::Code::Unavailable => clirpc::PeerFailureClass::Transport,
+        tonic::Code::ResourceExhausted => {
+            if status.message().contains("storage budget") {
+                clirpc::PeerFailureClass::StorageBudget
+            } else if status.message().contains("too large") {
+                clirpc::PeerFailureClass::Oversize
+            } else if status.message().contains("capacity reached") {
+                clirpc::PeerFailureClass::Capacity
+            } else {
+                clirpc::PeerFailureClass::Protocol
+            }
+        }
+        _ => clirpc::PeerFailureClass::Protocol,
+    }
 }
 
 /// Compute one exponential restart delay from the peer runtime restart settings.
@@ -518,6 +589,8 @@ struct BackgroundPeerRuntime {
     status: Arc<StdMutex<PeerRuntimeHealth>>,
     /// self_check reports whether the daemon can reach its own peer RPC path.
     self_check: Arc<StdMutex<SelfCheckHealth>>,
+    /// peer_failures tracks background maintenance retry state for peers.
+    peer_failures: BackgroundPeerFailures,
     /// shutdown asks the background supervisor to stop.
     shutdown: CancellationToken,
     /// task supervises peer runtime bootstrap and shutdown.
@@ -537,6 +610,8 @@ impl BackgroundPeerRuntime {
         let status_for_task = status.clone();
         let self_check = Arc::new(StdMutex::new(SelfCheckHealth::Unknown));
         let self_check_for_task = self_check.clone();
+        let peer_failures = BackgroundPeerFailures::default();
+        let peer_failures_for_task = peer_failures.clone();
         let supervisor_timings = maintenance_config.supervisor_timings;
         let shutdown = CancellationToken::new();
         let shutdown_signal = shutdown.clone();
@@ -581,6 +656,7 @@ impl BackgroundPeerRuntime {
                 let maintenance_runtime = spawn_maintenance_runtime(
                     node.clone(),
                     clock.clone(),
+                    peer_failures_for_task.clone(),
                     self_check_for_task.clone(),
                     maintenance_wakeup.clone(),
                     maintenance_config.clone(),
@@ -681,6 +757,7 @@ impl BackgroundPeerRuntime {
         Self {
             status,
             self_check,
+            peer_failures,
             shutdown,
             task,
         }
@@ -692,6 +769,11 @@ impl BackgroundPeerRuntime {
             self.status.lock().unwrap().clone(),
             self.self_check.lock().unwrap().clone(),
         )
+    }
+
+    /// Return the current peer-maintenance failure snapshots.
+    fn peer_failure_snapshots(&self) -> BTreeMap<String, BackgroundPeerFailureSnapshot> {
+        self.peer_failures.snapshots()
     }
 
     /// Stop the background supervisor and wait for it to finish.
@@ -816,6 +898,21 @@ impl DaemonService {
             DaemonNodeState::Locked => Err(Status::failed_precondition("daemon is locked")),
             DaemonNodeState::Unlocking => Err(Status::unavailable("unlock in progress")),
             DaemonNodeState::Unlocked(unlocked) => Ok(unlocked.node.clone()),
+        }
+    }
+
+    /// Return the unlocked node plus current background peer-maintenance failures.
+    async fn unlocked_node_with_peer_failures(
+        &self,
+    ) -> Result<(Arc<Node>, BTreeMap<String, BackgroundPeerFailureSnapshot>), Status> {
+        let node_state = self.node_state.lock().await;
+        match &*node_state {
+            DaemonNodeState::Locked => Err(Status::failed_precondition("daemon is locked")),
+            DaemonNodeState::Unlocking => Err(Status::unavailable("unlock in progress")),
+            DaemonNodeState::Unlocked(unlocked) => Ok((
+                unlocked.node.clone(),
+                unlocked.peer_runtime.peer_failure_snapshots(),
+            )),
         }
     }
 
@@ -1230,9 +1327,10 @@ impl BarterBackupClient for DaemonService {
         &self,
         request: tonic::Request<clirpc::PeersRequest>,
     ) -> Result<Response<clirpc::PeersResponse>, Status> {
-        CliService::new(self.unlocked_node().await?)
-            .peers(request)
-            .await
+        let (node, failures) = self.unlocked_node_with_peer_failures().await?;
+        let mut response = CliService::new(node).peers(request).await?.into_inner();
+        apply_background_peer_failures(&mut response, &failures);
+        Ok(Response::new(response))
     }
 
     async fn export_built_in_peers(
@@ -1716,6 +1814,33 @@ fn self_check_log_fields(self_check: &StdMutex<SelfCheckHealth>) -> (&'static st
     }
 }
 
+/// Overlay daemon-maintained background failure context onto one peer inventory response.
+fn apply_background_peer_failures(
+    response: &mut clirpc::PeersResponse,
+    failures: &BTreeMap<String, BackgroundPeerFailureSnapshot>,
+) {
+    for peer in &mut response.peers {
+        let Some(peer_onion) = peer
+            .peer
+            .as_ref()
+            .map(|peer_identity| peer_identity.onion_service_id.as_str())
+        else {
+            continue;
+        };
+        let Some(failure) = failures.get(peer_onion) else {
+            continue;
+        };
+        if failure.consecutive_failures == 0 {
+            continue;
+        }
+        peer.last_failure_at = failure.last_failure_at;
+        peer.last_error_class = failure.last_error_class;
+        peer.last_error_message = failure.last_error_message.clone();
+        peer.consecutive_failures = failure.consecutive_failures;
+        peer.next_retry_at = failure.next_retry_at;
+    }
+}
+
 /// Run one peer's background proposal and check workflow.
 async fn run_background_peer_maintenance(
     node: Arc<Node>,
@@ -1740,7 +1865,7 @@ async fn run_background_peer_maintenance(
         Ok(_) => {}
         Err(error) => {
             let failure =
-                peer_failures.record_failure(&peer_onion, started_at, maintenance_interval);
+                peer_failures.record_failure(&peer_onion, started_at, &error, maintenance_interval);
             let (self_check_state, self_check_error) = self_check_log_fields(self_check.as_ref());
             warn!(
                 peer = %peer_onion,
@@ -1763,7 +1888,8 @@ async fn run_background_peer_maintenance(
         return;
     };
     if let Err(error) = check_result {
-        let failure = peer_failures.record_failure(&peer_onion, started_at, maintenance_interval);
+        let failure =
+            peer_failures.record_failure(&peer_onion, started_at, &error, maintenance_interval);
         let (self_check_state, self_check_error) = self_check_log_fields(self_check.as_ref());
         warn!(
             peer = %peer_onion,
@@ -1860,6 +1986,7 @@ async fn run_maintenance_pass(
 async fn run_maintenance_loop(
     node: Arc<Node>,
     clock: Arc<dyn Clock>,
+    peer_failures: BackgroundPeerFailures,
     self_check: Arc<StdMutex<SelfCheckHealth>>,
     maintenance_wakeup: Arc<Notify>,
     shutdown: CancellationToken,
@@ -1868,7 +1995,6 @@ async fn run_maintenance_loop(
     // Use one schedule for both recovery and contract maintenance for now.
     // The loop also wakes immediately after local mutations.
     let mut schedule = MaintenanceSchedule::new(&maintenance_config, clock.clone());
-    let peer_failures = BackgroundPeerFailures::default();
 
     loop {
         if !schedule
@@ -1896,6 +2022,7 @@ async fn run_maintenance_loop(
 fn spawn_maintenance_runtime(
     node: Arc<Node>,
     clock: Arc<dyn Clock>,
+    peer_failures: BackgroundPeerFailures,
     self_check: Arc<StdMutex<SelfCheckHealth>>,
     maintenance_wakeup: Arc<Notify>,
     maintenance_config: MaintenanceConfig,
@@ -1913,6 +2040,7 @@ fn spawn_maintenance_runtime(
         run_maintenance_loop(
             node,
             clock,
+            peer_failures,
             self_check,
             maintenance_wakeup,
             shutdown_signal,
@@ -2824,10 +2952,12 @@ mod tests {
         let failures = BackgroundPeerFailures::default();
         let peer = "peer.onion";
         let started_at = Timestamp::new(1_000, 0).unwrap();
+        let timeout = Status::deadline_exceeded("connect peer timed out");
 
         assert!(failures.should_attempt(peer, started_at));
 
-        let first_failure = failures.record_failure(peer, started_at, Duration::from_secs(5));
+        let first_failure =
+            failures.record_failure(peer, started_at, &timeout, Duration::from_secs(5));
         assert_eq!(first_failure.consecutive_failures, 1);
         assert_eq!(first_failure.retry_after, Duration::from_secs(5));
         assert_eq!(first_failure.last_success_ago, None);
@@ -2837,6 +2967,7 @@ mod tests {
         let second_failure = failures.record_failure(
             peer,
             started_at.advance(Duration::from_secs(5)),
+            &timeout,
             Duration::from_secs(5),
         );
         assert_eq!(second_failure.consecutive_failures, 2);
@@ -2853,6 +2984,7 @@ mod tests {
         let third_failure = failures.record_failure(
             peer,
             started_at.advance(Duration::from_secs(18)),
+            &timeout,
             Duration::from_secs(5),
         );
         assert_eq!(third_failure.consecutive_failures, 1);
@@ -2865,6 +2997,93 @@ mod tests {
             failures.record_success(peer, started_at.advance(Duration::from_secs(21))),
             None
         );
+    }
+
+    #[test]
+    fn classify_peer_failure_distinguishes_operator_cases() {
+        assert_eq!(
+            classify_peer_failure(&Status::deadline_exceeded("connect peer timed out")),
+            clirpc::PeerFailureClass::Timeout
+        );
+        assert_eq!(
+            classify_peer_failure(&Status::unavailable("connect peer: transport error")),
+            clirpc::PeerFailureClass::Transport
+        );
+        assert_eq!(
+            classify_peer_failure(&Status::resource_exhausted(
+                "peer storage budget was exhausted"
+            )),
+            clirpc::PeerFailureClass::StorageBudget
+        );
+        assert_eq!(
+            classify_peer_failure(&Status::resource_exhausted("peer content is too large")),
+            clirpc::PeerFailureClass::Oversize
+        );
+        assert_eq!(
+            classify_peer_failure(&Status::resource_exhausted(
+                "peer capacity reached; refusing to track peer.onion"
+            )),
+            clirpc::PeerFailureClass::Capacity
+        );
+        assert_eq!(
+            classify_peer_failure(&Status::internal("peer returned invalid content")),
+            clirpc::PeerFailureClass::Protocol
+        );
+    }
+
+    #[test]
+    fn background_peer_failure_snapshots_capture_latest_failure_context() {
+        let failures = BackgroundPeerFailures::default();
+        let peer = "peer.onion";
+        let started_at = Timestamp::new(1_000, 0).unwrap();
+        let transport = Status::unavailable("connect peer: transport error");
+
+        failures.record_failure(peer, started_at, &transport, Duration::from_secs(5));
+        let snapshots = failures.snapshots();
+        let snapshot = snapshots.get(peer).expect("missing failure snapshot");
+
+        assert_eq!(snapshot.consecutive_failures, 1);
+        assert_eq!(snapshot.last_failure_at, 1_000);
+        assert_eq!(snapshot.next_retry_at, 1_005);
+        assert_eq!(
+            snapshot.last_error_class,
+            clirpc::PeerFailureClass::Transport as i32
+        );
+        assert_eq!(snapshot.last_error_message, "connect peer: transport error");
+    }
+
+    #[test]
+    fn apply_background_peer_failures_overlays_peer_inventory() {
+        let mut response = clirpc::PeersResponse {
+            peers: vec![clirpc::PeerInfo {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: "peer.onion".to_string(),
+                }),
+                ..Default::default()
+            }],
+        };
+        let failures = BTreeMap::from([(
+            "peer.onion".to_string(),
+            BackgroundPeerFailureSnapshot {
+                consecutive_failures: 2,
+                next_retry_at: 1_025,
+                last_failure_at: 1_020,
+                last_error_class: clirpc::PeerFailureClass::Timeout as i32,
+                last_error_message: "connect peer timed out".to_string(),
+            },
+        )]);
+
+        apply_background_peer_failures(&mut response, &failures);
+        let peer = &response.peers[0];
+
+        assert_eq!(peer.last_failure_at, 1_020);
+        assert_eq!(
+            peer.last_error_class,
+            clirpc::PeerFailureClass::Timeout as i32
+        );
+        assert_eq!(peer.last_error_message, "connect peer timed out");
+        assert_eq!(peer.consecutive_failures, 2);
+        assert_eq!(peer.next_retry_at, 1_025);
     }
 
     #[test]
@@ -3454,6 +3673,17 @@ mod tests {
             daemon_addr.as_str(),
             "--data-dir",
             data_dir.as_str(),
+            "config",
+            "get",
+            "--resource-policy",
+        ])
+        .await?;
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
             "recovery",
             "conflicts",
         ])
@@ -3481,6 +3711,15 @@ mod tests {
             .context("daemon returned no storage config")?;
         assert_eq!(storage_config.allocated_storage_for_peers, 2048);
         assert_eq!(storage_config.min_replicas, 3);
+        let resource_policy = get_storage_config_with_client(&mut client)
+            .await?
+            .resource_policy
+            .context("daemon returned no resource policy")?;
+        assert_eq!(
+            resource_policy.max_peer_content_bytes,
+            node::resource_policy().max_peer_content_bytes
+        );
+        assert!(!resource_policy.chunking_supported);
 
         run_with_args([
             "bbcli",

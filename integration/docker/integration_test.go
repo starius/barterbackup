@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -572,6 +573,20 @@ func TestDockerOfflinePeerPenalizedOnCheck(t *testing.T) {
 	}
 
 	waitForPeerStatus(t, owner, peerOnion, clirpc.PeerStatus_PEER_STATUS_OFFLINE)
+	peerInfo := waitForPeerInfo(
+		t,
+		owner,
+		peerOnion,
+		"offline peer failure context",
+		func(info *clirpc.PeerInfo) bool {
+			return info.GetLastErrorClass() == clirpc.PeerFailureClass_PEER_FAILURE_CLASS_TRANSPORT &&
+				info.GetLastFailureAt() > 0 &&
+				strings.Contains(info.GetLastErrorMessage(), "transport error")
+		},
+	)
+	if peerInfo.GetConsecutiveFailures() != 0 {
+		t.Fatalf("expected manual check failure not to publish background retry streak, got %d", peerInfo.GetConsecutiveFailures())
+	}
 	currentScore := peerScoreSeconds(t, owner, peerOnion)
 	if currentScore >= previousScore {
 		t.Fatalf("expected offline check to reduce score, got before=%d after=%d", previousScore, currentScore)
@@ -634,6 +649,49 @@ func TestDockerRetryAfterTransientDisconnect(t *testing.T) {
 	connectPeer(t, recovered, peerOnion)
 	recoverContent(t, recovered)
 	assertFileEquals(t, recovered, "payload.bin", updatedPayload)
+}
+
+func TestDockerResourcePolicyRejectsOversizedPeerContent(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	owner := addNode(t, scenario, "owner", "correct horse battery staple")
+	peer := addNode(t, scenario, "peer", "peer password")
+	owner.DisableMaintenance()
+	peer.DisableMaintenance()
+
+	ownerOnion := startInitializedReadyNode(t, owner)
+	peerOnion := startInitializedReadyNode(t, peer)
+
+	connectPeer(t, owner, peerOnion)
+	connectPeer(t, peer, ownerOnion)
+
+	config := getStorageConfig(t, peer)
+	policy := config.GetResourcePolicy()
+	if policy == nil {
+		t.Fatalf("expected resource policy in storage config response")
+	}
+	if policy.GetMaxPeerContentBytes() <= 0 {
+		t.Fatalf("expected positive max peer content bytes, got %d", policy.GetMaxPeerContentBytes())
+	}
+	if policy.GetChunkingSupported() {
+		t.Fatalf("expected chunking to remain disabled")
+	}
+
+	targetLength := int(policy.GetMaxPeerContentBytes()) + 1024
+	firstChunkLength := targetLength / 2
+	secondChunkLength := targetLength - firstChunkLength
+	setFile(t, owner, "payload-a.bin", randomPayload(firstChunkLength))
+	setFile(t, owner, "payload-b.bin", randomPayload(secondChunkLength))
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	_, err := owner.ProposeContract(ctx, peerOnion)
+	cancel()
+	if grpcstatus.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("expected oversized proposal to fail with failed precondition, got %v", err)
+	}
+	if !strings.Contains(grpcstatus.Convert(err).Message(), "current content exceeds the peer transport limit") {
+		t.Fatalf("unexpected oversized proposal message: %v", err)
+	}
 }
 
 func TestDockerStorageBudgetAndEviction(t *testing.T) {
@@ -718,6 +776,9 @@ func TestDockerStorageBudgetAndEviction(t *testing.T) {
 	cancel()
 	if grpcstatus.Code(err) != codes.ResourceExhausted {
 		t.Fatalf("expected oversized reserved proposal to fail with resource exhausted, got %v", err)
+	}
+	if !strings.Contains(grpcstatus.Convert(err).Message(), "peer storage budget was exhausted") {
+		t.Fatalf("unexpected storage-budget proposal message: %v", err)
 	}
 
 	reservedAfterOverflow := waitForPeerInfo(
@@ -1647,6 +1708,17 @@ func setStorageBudget(t *testing.T, node *harness.Node, allocatedBytes int64) {
 	}); err != nil {
 		t.Fatalf("set storage budget on %s: %v", node.Name(), err)
 	}
+}
+
+func getStorageConfig(t *testing.T, node *harness.Node) *clirpc.GetStorageConfigResponse {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	response, err := node.GetStorageConfig(ctx)
+	if err != nil {
+		t.Fatalf("get storage config from %s: %v", node.Name(), err)
+	}
+	return response
 }
 
 func getContracts(t *testing.T, node *harness.Node) *clirpc.GetContractsResponse {

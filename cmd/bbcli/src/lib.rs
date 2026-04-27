@@ -284,6 +284,10 @@ enum ConfigCommand {
         /// min_replicas prints only the minimum replica target field.
         #[arg(long)]
         min_replicas: bool,
+
+        /// resource_policy prints only the current read-only peer runtime limits.
+        #[arg(long)]
+        resource_policy: bool,
     },
 
     /// Update one or more configuration fields.
@@ -360,20 +364,23 @@ struct ConfigFieldFilter {
     peers_storage: bool,
     /// min_replicas keeps only the minimum replica target field.
     min_replicas: bool,
+    /// resource_policy keeps only the read-only peer runtime limits.
+    resource_policy: bool,
 }
 
 impl ConfigFieldFilter {
     /// Build one config field filter from parsed CLI flags.
-    fn new(peers_storage: bool, min_replicas: bool) -> Self {
+    fn new(peers_storage: bool, min_replicas: bool, resource_policy: bool) -> Self {
         Self {
             peers_storage,
             min_replicas,
+            resource_policy,
         }
     }
 
     /// Return whether the caller requested any explicit subset.
     fn any(self) -> bool {
-        self.peers_storage || self.min_replicas
+        self.peers_storage || self.min_replicas || self.resource_policy
     }
 }
 
@@ -478,9 +485,13 @@ async fn run_parsed(args: Args) -> Result<()> {
             ConfigCommand::Get {
                 peers_storage,
                 min_replicas,
+                resource_policy,
             } => {
-                get_storage_config(&target, ConfigFieldFilter::new(peers_storage, min_replicas))
-                    .await
+                get_storage_config(
+                    &target,
+                    ConfigFieldFilter::new(peers_storage, min_replicas, resource_policy),
+                )
+                .await
             }
             ConfigCommand::Set {
                 peers_storage,
@@ -930,6 +941,29 @@ fn peer_status_matches_filter(peer: &PeerInfo, filter: PeerStatusFilter) -> bool
     )
 }
 
+/// Return the decoded peer failure class when the daemon reported one.
+fn peer_info_failure_class(peer: &PeerInfo) -> Option<protos::clirpc::PeerFailureClass> {
+    let failure_class = protos::clirpc::PeerFailureClass::try_from(peer.last_error_class).ok()?;
+    if matches!(failure_class, protos::clirpc::PeerFailureClass::Unknown) {
+        None
+    } else {
+        Some(failure_class)
+    }
+}
+
+/// Render one peer failure class as a concise operator-facing label.
+fn peer_failure_class_label(failure_class: protos::clirpc::PeerFailureClass) -> &'static str {
+    match failure_class {
+        protos::clirpc::PeerFailureClass::Unknown => "unknown",
+        protos::clirpc::PeerFailureClass::Transport => "transport",
+        protos::clirpc::PeerFailureClass::Timeout => "timeout",
+        protos::clirpc::PeerFailureClass::StorageBudget => "storage_budget",
+        protos::clirpc::PeerFailureClass::Oversize => "oversize",
+        protos::clirpc::PeerFailureClass::Capacity => "capacity",
+        protos::clirpc::PeerFailureClass::Protocol => "protocol",
+    }
+}
+
 /// Format one peer inventory entry for human CLI output.
 fn format_peer_info_line(peer: &PeerInfo) -> String {
     let onion_service_id = peer
@@ -947,8 +981,7 @@ fn format_peer_info_line(peer: &PeerInfo) -> String {
     } else {
         "never".to_string()
     };
-
-    format!(
+    let mut line = format!(
         "peer={} status={} score_seconds={} score_measured_at={} stored_content_bytes={} latest_known_content_length={} latest_cached_content_length={} stale_cache={} last_live_at={}",
         onion_service_id,
         status,
@@ -959,7 +992,26 @@ fn format_peer_info_line(peer: &PeerInfo) -> String {
         peer.latest_cached_content_length,
         peer.stale_cache,
         last_live_at
-    )
+    );
+    if let Some(failure_class) = peer_info_failure_class(peer) {
+        line.push_str(&format!(
+            " last_error_class={} consecutive_failures={} last_failure_at={} next_retry_at={} last_error_message={:?}",
+            peer_failure_class_label(failure_class),
+            peer.consecutive_failures,
+            if peer.last_failure_at > 0 {
+                peer.last_failure_at.to_string()
+            } else {
+                "never".to_string()
+            },
+            if peer.next_retry_at > 0 {
+                peer.next_retry_at.to_string()
+            } else {
+                "immediate".to_string()
+            },
+            peer.last_error_message,
+        ));
+    }
+    line
 }
 
 /// Merge one sparse config update into the current full config object.
@@ -985,6 +1037,7 @@ fn format_storage_config_response(
 ) -> Vec<String> {
     let config = response.config.as_ref();
     let info = response.info.as_ref();
+    let resource_policy = response.resource_policy.as_ref();
     let mut lines = Vec::new();
 
     if !filter.any() || filter.peers_storage {
@@ -1026,6 +1079,69 @@ fn format_storage_config_response(
             "maximum_peer_content_accepted_bytes: {}",
             info.map(|info| info.maximum_peer_content_accepted_bytes)
                 .unwrap_or_default()
+        ));
+    }
+
+    if !filter.any() || filter.resource_policy {
+        lines.push(format!(
+            "max_peer_content_bytes: {}",
+            resource_policy
+                .map(|policy| policy.max_peer_content_bytes)
+                .unwrap_or_default()
+        ));
+        lines.push(format!(
+            "peer_grpc_message_limit_bytes: {}",
+            resource_policy
+                .map(|policy| policy.peer_grpc_message_limit_bytes)
+                .unwrap_or_default()
+        ));
+        lines.push(format!(
+            "peer_connect_timeout_ms: {}",
+            resource_policy
+                .map(|policy| policy.peer_connect_timeout_ms)
+                .unwrap_or_default()
+        ));
+        lines.push(format!(
+            "peer_rpc_timeout_ms: {}",
+            resource_policy
+                .map(|policy| policy.peer_rpc_timeout_ms)
+                .unwrap_or_default()
+        ));
+        lines.push(format!(
+            "peer_operation_total_budget_ms: {}",
+            resource_policy
+                .map(|policy| policy.peer_operation_total_budget_ms)
+                .unwrap_or_default()
+        ));
+        lines.push(format!(
+            "peer_retry_initial_backoff_ms: {}",
+            resource_policy
+                .map(|policy| policy.peer_retry_initial_backoff_ms)
+                .unwrap_or_default()
+        ));
+        lines.push(format!(
+            "peer_retry_max_backoff_ms: {}",
+            resource_policy
+                .map(|policy| policy.peer_retry_max_backoff_ms)
+                .unwrap_or_default()
+        ));
+        lines.push(format!(
+            "max_tracked_peers: {}",
+            resource_policy
+                .map(|policy| policy.max_tracked_peers)
+                .unwrap_or_default()
+        ));
+        lines.push(format!(
+            "max_cached_peer_clients: {}",
+            resource_policy
+                .map(|policy| policy.max_cached_peer_clients)
+                .unwrap_or_default()
+        ));
+        lines.push(format!(
+            "chunking_supported: {}",
+            resource_policy
+                .map(|policy| policy.chunking_supported)
+                .unwrap_or(false)
         ));
     }
 
@@ -1354,6 +1470,32 @@ fn friendly_cli_error(error: anyhow::Error, daemon_addr: &str) -> anyhow::Error 
                 if status.message() == "invalid password for this data directory" =>
             {
                 anyhow!("invalid password for this data directory")
+            }
+            Code::ResourceExhausted if status.message().contains("storage budget") => {
+                anyhow!(
+                    "peer content fits the protocol limit but exceeds the current peer-storage budget; inspect `bbcli config get` for the active limits"
+                )
+            }
+            Code::ResourceExhausted if status.message().contains("too large") => {
+                anyhow!(
+                    "peer content exceeds the current mirrored-peer size limit; inspect `bbcli config get --resource-policy` for the active ceiling"
+                )
+            }
+            Code::FailedPrecondition
+                if status.message() == "current content exceeds the peer transport limit" =>
+            {
+                anyhow!(
+                    "the current local content exceeds the mirrored-peer size limit; inspect `bbcli config get --resource-policy` for the active ceiling"
+                )
+            }
+            Code::ResourceExhausted if status.message().contains("capacity reached") => {
+                anyhow!("the daemon has reached its tracked-peer capacity and refused to add another peer")
+            }
+            Code::DeadlineExceeded => {
+                anyhow!("peer operation timed out; the peer may be offline or the Tor transport may be unavailable")
+            }
+            Code::Unavailable if status.message().contains("connect peer") => {
+                anyhow!("peer transport is currently unavailable; retry when the peer and Tor connectivity are healthy")
             }
             _ => error,
         };
@@ -2060,7 +2202,8 @@ mod tests {
             Command::Config {
                 cmd: ConfigCommand::Get {
                     peers_storage: false,
-                    min_replicas: false
+                    min_replicas: false,
+                    resource_policy: false
                 }
             }
         ));
@@ -2071,7 +2214,20 @@ mod tests {
             Command::Config {
                 cmd: ConfigCommand::Get {
                     peers_storage: true,
-                    min_replicas: false
+                    min_replicas: false,
+                    resource_policy: false
+                }
+            }
+        ));
+
+        let args = Args::parse_from(["bbcli", "config", "get", "--resource-policy"]);
+        assert!(matches!(
+            args.cmd,
+            Command::Config {
+                cmd: ConfigCommand::Get {
+                    peers_storage: false,
+                    min_replicas: false,
+                    resource_policy: true
                 }
             }
         ));
@@ -2160,6 +2316,14 @@ mod tests {
             1024
         );
         assert_eq!(config.info.unwrap().our_content_bytes, 0);
+        assert_eq!(
+            config
+                .resource_policy
+                .as_ref()
+                .map(|policy| policy.max_peer_content_bytes)
+                .unwrap_or_default(),
+            node::resource_policy().max_peer_content_bytes
+        );
 
         peer_a_server.abort();
         peer_b_server.abort();
@@ -2183,6 +2347,11 @@ mod tests {
                     latest_cached_content_length: 19,
                     stale_cache: true,
                     last_live_at: 23,
+                    last_failure_at: 0,
+                    last_error_class: protos::clirpc::PeerFailureClass::Unknown as i32,
+                    last_error_message: String::new(),
+                    consecutive_failures: 0,
+                    next_retry_at: 0,
                 },
                 PeerInfo {
                     peer: Some(protos::clirpc::Peer {
@@ -2197,6 +2366,11 @@ mod tests {
                     latest_cached_content_length: 0,
                     stale_cache: false,
                     last_live_at: 29,
+                    last_failure_at: 0,
+                    last_error_class: protos::clirpc::PeerFailureClass::Unknown as i32,
+                    last_error_message: String::new(),
+                    consecutive_failures: 0,
+                    next_retry_at: 0,
                 },
             ],
         };
@@ -2231,6 +2405,11 @@ mod tests {
                     latest_cached_content_length: 19,
                     stale_cache: true,
                     last_live_at: 23,
+                    last_failure_at: 0,
+                    last_error_class: protos::clirpc::PeerFailureClass::Unknown as i32,
+                    last_error_message: String::new(),
+                    consecutive_failures: 0,
+                    next_retry_at: 0,
                 },
                 PeerInfo {
                     peer: Some(protos::clirpc::Peer {
@@ -2245,6 +2424,11 @@ mod tests {
                     latest_cached_content_length: 0,
                     stale_cache: false,
                     last_live_at: 0,
+                    last_failure_at: 101,
+                    last_error_class: protos::clirpc::PeerFailureClass::Timeout as i32,
+                    last_error_message: "connect peer timed out".to_string(),
+                    consecutive_failures: 2,
+                    next_retry_at: 131,
                 },
             ],
         };
@@ -2257,9 +2441,57 @@ mod tests {
         assert_eq!(lines[0], "with_contract: 0");
         assert!(lines.iter().any(|line| line == "offline: 1"));
         assert!(lines.iter().any(|line| line.contains("peer=offline.onion")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("last_error_class=timeout")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("consecutive_failures=2")));
         assert!(!lines
             .iter()
             .any(|line| line.contains("peer=contract.onion")));
+    }
+
+    #[test]
+    fn friendly_cli_error_humanizes_resource_and_timeout_failures() {
+        let storage_budget = friendly_cli_error(
+            tonic::Status::resource_exhausted("peer storage budget was exhausted").into(),
+            "https://127.0.0.1:9911",
+        );
+        assert!(storage_budget
+            .to_string()
+            .contains("exceeds the current peer-storage budget"));
+
+        let oversize = friendly_cli_error(
+            tonic::Status::resource_exhausted("peer content is too large").into(),
+            "https://127.0.0.1:9911",
+        );
+        assert!(oversize
+            .to_string()
+            .contains("exceeds the current mirrored-peer size limit"));
+
+        let current_content_oversize = friendly_cli_error(
+            tonic::Status::failed_precondition("current content exceeds the peer transport limit")
+                .into(),
+            "https://127.0.0.1:9911",
+        );
+        assert!(current_content_oversize
+            .to_string()
+            .contains("current local content exceeds the mirrored-peer size limit"));
+
+        let timeout = friendly_cli_error(
+            tonic::Status::deadline_exceeded("connect peer timed out").into(),
+            "https://127.0.0.1:9911",
+        );
+        assert!(timeout.to_string().contains("peer operation timed out"));
+
+        let transport = friendly_cli_error(
+            tonic::Status::unavailable("connect peer: transport error").into(),
+            "https://127.0.0.1:9911",
+        );
+        assert!(transport
+            .to_string()
+            .contains("peer transport is currently unavailable"));
     }
 
     #[test]
@@ -2275,6 +2507,18 @@ mod tests {
                 expired_offline_peers_storage_obligations_bytes: 5,
                 our_content_bytes: 30,
                 maximum_peer_content_accepted_bytes: 40,
+            }),
+            resource_policy: Some(protos::clirpc::ResourcePolicy {
+                max_peer_content_bytes: 41,
+                peer_grpc_message_limit_bytes: 42,
+                peer_connect_timeout_ms: 43,
+                peer_rpc_timeout_ms: 44,
+                peer_operation_total_budget_ms: 45,
+                peer_retry_initial_backoff_ms: 46,
+                peer_retry_max_backoff_ms: 47,
+                max_tracked_peers: 48,
+                max_cached_peer_clients: 49,
+                chunking_supported: false,
             }),
         };
 
@@ -2297,6 +2541,30 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line == "maximum_peer_content_accepted_bytes: 40"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "max_peer_content_bytes: 41"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "peer_grpc_message_limit_bytes: 42"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "peer_connect_timeout_ms: 43"));
+        assert!(lines.iter().any(|line| line == "peer_rpc_timeout_ms: 44"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "peer_operation_total_budget_ms: 45"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "peer_retry_initial_backoff_ms: 46"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "peer_retry_max_backoff_ms: 47"));
+        assert!(lines.iter().any(|line| line == "max_tracked_peers: 48"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "max_cached_peer_clients: 49"));
+        assert!(lines.iter().any(|line| line == "chunking_supported: false"));
     }
 
     #[test]
@@ -2313,11 +2581,34 @@ mod tests {
                 our_content_bytes: 30,
                 maximum_peer_content_accepted_bytes: 40,
             }),
+            resource_policy: Some(protos::clirpc::ResourcePolicy {
+                max_peer_content_bytes: 41,
+                peer_grpc_message_limit_bytes: 42,
+                peer_connect_timeout_ms: 43,
+                peer_rpc_timeout_ms: 44,
+                peer_operation_total_budget_ms: 45,
+                peer_retry_initial_backoff_ms: 46,
+                peer_retry_max_backoff_ms: 47,
+                max_tracked_peers: 48,
+                max_cached_peer_clients: 49,
+                chunking_supported: false,
+            }),
         };
 
-        let lines = format_storage_config_response(&response, ConfigFieldFilter::new(true, false));
+        let lines =
+            format_storage_config_response(&response, ConfigFieldFilter::new(true, false, false));
 
         assert_eq!(lines, vec!["allocated_storage_for_peers: 1024"]);
+
+        let lines =
+            format_storage_config_response(&response, ConfigFieldFilter::new(false, false, true));
+        assert!(lines
+            .iter()
+            .any(|line| line == "max_peer_content_bytes: 41"));
+        assert!(lines.iter().any(|line| line == "chunking_supported: false"));
+        assert!(!lines
+            .iter()
+            .any(|line| line.starts_with("allocated_storage_for_peers:")));
     }
 
     #[test]

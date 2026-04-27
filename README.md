@@ -275,6 +275,8 @@ Inspect contracts and recovery:
 
 ```bash
 bbcli peer list
+bbcli config get
+bbcli config get --resource-policy
 bbcli contract list
 bbcli contract propose <peer-onion-id>
 bbcli contract check <peer-onion-id>
@@ -302,8 +304,13 @@ bbcli peer export-built-in > crates/node/src/builtin_peers.rs
 Recovery and conflicts:
 
 - `bbcli peer list` reports the current local peer inventory without dialing peers
-  live, including status, scores, cached bytes, and whether mirrored peer data
-  is stale
+  live, including status, scores, cached bytes, mirrored-peer staleness, and
+  recent failure/backoff context when a peer is timing out or unavailable
+- `bbcli config get` reports the current writable storage config plus derived
+  storage information
+- `bbcli config get --resource-policy` reports the current fixed peer-content
+  ceiling, peer transport message limit, retry timing policy, and related
+  runtime resource bounds
 - `bbcli contract list` reports both the newest revision the daemon knows a
   peer has and the newest revision it has cached locally for that peer
 - recovery chooses the freshest revision that is actually recoverable across

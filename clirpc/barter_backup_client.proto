@@ -281,6 +281,17 @@ enum PeerStatus
     PEER_STATUS_OFFLINE = 3;
 }
 
+enum PeerFailureClass
+{
+    PEER_FAILURE_CLASS_UNKNOWN = 0;
+    PEER_FAILURE_CLASS_TRANSPORT = 1;
+    PEER_FAILURE_CLASS_TIMEOUT = 2;
+    PEER_FAILURE_CLASS_STORAGE_BUDGET = 3;
+    PEER_FAILURE_CLASS_OVERSIZE = 4;
+    PEER_FAILURE_CLASS_CAPACITY = 5;
+    PEER_FAILURE_CLASS_PROTOCOL = 6;
+}
+
 message PeerInfo {
     // peer identifies the peer being reported.
     Peer peer = 1;
@@ -317,6 +328,24 @@ message PeerInfo {
     // last_live_at is when the peer last answered successfully over the
     // transport.
     int64 last_live_at = 10;
+
+    // last_failure_at is when background peer maintenance last failed.
+    int64 last_failure_at = 11;
+
+    // last_error_class classifies the most recent background maintenance
+    // failure.
+    PeerFailureClass last_error_class = 12;
+
+    // last_error_message is the daemon's last failure summary for this peer.
+    string last_error_message = 13;
+
+    // consecutive_failures is the current background maintenance failure
+    // streak.
+    int64 consecutive_failures = 14;
+
+    // next_retry_at is the next scheduled background maintenance retry time
+    // for this peer.
+    int64 next_retry_at = 15;
 }
 
 message PeersResponse {
@@ -468,6 +497,47 @@ message StorageInfo {
     int64 maximum_peer_content_accepted_bytes = 5;
 }
 
+// ResourcePolicy is the current read-only runtime policy for peer transfers
+// and related operator-visible limits.
+message ResourcePolicy {
+    // max_peer_content_bytes is the largest encrypted peer blob the current
+    // protocol is willing to move as one whole revision.
+    int64 max_peer_content_bytes = 1;
+
+    // peer_grpc_message_limit_bytes is the largest peer gRPC message the
+    // daemon accepts.
+    int64 peer_grpc_message_limit_bytes = 2;
+
+    // peer_connect_timeout_ms bounds one outbound peer dial attempt.
+    int64 peer_connect_timeout_ms = 3;
+
+    // peer_rpc_timeout_ms bounds one peer RPC once connected.
+    int64 peer_rpc_timeout_ms = 4;
+
+    // peer_operation_total_budget_ms bounds one whole logical peer operation
+    // across retries.
+    int64 peer_operation_total_budget_ms = 5;
+
+    // peer_retry_initial_backoff_ms is the first retry delay after one failed
+    // peer attempt.
+    int64 peer_retry_initial_backoff_ms = 6;
+
+    // peer_retry_max_backoff_ms caps retry delay growth between peer attempts.
+    int64 peer_retry_max_backoff_ms = 7;
+
+    // max_tracked_peers is the maximum number of peers the daemon keeps in
+    // peer metadata.
+    int64 max_tracked_peers = 8;
+
+    // max_cached_peer_clients is the maximum number of cached outbound peer
+    // gRPC clients the daemon keeps in memory.
+    int64 max_cached_peer_clients = 9;
+
+    // chunking_supported reports whether the daemon can transfer one peer
+    // revision in multiple chunks instead of as one whole blob.
+    bool chunking_supported = 10;
+}
+
 message SetStorageConfigRequest {
     // config is the new storage configuration to apply.
     StorageConfig config = 1;
@@ -483,6 +553,10 @@ message GetStorageConfigResponse {
 
     // info reports derived storage information and capacity.
     StorageInfo info = 2;
+
+    // resource_policy reports the current read-only peer transfer limits and
+    // related runtime ceilings.
+    ResourcePolicy resource_policy = 3;
 }
 
 message GetContractsRequest {}

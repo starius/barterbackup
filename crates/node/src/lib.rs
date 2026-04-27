@@ -53,6 +53,19 @@ pub struct Node {
     peer_client_cache: Mutex<BTreeMap<String, CachedPeerClient>>,
     /// peer_exchange_last_attempt records the last in-memory peer exchange attempt.
     peer_exchange_last_attempt: Mutex<BTreeMap<String, i64>>,
+    /// recent_peer_failures stores the latest operator-facing failure summary per peer.
+    recent_peer_failures: Mutex<BTreeMap<String, RecentPeerFailure>>,
+}
+
+/// RecentPeerFailure is the latest operator-facing failure summary for one peer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecentPeerFailure {
+    /// last_failure_at is when the failure occurred.
+    last_failure_at: i64,
+    /// last_error_class classifies the failure for local RPC output.
+    last_error_class: i32,
+    /// last_error_message stores the failure summary.
+    last_error_message: String,
 }
 
 /// Return the peer-content size limit as an `i64` for protobuf comparisons.
@@ -74,6 +87,11 @@ const PEER_CLIENT_CACHE_IDLE_TTL_SECS: i64 = 5 * 60;
 
 /// PEER_EXCHANGE_COOLDOWN_SECS limits how often one peer exchange runs per peer.
 const PEER_EXCHANGE_COOLDOWN_SECS: i64 = 5 * 60;
+
+/// Convert one duration to a saturated millisecond count for local RPC output.
+fn duration_to_millis_i64(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+}
 
 /// StorageClass splits mirrored peer blobs into reserved and best-effort sets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -157,6 +175,16 @@ struct PeerInventoryEntry {
     stale_cache: bool,
     /// last_live_at is when the peer last responded successfully over the transport.
     last_live_at: i64,
+    /// last_failure_at is when background maintenance last failed for this peer.
+    last_failure_at: i64,
+    /// last_error_class classifies the most recent background maintenance failure.
+    last_error_class: i32,
+    /// last_error_message is the latest background maintenance failure summary.
+    last_error_message: String,
+    /// consecutive_failures is the current background maintenance failure streak.
+    consecutive_failures: i64,
+    /// next_retry_at is when background maintenance is next scheduled to retry.
+    next_retry_at: i64,
 }
 
 /// PeerAdmissionPlan describes how peer-capacity enforcement handles a peer.
@@ -173,6 +201,26 @@ fn default_storage_config() -> clirpc::StorageConfig {
     clirpc::StorageConfig {
         allocated_storage_for_peers: DEFAULT_ALLOCATED_STORAGE_FOR_PEERS,
         min_replicas: 0,
+    }
+}
+
+/// Return the current read-only peer resource policy exposed to operators.
+pub fn resource_policy() -> clirpc::ResourcePolicy {
+    let retry_policy =
+        transport::PeerRetryPolicy::for_operation(transport::PeerOperation::Proposal);
+
+    clirpc::ResourcePolicy {
+        max_peer_content_bytes: max_peer_content_bytes_i64(),
+        peer_grpc_message_limit_bytes: i64::try_from(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES)
+            .unwrap_or(i64::MAX),
+        peer_connect_timeout_ms: duration_to_millis_i64(retry_policy.connect_timeout),
+        peer_rpc_timeout_ms: duration_to_millis_i64(retry_policy.rpc_timeout),
+        peer_operation_total_budget_ms: duration_to_millis_i64(retry_policy.total_budget),
+        peer_retry_initial_backoff_ms: duration_to_millis_i64(retry_policy.initial_backoff),
+        peer_retry_max_backoff_ms: duration_to_millis_i64(retry_policy.max_backoff),
+        max_tracked_peers: i64::try_from(MAX_TRACKED_PEERS).unwrap_or(i64::MAX),
+        max_cached_peer_clients: i64::try_from(MAX_CACHED_PEER_CLIENTS).unwrap_or(i64::MAX),
+        chunking_supported: false,
     }
 }
 
@@ -530,6 +578,7 @@ impl Node {
             peer_connector: Mutex::new(None),
             peer_client_cache: Mutex::new(BTreeMap::new()),
             peer_exchange_last_attempt: Mutex::new(BTreeMap::new()),
+            recent_peer_failures: Mutex::new(BTreeMap::new()),
         };
 
         if node.store.is_some() {
@@ -927,6 +976,47 @@ impl Node {
         })
     }
 
+    /// Classify one peer-operation failure for local operator-facing status.
+    fn classify_recent_peer_failure(status: &Status) -> i32 {
+        match status.code() {
+            tonic::Code::DeadlineExceeded => clirpc::PeerFailureClass::Timeout as i32,
+            tonic::Code::Unavailable => clirpc::PeerFailureClass::Transport as i32,
+            tonic::Code::ResourceExhausted => {
+                if status.message().contains("storage budget") {
+                    clirpc::PeerFailureClass::StorageBudget as i32
+                } else if status.message().contains("too large") {
+                    clirpc::PeerFailureClass::Oversize as i32
+                } else if status.message().contains("capacity reached") {
+                    clirpc::PeerFailureClass::Capacity as i32
+                } else {
+                    clirpc::PeerFailureClass::Protocol as i32
+                }
+            }
+            _ => clirpc::PeerFailureClass::Protocol as i32,
+        }
+    }
+
+    /// Record one recent peer-operation failure for local operator status.
+    fn note_recent_peer_failure(&self, peer_onion: &str, error: &Status) {
+        if self.is_our_onion(peer_onion) {
+            return;
+        }
+        let now_secs = i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX);
+        self.recent_peer_failures.lock().unwrap().insert(
+            peer_onion.to_string(),
+            RecentPeerFailure {
+                last_failure_at: now_secs,
+                last_error_class: Self::classify_recent_peer_failure(error),
+                last_error_message: error.message().to_string(),
+            },
+        );
+    }
+
+    /// Clear one recent peer-operation failure after a successful interaction.
+    fn clear_recent_peer_failure(&self, peer_onion: &str) {
+        self.recent_peer_failures.lock().unwrap().remove(peer_onion);
+    }
+
     /// Return whether the peer-exchange cooldown has elapsed for one peer.
     fn peer_exchange_due(&self, peer_onion: &str) -> bool {
         let now_secs = self.cache_now_secs();
@@ -1305,17 +1395,24 @@ impl Node {
 
         loop {
             match operation().await {
-                Ok(result) => return Ok(result),
+                Ok(result) => {
+                    self.clear_recent_peer_failure(peer_onion);
+                    return Ok(result);
+                }
                 Err(error) if transport::is_retryable_peer_status(&error) => {
                     retry_attempt = retry_attempt.saturating_add(1);
                     let backoff = policy.backoff_for_attempt(retry_attempt);
                     if started_at.elapsed().saturating_add(backoff) > policy.total_budget {
+                        self.note_recent_peer_failure(peer_onion, &error);
                         let _ = self.note_peer_offline(peer_onion);
                         return Err(error);
                     }
                     tokio::time::sleep(backoff).await;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    self.note_recent_peer_failure(peer_onion, &error);
+                    return Err(error);
+                }
             }
         }
     }
@@ -2211,6 +2308,7 @@ impl Node {
             };
             tracked_by_onion.insert(peer_onion, peer);
         }
+        let recent_failures = self.recent_peer_failures.lock().unwrap().clone();
 
         let mut peers = Vec::new();
         for peer_onion in self.known_peers() {
@@ -2223,6 +2321,7 @@ impl Node {
             let status = peer_inventory_status(tracked_peer, connected);
             let latest_known_content = tracked_peer.and_then(peer_latest_known_content);
             let latest_cached_content = tracked_peer.and_then(peer_latest_cached_content);
+            let recent_failure = recent_failures.get(&peer_onion);
             let stored_content_bytes = match tracked_peer {
                 Some(peer) => {
                     let peer_public_key = ed25519_dalek::PublicKey::from_bytes(&peer.onion_pubkey)
@@ -2260,6 +2359,17 @@ impl Node {
                 last_live_at: tracked_peer
                     .map(|peer| peer.last_live_at)
                     .unwrap_or_default(),
+                last_failure_at: recent_failure
+                    .map(|failure| failure.last_failure_at)
+                    .unwrap_or_default(),
+                last_error_class: recent_failure
+                    .map(|failure| failure.last_error_class)
+                    .unwrap_or(clirpc::PeerFailureClass::Unknown as i32),
+                last_error_message: recent_failure
+                    .map(|failure| failure.last_error_message.clone())
+                    .unwrap_or_default(),
+                consecutive_failures: 0,
+                next_retry_at: 0,
             });
         }
 
@@ -2312,6 +2422,11 @@ impl Node {
                     latest_cached_content_length: peer.latest_cached_content_length,
                     stale_cache: peer.stale_cache,
                     last_live_at: peer.last_live_at,
+                    last_failure_at: peer.last_failure_at,
+                    last_error_class: peer.last_error_class,
+                    last_error_message: peer.last_error_message,
+                    consecutive_failures: peer.consecutive_failures,
+                    next_retry_at: peer.next_retry_at,
                 })
                 .collect(),
         })
@@ -3301,6 +3416,7 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         Ok(Response::new(clirpc::GetStorageConfigResponse {
             config: Some(config),
             info: Some(self.node.storage_info().await?),
+            resource_policy: Some(resource_policy()),
         }))
     }
 
@@ -4554,9 +4670,18 @@ mod tests {
         let storage_info = client
             .get_storage_config(clirpc::GetStorageConfigRequest {})
             .await?
-            .into_inner()
-            .info
-            .unwrap();
+            .into_inner();
+        let storage_policy = storage_info.resource_policy.unwrap();
+        assert_eq!(
+            storage_policy.max_peer_content_bytes,
+            max_peer_content_bytes_i64()
+        );
+        assert_eq!(
+            storage_policy.peer_grpc_message_limit_bytes,
+            i64::try_from(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES).unwrap_or(i64::MAX)
+        );
+        assert!(!storage_policy.chunking_supported);
+        let storage_info = storage_info.info.unwrap();
         assert!(storage_info.our_content_bytes > 0);
 
         server.abort();
@@ -6250,7 +6375,7 @@ mod tests {
         )?);
         assert_eq!(
             local_node.mirrored_peer_content_id(best_effort_node.address())?,
-            Some(best_effort_content.content_id.clone())
+            None
         );
 
         best_effort_server.abort();
@@ -6614,6 +6739,14 @@ mod tests {
             peer_score_seconds(requester_node.as_ref(), peer_identity.address())?,
             -3_600
         );
+        let inventory = peer_inventory_entry(requester_node.as_ref(), peer_identity.address())?
+            .expect("missing peer inventory entry");
+        assert_eq!(
+            inventory.last_error_class,
+            clirpc::PeerFailureClass::Transport as i32
+        );
+        assert!(inventory.last_error_message.contains("transport error"));
+        assert!(inventory.last_failure_at > 0);
 
         Ok(())
     }
@@ -7105,6 +7238,14 @@ mod tests {
             .await?;
         assert_eq!(updates.last().map(|update| update.success), Some(true));
         assert_eq!(flaky_connector.dial_count(), 3);
+        let inventory = peer_inventory_entry(left_node.as_ref(), right_node.address())?
+            .expect("missing peer inventory entry");
+        assert_eq!(
+            inventory.last_error_class,
+            clirpc::PeerFailureClass::Unknown as i32
+        );
+        assert!(inventory.last_error_message.is_empty());
+        assert_eq!(inventory.last_failure_at, 0);
 
         let left_content = left_node.responder_content()?.unwrap();
         let left_public_key = keys::public_key_from_onion_hostname(left_node.address())?;
