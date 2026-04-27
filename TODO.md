@@ -4,17 +4,21 @@ These items are grouped by practical product priority.
 
 ## Must do before real users
 
-- Decide where the configurable local-content size limit belongs and what the
-  default policy should be. `bbcli file set` should reject changes that exceed
-  that limit once the content-size config is added.
+- Enforce the existing fixed 4 MiB total shared-content blob ceiling on all
+  local mutations before they are accepted. File changes and metadata changes
+  that would make the resulting shared blob exceed that limit must fail with a
+  clear operator-facing error. If the node is already over the limit, file
+  removal and file retrieval must still work so the user can recover by
+  cleaning up.
 
 ## Should do soon
 
-- Decide how external Tor and pluggable transports fit into the final product.
-  The current implementation uses in-process Arti. Supporting users whose ISPs
-  block Tor still needs a product decision and implementation path, including
-  whether to support external Tor, pluggable transports, or operator-managed
-  hidden-service keys.
+- Bump Arti, enable bridge and pluggable-transport client features, make
+  `bbd --arti-config` visible, and verify that bridge/PT configuration can be
+  passed through that Arti config path for Tor-blocked networks.
+- Generate shell completions, man pages, and Markdown command manuals from the
+  shared `clap` command tree for `bbcli` and `bbd` so the CLI surface stays
+  documented from one source of truth.
 - Add deferred batching for low-value peer metadata writes such as
   reachability updates and liveness-score changes. Those fields are useful,
   but they should not force an encrypted metadata rewrite on every small
