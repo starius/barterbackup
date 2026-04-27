@@ -313,6 +313,14 @@ enum PeerFailureClass
     PEER_FAILURE_CLASS_PROTOCOL = 6;
 }
 
+enum PeerStorageProtection
+{
+    PEER_STORAGE_PROTECTION_NONE = 0;
+    PEER_STORAGE_PROTECTION_PINNED = 1;
+    PEER_STORAGE_PROTECTION_PROTECTED = 2;
+    PEER_STORAGE_PROTECTION_DISPOSABLE = 3;
+}
+
 message PeerInfo {
     // peer identifies the peer being reported.
     Peer peer = 1;
@@ -370,6 +378,17 @@ message PeerInfo {
 
     // pinned_by_us reports whether the local operator pinned this peer.
     bool pinned_by_us = 16;
+
+    // pins_us reports whether this peer most recently told us that it pins us.
+    bool pins_us = 17;
+
+    // storage_protection reports how the current cached bytes for this peer are
+    // classified locally.
+    PeerStorageProtection storage_protection = 18;
+
+    // tracked_only reports that we know this peer's newest revision but do not
+    // cache any bytes for it locally.
+    bool tracked_only = 19;
 }
 
 message PeersResponse {
@@ -519,6 +538,49 @@ message StorageInfo {
     // maximum_peer_content_accepted_bytes is the maximum size of a remote
     // peer's content we can accept.
     int64 maximum_peer_content_accepted_bytes = 5;
+
+    // pinned_peers_storage_bytes is the deduplicated number of cached mirrored
+    // bytes currently protected by operator-pinned peers.
+    int64 pinned_peers_storage_bytes = 6;
+
+    // protected_peers_storage_bytes is the deduplicated number of cached
+    // mirrored bytes currently protected by positive-score peers.
+    int64 protected_peers_storage_bytes = 7;
+
+    // disposable_peers_storage_bytes is the deduplicated number of cached
+    // mirrored bytes referenced only by disposable peers.
+    int64 disposable_peers_storage_bytes = 8;
+
+    // tracked_only_peers_count is the number of peers for which we know the
+    // newest revision but do not cache any bytes.
+    int64 tracked_only_peers_count = 9;
+
+    // offline_blocking_storage_bytes is the deduplicated number of protected
+    // mirrored bytes currently blocked by offline or stale peers.
+    int64 offline_blocking_storage_bytes = 10;
+
+    // reclaimable_peer_storage_bytes is the deduplicated number of disposable
+    // mirrored bytes we could drop immediately without violating protection
+    // rules.
+    int64 reclaimable_peer_storage_bytes = 11;
+
+    // replica_horizon reports when our fresh checked replicas would decay to
+    // lower thresholds if we went offline now.
+    repeated ReplicaHorizonPoint replica_horizon = 12;
+}
+
+message ReplicaHorizonPoint {
+    // remaining_fresh_replicas is the number of fresh checked replicas that
+    // would remain after this threshold is crossed.
+    int64 remaining_fresh_replicas = 1;
+
+    // seconds_until_threshold is the time from now until this threshold would
+    // be crossed. It is zero when the threshold has already been reached.
+    int64 seconds_until_threshold = 2;
+
+    // never reports that the threshold cannot be crossed while the currently
+    // pinned peers still pin us.
+    bool never = 3;
 }
 
 // ResourcePolicy is the current read-only runtime policy for peer transfers

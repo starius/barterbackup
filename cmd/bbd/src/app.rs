@@ -3755,14 +3755,23 @@ mod tests {
                 .is_some_and(|peer_id| peer_id.onion_service_id == remote_peer.address())
                 && peer.pinned_by_us
         }));
-        let storage_config = get_storage_config_with_client(&mut client).await?;
-        let storage_config = storage_config
+        let storage_response = get_storage_config_with_client(&mut client).await?;
+        let storage_config = storage_response
             .config
             .context("daemon returned no storage config")?;
         assert_eq!(storage_config.allocated_storage_for_peers, 2048);
         assert_eq!(storage_config.min_replicas, 3);
-        let resource_policy = get_storage_config_with_client(&mut client)
-            .await?
+        let storage_info = storage_response
+            .info
+            .context("daemon returned no storage info")?;
+        assert_eq!(storage_info.pinned_peers_storage_bytes, 0);
+        assert_eq!(storage_info.protected_peers_storage_bytes, 0);
+        assert_eq!(storage_info.disposable_peers_storage_bytes, 0);
+        assert_eq!(storage_info.tracked_only_peers_count, 0);
+        assert_eq!(storage_info.offline_blocking_storage_bytes, 0);
+        assert_eq!(storage_info.reclaimable_peer_storage_bytes, 0);
+        assert!(storage_info.replica_horizon.is_empty());
+        let resource_policy = storage_response
             .resource_policy
             .context("daemon returned no resource policy")?;
         assert_eq!(

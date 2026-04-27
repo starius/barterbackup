@@ -990,6 +990,18 @@ fn peer_failure_class_label(failure_class: protos::clirpc::PeerFailureClass) -> 
     }
 }
 
+/// Render one peer storage-protection class as a concise operator-facing label.
+fn peer_storage_protection_label(
+    protection: protos::clirpc::PeerStorageProtection,
+) -> &'static str {
+    match protection {
+        protos::clirpc::PeerStorageProtection::None => "none",
+        protos::clirpc::PeerStorageProtection::Pinned => "pinned",
+        protos::clirpc::PeerStorageProtection::Protected => "protected",
+        protos::clirpc::PeerStorageProtection::Disposable => "disposable",
+    }
+}
+
 /// Format one peer inventory entry for human CLI output.
 fn format_peer_info_line(peer: &PeerInfo) -> String {
     let onion_service_id = peer
@@ -1007,17 +1019,23 @@ fn format_peer_info_line(peer: &PeerInfo) -> String {
     } else {
         "never".to_string()
     };
+    let storage_protection =
+        protos::clirpc::PeerStorageProtection::try_from(peer.storage_protection)
+            .unwrap_or(protos::clirpc::PeerStorageProtection::None);
     let mut line = format!(
-        "peer={} status={} pinned_by_us={} score_seconds={} score_measured_at={} stored_content_bytes={} latest_known_content_length={} latest_cached_content_length={} stale_cache={} last_live_at={}",
+        "peer={} status={} pinned_by_us={} pins_us={} score_seconds={} score_measured_at={} stored_content_bytes={} latest_known_content_length={} latest_cached_content_length={} stale_cache={} storage_protection={} tracked_only={} last_live_at={}",
         onion_service_id,
         status,
         peer.pinned_by_us,
+        peer.pins_us,
         peer.score_seconds,
         peer.score_measured_at,
         peer.stored_content_bytes,
         peer.latest_known_content_length,
         peer.latest_cached_content_length,
         peer.stale_cache,
+        peer_storage_protection_label(storage_protection),
+        peer.tracked_only,
         last_live_at
     );
     if let Some(failure_class) = peer_info_failure_class(peer) {
@@ -1107,6 +1125,56 @@ fn format_storage_config_response(
             info.map(|info| info.maximum_peer_content_accepted_bytes)
                 .unwrap_or_default()
         ));
+        lines.push(format!(
+            "pinned_peers_storage_bytes: {}",
+            info.map(|info| info.pinned_peers_storage_bytes)
+                .unwrap_or_default()
+        ));
+        lines.push(format!(
+            "protected_peers_storage_bytes: {}",
+            info.map(|info| info.protected_peers_storage_bytes)
+                .unwrap_or_default()
+        ));
+        lines.push(format!(
+            "disposable_peers_storage_bytes: {}",
+            info.map(|info| info.disposable_peers_storage_bytes)
+                .unwrap_or_default()
+        ));
+        lines.push(format!(
+            "tracked_only_peers_count: {}",
+            info.map(|info| info.tracked_only_peers_count)
+                .unwrap_or_default()
+        ));
+        lines.push(format!(
+            "offline_blocking_storage_bytes: {}",
+            info.map(|info| info.offline_blocking_storage_bytes)
+                .unwrap_or_default()
+        ));
+        lines.push(format!(
+            "reclaimable_peer_storage_bytes: {}",
+            info.map(|info| info.reclaimable_peer_storage_bytes)
+                .unwrap_or_default()
+        ));
+        let current_fresh_replicas = info
+            .map(|info| {
+                info.replica_horizon
+                    .iter()
+                    .map(|point| point.remaining_fresh_replicas)
+                    .max()
+                    .map(|remaining| remaining.saturating_add(1))
+                    .unwrap_or(0)
+            })
+            .unwrap_or_default();
+        lines.push(format!("fresh_replicas_now: {current_fresh_replicas}"));
+        for point in info
+            .into_iter()
+            .flat_map(|info| info.replica_horizon.iter())
+        {
+            lines.push(format!(
+                "replica_horizon remaining_fresh_replicas={} seconds_until_threshold={} never={}",
+                point.remaining_fresh_replicas, point.seconds_until_threshold, point.never
+            ));
+        }
     }
 
     if !filter.any() || filter.resource_policy {
@@ -2421,6 +2489,7 @@ mod tests {
                     }),
                     status: PeerStatus::Connected as i32,
                     pinned_by_us: true,
+                    pins_us: true,
                     has_contract: true,
                     score_seconds: 7,
                     score_measured_at: 11,
@@ -2428,6 +2497,8 @@ mod tests {
                     latest_known_content_length: 17,
                     latest_cached_content_length: 19,
                     stale_cache: true,
+                    storage_protection: protos::clirpc::PeerStorageProtection::Pinned as i32,
+                    tracked_only: false,
                     last_live_at: 23,
                     last_failure_at: 0,
                     last_error_class: protos::clirpc::PeerFailureClass::Unknown as i32,
@@ -2441,6 +2512,7 @@ mod tests {
                     }),
                     status: PeerStatus::Online as i32,
                     pinned_by_us: false,
+                    pins_us: false,
                     has_contract: false,
                     score_seconds: 0,
                     score_measured_at: 0,
@@ -2448,6 +2520,8 @@ mod tests {
                     latest_known_content_length: 0,
                     latest_cached_content_length: 0,
                     stale_cache: false,
+                    storage_protection: protos::clirpc::PeerStorageProtection::None as i32,
+                    tracked_only: false,
                     last_live_at: 29,
                     last_failure_at: 0,
                     last_error_class: protos::clirpc::PeerFailureClass::Unknown as i32,
@@ -2465,6 +2539,10 @@ mod tests {
             .iter()
             .any(|line| line.contains("peer=contract.onion")));
         assert!(lines.iter().any(|line| line.contains("pinned_by_us=true")));
+        assert!(lines.iter().any(|line| line.contains("pins_us=true")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("storage_protection=pinned")));
         assert!(lines.iter().any(|line| line.contains("status=connected")));
         assert!(lines.iter().any(|line| line == "online: 1"));
         assert!(lines.iter().any(|line| line.contains("peer=online.onion")));
@@ -2482,6 +2560,7 @@ mod tests {
                     }),
                     status: PeerStatus::Connected as i32,
                     pinned_by_us: false,
+                    pins_us: false,
                     has_contract: true,
                     score_seconds: 7,
                     score_measured_at: 11,
@@ -2489,6 +2568,8 @@ mod tests {
                     latest_known_content_length: 17,
                     latest_cached_content_length: 19,
                     stale_cache: true,
+                    storage_protection: protos::clirpc::PeerStorageProtection::Protected as i32,
+                    tracked_only: false,
                     last_live_at: 23,
                     last_failure_at: 0,
                     last_error_class: protos::clirpc::PeerFailureClass::Unknown as i32,
@@ -2502,6 +2583,7 @@ mod tests {
                     }),
                     status: PeerStatus::Offline as i32,
                     pinned_by_us: false,
+                    pins_us: false,
                     has_contract: false,
                     score_seconds: -5,
                     score_measured_at: 31,
@@ -2509,6 +2591,8 @@ mod tests {
                     latest_known_content_length: 0,
                     latest_cached_content_length: 0,
                     stale_cache: false,
+                    storage_protection: protos::clirpc::PeerStorageProtection::None as i32,
+                    tracked_only: true,
                     last_live_at: 0,
                     last_failure_at: 101,
                     last_error_class: protos::clirpc::PeerFailureClass::Timeout as i32,
@@ -2593,6 +2677,24 @@ mod tests {
                 expired_offline_peers_storage_obligations_bytes: 5,
                 our_content_bytes: 30,
                 maximum_peer_content_accepted_bytes: 40,
+                pinned_peers_storage_bytes: 50,
+                protected_peers_storage_bytes: 60,
+                disposable_peers_storage_bytes: 70,
+                tracked_only_peers_count: 2,
+                offline_blocking_storage_bytes: 80,
+                reclaimable_peer_storage_bytes: 90,
+                replica_horizon: vec![
+                    protos::clirpc::ReplicaHorizonPoint {
+                        remaining_fresh_replicas: 1,
+                        seconds_until_threshold: 120,
+                        never: false,
+                    },
+                    protos::clirpc::ReplicaHorizonPoint {
+                        remaining_fresh_replicas: 0,
+                        seconds_until_threshold: 0,
+                        never: true,
+                    },
+                ],
             }),
             resource_policy: Some(protos::clirpc::ResourcePolicy {
                 max_peer_content_bytes: 41,
@@ -2627,6 +2729,31 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line == "maximum_peer_content_accepted_bytes: 40"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "pinned_peers_storage_bytes: 50"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "protected_peers_storage_bytes: 60"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "disposable_peers_storage_bytes: 70"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "tracked_only_peers_count: 2"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "offline_blocking_storage_bytes: 80"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "reclaimable_peer_storage_bytes: 90"));
+        assert!(lines.iter().any(|line| line == "fresh_replicas_now: 2"));
+        assert!(lines.iter().any(|line| {
+            line == "replica_horizon remaining_fresh_replicas=1 seconds_until_threshold=120 never=false"
+        }));
+        assert!(lines.iter().any(|line| {
+            line == "replica_horizon remaining_fresh_replicas=0 seconds_until_threshold=0 never=true"
+        }));
         assert!(lines
             .iter()
             .any(|line| line == "max_peer_content_bytes: 41"));
@@ -2666,6 +2793,13 @@ mod tests {
                 expired_offline_peers_storage_obligations_bytes: 5,
                 our_content_bytes: 30,
                 maximum_peer_content_accepted_bytes: 40,
+                pinned_peers_storage_bytes: 50,
+                protected_peers_storage_bytes: 60,
+                disposable_peers_storage_bytes: 70,
+                tracked_only_peers_count: 2,
+                offline_blocking_storage_bytes: 80,
+                reclaimable_peer_storage_bytes: 90,
+                replica_horizon: Vec::new(),
             }),
             resource_policy: Some(protos::clirpc::ResourcePolicy {
                 max_peer_content_bytes: 41,

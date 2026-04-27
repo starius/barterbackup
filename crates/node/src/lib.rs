@@ -102,6 +102,34 @@ enum StorageClass {
     BestEffort,
 }
 
+/// PeerStorageProtectionClass classifies one peer's currently cached bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PeerStorageProtectionClass {
+    /// None means the peer currently has no cached mirrored bytes locally.
+    None,
+    /// Pinned means cached bytes are protected by an operator pin.
+    Pinned,
+    /// Protected means cached bytes are protected by a positive peer score.
+    Protected,
+    /// Disposable means cached bytes are currently best-effort only.
+    Disposable,
+}
+
+/// StorageAccounting aggregates deduplicated mirrored-blob usage by policy class.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct StorageAccounting {
+    /// pinned_bytes are deduplicated cached bytes protected by pinned peers.
+    pinned_bytes: i64,
+    /// protected_bytes are deduplicated cached bytes protected by positive-score peers.
+    protected_bytes: i64,
+    /// disposable_bytes are deduplicated cached bytes referenced only by best-effort peers.
+    disposable_bytes: i64,
+    /// offline_blocking_bytes are protected bytes blocked by offline or stale peers.
+    offline_blocking_bytes: i64,
+    /// reclaimable_bytes are disposable bytes that may be dropped immediately.
+    reclaimable_bytes: i64,
+}
+
 /// PeerBlobReference is one peer's reference to one mirrored blob.
 #[derive(Clone, Debug)]
 struct PeerBlobReference {
@@ -124,6 +152,15 @@ struct MirroredBlobUsage {
     blob_len: i64,
     /// references are the peers that currently point at this blob.
     references: Vec<PeerBlobReference>,
+}
+
+/// PeerContractState is the live contract state we need for storage reporting.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PeerContractState {
+    /// online reports whether the peer answered the live contract probe.
+    online: bool,
+    /// our_content_synced reports whether the peer currently advertises our latest content.
+    our_content_synced: bool,
 }
 
 /// StorageAdmission describes whether a new mirrored blob can be kept locally.
@@ -163,6 +200,8 @@ struct PeerInventoryEntry {
     status: PeerInventoryStatus,
     /// pinned_by_us reports whether the local operator pinned this peer.
     pinned_by_us: bool,
+    /// pins_us reports whether the peer most recently told us it pins us.
+    pins_us: bool,
     /// has_contract reports whether persisted state indicates an active contract relationship.
     has_contract: bool,
     /// score_seconds is the peer's current persisted score.
@@ -177,6 +216,10 @@ struct PeerInventoryEntry {
     latest_cached_content_length: i64,
     /// stale_cache reports whether latest known and latest cached revisions differ.
     stale_cache: bool,
+    /// storage_protection reports how the currently cached bytes are classified.
+    storage_protection: PeerStorageProtectionClass,
+    /// tracked_only reports whether only metadata for the newest revision is kept.
+    tracked_only: bool,
     /// last_live_at is when the peer last responded successfully over the transport.
     last_live_at: i64,
     /// last_failure_at is when background maintenance last failed for this peer.
@@ -430,6 +473,139 @@ fn peer_has_contract(peer: &storedpb::Peer) -> bool {
         || peer.score_seconds != 0
         || peer_latest_known_content(peer).is_some()
         || peer_latest_cached_content(peer).is_some()
+}
+
+/// Classify the currently cached bytes for one tracked peer.
+fn peer_storage_protection(peer: &storedpb::Peer) -> PeerStorageProtectionClass {
+    if peer_latest_cached_content(peer).is_none() {
+        PeerStorageProtectionClass::None
+    } else if peer.pinned_by_us {
+        PeerStorageProtectionClass::Pinned
+    } else if peer.score_seconds > 0 {
+        PeerStorageProtectionClass::Protected
+    } else {
+        PeerStorageProtectionClass::Disposable
+    }
+}
+
+/// Report whether the peer is newest-known only with no cached bytes.
+fn peer_is_tracked_only(peer: &storedpb::Peer) -> bool {
+    peer_latest_known_content(peer).is_some() && peer_latest_cached_content(peer).is_none()
+}
+
+/// Convert one internal storage protection class into its CLI proto enum.
+fn proto_peer_storage_protection(class: PeerStorageProtectionClass) -> i32 {
+    match class {
+        PeerStorageProtectionClass::None => clirpc::PeerStorageProtection::None as i32,
+        PeerStorageProtectionClass::Pinned => clirpc::PeerStorageProtection::Pinned as i32,
+        PeerStorageProtectionClass::Protected => clirpc::PeerStorageProtection::Protected as i32,
+        PeerStorageProtectionClass::Disposable => clirpc::PeerStorageProtection::Disposable as i32,
+    }
+}
+
+/// Aggregate deduplicated mirrored-blob usage into operator-facing totals.
+fn aggregate_storage_accounting(
+    usage: &[MirroredBlobUsage],
+    contract_state_by_peer: &BTreeMap<Vec<u8>, PeerContractState>,
+) -> StorageAccounting {
+    let mut accounting = StorageAccounting::default();
+
+    for usage in usage {
+        let protecting_references = usage
+            .references
+            .iter()
+            .filter(|reference| {
+                storage_class(reference.pinned_by_us, reference.score_seconds)
+                    == StorageClass::Reserved
+            })
+            .collect::<Vec<_>>();
+        let class = if protecting_references
+            .iter()
+            .any(|reference| reference.pinned_by_us)
+        {
+            PeerStorageProtectionClass::Pinned
+        } else if !protecting_references.is_empty() {
+            PeerStorageProtectionClass::Protected
+        } else {
+            PeerStorageProtectionClass::Disposable
+        };
+
+        match class {
+            PeerStorageProtectionClass::Pinned => {
+                accounting.pinned_bytes = accounting.pinned_bytes.saturating_add(usage.blob_len);
+            }
+            PeerStorageProtectionClass::Protected => {
+                accounting.protected_bytes =
+                    accounting.protected_bytes.saturating_add(usage.blob_len);
+            }
+            PeerStorageProtectionClass::Disposable => {
+                accounting.disposable_bytes =
+                    accounting.disposable_bytes.saturating_add(usage.blob_len);
+                accounting.reclaimable_bytes =
+                    accounting.reclaimable_bytes.saturating_add(usage.blob_len);
+            }
+            PeerStorageProtectionClass::None => {}
+        }
+
+        if !protecting_references.is_empty()
+            && protecting_references.iter().all(|reference| {
+                !contract_state_by_peer
+                    .get(&reference.peer_public_key)
+                    .is_some_and(|state| state.online && state.our_content_synced)
+            })
+        {
+            accounting.offline_blocking_bytes = accounting
+                .offline_blocking_bytes
+                .saturating_add(usage.blob_len);
+        }
+    }
+
+    accounting
+}
+
+/// Build threshold points for when fresh checked replica count would decay.
+fn replica_horizon_points(expiry_seconds: &[Option<i64>]) -> Vec<clirpc::ReplicaHorizonPoint> {
+    let mut finite = expiry_seconds
+        .iter()
+        .flatten()
+        .copied()
+        .map(|seconds| seconds.max(0))
+        .collect::<Vec<_>>();
+    finite.sort_unstable();
+
+    let mut remaining = i64::try_from(expiry_seconds.len()).unwrap_or(i64::MAX);
+    let pinned_floor = i64::try_from(
+        expiry_seconds
+            .iter()
+            .filter(|expiry| expiry.is_none())
+            .count(),
+    )
+    .unwrap_or(i64::MAX);
+    let mut points = Vec::new();
+
+    for seconds in finite {
+        remaining = remaining.saturating_sub(1);
+        points.push(clirpc::ReplicaHorizonPoint {
+            remaining_fresh_replicas: remaining,
+            seconds_until_threshold: seconds,
+            never: false,
+        });
+    }
+
+    let mut next_remaining = pinned_floor.saturating_sub(1);
+    while next_remaining >= 0 {
+        points.push(clirpc::ReplicaHorizonPoint {
+            remaining_fresh_replicas: next_remaining,
+            seconds_until_threshold: 0,
+            never: true,
+        });
+        if next_remaining == 0 {
+            break;
+        }
+        next_remaining = next_remaining.saturating_sub(1);
+    }
+
+    points
 }
 
 /// Convert persisted reachability plus cache presence into the reported status.
@@ -2032,6 +2208,24 @@ impl Node {
         self.with_store(|store| store.set_peer_pins_us(peer_public_key.as_bytes(), pins_us))
     }
 
+    /// Persist which current local revision this peer most recently passed a
+    /// contract check for.
+    fn record_verified_our_content(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+        content_id: Option<&[u8]>,
+    ) -> Result<(), Status> {
+        let verified_at =
+            content_id.map(|_| i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX));
+        self.with_store(|store| {
+            store.set_peer_last_verified_our_content(
+                peer_public_key.as_bytes(),
+                content_id,
+                verified_at,
+            )
+        })
+    }
+
     /// Persist the updated score state for a peer.
     fn update_peer_score(
         &self,
@@ -2429,6 +2623,7 @@ impl Node {
                 onion_service_id: peer_onion,
                 status,
                 pinned_by_us: tracked_peer.map(|peer| peer.pinned_by_us).unwrap_or(false),
+                pins_us: tracked_peer.map(|peer| peer.pins_us).unwrap_or(false),
                 has_contract: tracked_peer.is_some_and(peer_has_contract),
                 score_seconds: tracked_peer
                     .map(|peer| peer.score_seconds)
@@ -2451,6 +2646,10 @@ impl Node {
                     != latest_cached_content
                         .as_ref()
                         .map(|content| &content.content_id),
+                storage_protection: tracked_peer
+                    .map(peer_storage_protection)
+                    .unwrap_or(PeerStorageProtectionClass::None),
+                tracked_only: tracked_peer.map(peer_is_tracked_only).unwrap_or(false),
                 last_live_at: tracked_peer
                     .map(|peer| peer.last_live_at)
                     .unwrap_or_default(),
@@ -2510,6 +2709,7 @@ impl Node {
                     }),
                     status: proto_peer_status(peer.status),
                     pinned_by_us: peer.pinned_by_us,
+                    pins_us: peer.pins_us,
                     has_contract: peer.has_contract,
                     score_seconds: peer.score_seconds,
                     score_measured_at: peer.score_measured_at,
@@ -2517,6 +2717,8 @@ impl Node {
                     latest_known_content_length: peer.latest_known_content_length,
                     latest_cached_content_length: peer.latest_cached_content_length,
                     stale_cache: peer.stale_cache,
+                    storage_protection: proto_peer_storage_protection(peer.storage_protection),
+                    tracked_only: peer.tracked_only,
                     last_live_at: peer.last_live_at,
                     last_failure_at: peer.last_failure_at,
                     last_error_class: peer.last_error_class,
@@ -2615,16 +2817,61 @@ impl Node {
         Ok(clirpc::GetContractsResponse { contracts })
     }
 
+    /// Build the replica-horizon report for our currently verified fresh replicas.
+    fn replica_horizon(
+        &self,
+        contracts: &[clirpc::ContractInfo],
+        tracked_by_onion: &BTreeMap<String, storedpb::Peer>,
+    ) -> Result<Vec<clirpc::ReplicaHorizonPoint>, Status> {
+        let Some(current_content) = self.responder_content()? else {
+            return Ok(Vec::new());
+        };
+
+        let expiry_seconds = contracts
+            .iter()
+            .filter(|contract| contract.online && contract.our_content_synced)
+            .filter_map(|contract| {
+                let peer_onion = contract.peer.as_ref()?.onion_service_id.clone();
+                let tracked_peer = tracked_by_onion.get(&peer_onion)?;
+                (tracked_peer.our_content_last_verified_content_id == current_content.content_id)
+                    .then_some(if tracked_peer.pins_us {
+                        None
+                    } else {
+                        Some(contract.our_remaining_seconds.max(0))
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(replica_horizon_points(&expiry_seconds))
+    }
+
     /// Build the derived storage view shown by the local CLI.
     pub async fn storage_info(&self) -> Result<clirpc::StorageInfo, Status> {
         let contracts = self.get_contracts_response().await?;
         let mut online_obligations = 0i64;
         let mut offline_obligations = 0i64;
         let mut expired_offline_obligations = 0i64;
+        let tracked_peers = self.tracked_peers()?;
+        let tracked_by_onion = tracked_peers
+            .iter()
+            .filter_map(|peer| {
+                self.onion_from_public_key_bytes(&peer.onion_pubkey)
+                    .ok()
+                    .map(|peer_onion| (peer_onion, peer.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let tracked_only_peers_count = i64::try_from(
+            tracked_peers
+                .iter()
+                .filter(|peer| peer_is_tracked_only(peer))
+                .count(),
+        )
+        .unwrap_or(i64::MAX);
+        let mut contract_state_by_peer = BTreeMap::new();
 
         // Split mirrored-peer usage by live reachability and by whether the
         // peer has expired into best-effort storage from our perspective.
-        for contract in contracts.contracts {
+        for contract in &contracts.contracts {
             let content_bytes = contract.their_content_length.max(0);
             if contract.online && contract.our_content_synced {
                 online_obligations = online_obligations.saturating_add(content_bytes);
@@ -2635,7 +2882,25 @@ impl Node {
                         expired_offline_obligations.saturating_add(content_bytes);
                 }
             }
+
+            if let Some(peer_onion) = contract
+                .peer
+                .as_ref()
+                .map(|peer| peer.onion_service_id.as_str())
+            {
+                if let Ok(peer_public_key) = keys::public_key_from_onion_hostname(peer_onion) {
+                    contract_state_by_peer.insert(
+                        peer_public_key.as_bytes().to_vec(),
+                        PeerContractState {
+                            online: contract.online,
+                            our_content_synced: contract.our_content_synced,
+                        },
+                    );
+                }
+            }
         }
+        let storage_accounting =
+            aggregate_storage_accounting(&self.mirrored_blob_usage()?, &contract_state_by_peer);
 
         let our_content_bytes = self.with_store(|store| {
             Ok(store
@@ -2650,6 +2915,13 @@ impl Node {
             expired_offline_peers_storage_obligations_bytes: expired_offline_obligations,
             our_content_bytes,
             maximum_peer_content_accepted_bytes: self.maximum_peer_content_accepted_bytes()?,
+            pinned_peers_storage_bytes: storage_accounting.pinned_bytes,
+            protected_peers_storage_bytes: storage_accounting.protected_bytes,
+            disposable_peers_storage_bytes: storage_accounting.disposable_bytes,
+            tracked_only_peers_count,
+            offline_blocking_storage_bytes: storage_accounting.offline_blocking_bytes,
+            reclaimable_peer_storage_bytes: storage_accounting.reclaimable_bytes,
+            replica_horizon: self.replica_horizon(&contracts.contracts, &tracked_by_onion)?,
         })
     }
 
@@ -2828,6 +3100,7 @@ impl Node {
                     .responder_content()?
                     .map(|content| content.content_length)
                     .unwrap_or(0);
+                let _ = self.record_verified_our_content(&peer_public_key, None);
                 let new_score = self.update_peer_score(&peer_public_key, false)?;
                 warn!(
                     peer = %peer_onion,
@@ -2908,6 +3181,7 @@ impl Node {
         });
 
         let Some(our_content) = self.responder_content()? else {
+            self.record_verified_our_content(&peer_public_key, None)?;
             let new_score = self.update_peer_score(&peer_public_key, true)?;
             self.maybe_exchange_peers_with_client(peer_onion, &mut client)
                 .await?;
@@ -2933,6 +3207,7 @@ impl Node {
             .map(|content_info| content_info.content_id.as_slice())
             != Some(our_content.content_id.as_slice())
         {
+            self.record_verified_our_content(&peer_public_key, None)?;
             let new_score = self.update_peer_score(&peer_public_key, false)?;
             self.maybe_exchange_peers_with_client(peer_onion, &mut client)
                 .await?;
@@ -2981,6 +3256,11 @@ impl Node {
                     if raw_bytes.value
                         == local_blob[section_offset..section_offset + section_length]
             );
+        if passed {
+            self.record_verified_our_content(&peer_public_key, Some(&our_content.content_id))?;
+        } else {
+            self.record_verified_our_content(&peer_public_key, None)?;
+        }
         let new_score = self.update_peer_score(&peer_public_key, passed)?;
         self.maybe_exchange_peers_with_client(peer_onion, &mut client)
             .await?;
@@ -5211,6 +5491,145 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_storage_accounting_splits_deduplicated_bytes_by_class() {
+        let pinned_key = vec![0x11; 32];
+        let protected_key = vec![0x22; 32];
+        let offline_key = vec![0x33; 32];
+        let disposable_key = vec![0x44; 32];
+        let usage = vec![
+            MirroredBlobUsage {
+                content_id: b"pinned".to_vec(),
+                blob_len: 10,
+                references: vec![PeerBlobReference {
+                    peer_public_key: pinned_key.clone(),
+                    pinned_by_us: true,
+                    score_seconds: -10,
+                    score_measured_at: 0,
+                }],
+            },
+            MirroredBlobUsage {
+                content_id: b"protected".to_vec(),
+                blob_len: 20,
+                references: vec![PeerBlobReference {
+                    peer_public_key: protected_key.clone(),
+                    pinned_by_us: false,
+                    score_seconds: 15,
+                    score_measured_at: 0,
+                }],
+            },
+            MirroredBlobUsage {
+                content_id: b"offline".to_vec(),
+                blob_len: 30,
+                references: vec![PeerBlobReference {
+                    peer_public_key: offline_key.clone(),
+                    pinned_by_us: false,
+                    score_seconds: 12,
+                    score_measured_at: 0,
+                }],
+            },
+            MirroredBlobUsage {
+                content_id: b"disposable".to_vec(),
+                blob_len: 40,
+                references: vec![PeerBlobReference {
+                    peer_public_key: disposable_key.clone(),
+                    pinned_by_us: false,
+                    score_seconds: 0,
+                    score_measured_at: 0,
+                }],
+            },
+        ];
+        let contract_states = BTreeMap::from([
+            (
+                pinned_key,
+                PeerContractState {
+                    online: true,
+                    our_content_synced: true,
+                },
+            ),
+            (
+                protected_key,
+                PeerContractState {
+                    online: true,
+                    our_content_synced: true,
+                },
+            ),
+            (
+                offline_key,
+                PeerContractState {
+                    online: false,
+                    our_content_synced: false,
+                },
+            ),
+            (
+                disposable_key,
+                PeerContractState {
+                    online: false,
+                    our_content_synced: false,
+                },
+            ),
+        ]);
+
+        let accounting = aggregate_storage_accounting(&usage, &contract_states);
+        assert_eq!(accounting.pinned_bytes, 10);
+        assert_eq!(accounting.protected_bytes, 50);
+        assert_eq!(accounting.disposable_bytes, 40);
+        assert_eq!(accounting.offline_blocking_bytes, 30);
+        assert_eq!(accounting.reclaimable_bytes, 40);
+    }
+
+    #[test]
+    fn replica_horizon_points_include_finite_and_never_thresholds() {
+        let points = replica_horizon_points(&[Some(10), Some(25), None]);
+
+        assert_eq!(
+            points,
+            vec![
+                clirpc::ReplicaHorizonPoint {
+                    remaining_fresh_replicas: 2,
+                    seconds_until_threshold: 10,
+                    never: false,
+                },
+                clirpc::ReplicaHorizonPoint {
+                    remaining_fresh_replicas: 1,
+                    seconds_until_threshold: 25,
+                    never: false,
+                },
+                clirpc::ReplicaHorizonPoint {
+                    remaining_fresh_replicas: 0,
+                    seconds_until_threshold: 0,
+                    never: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn replica_horizon_points_are_empty_without_replicas() {
+        assert!(replica_horizon_points(&[]).is_empty());
+    }
+
+    #[test]
+    fn replica_horizon_points_with_only_pinned_replicas_are_never() {
+        let points = replica_horizon_points(&[None, None]);
+
+        assert_eq!(
+            points,
+            vec![
+                clirpc::ReplicaHorizonPoint {
+                    remaining_fresh_replicas: 1,
+                    seconds_until_threshold: 0,
+                    never: true,
+                },
+                clirpc::ReplicaHorizonPoint {
+                    remaining_fresh_replicas: 0,
+                    seconds_until_threshold: 0,
+                    never: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn manual_peer_displaces_inbound_peer_at_capacity() -> anyhow::Result<()> {
         let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let node = Node::with_local_storage("manual-capacity-owner", filesystem)?;
@@ -7108,6 +7527,324 @@ mod tests {
         );
 
         remote_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_inventory_and_storage_info_report_pin_accounting() -> anyhow::Result<()> {
+        let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let local_node = Arc::new(Node::with_local_storage(
+            "local-reporting",
+            local_filesystem,
+        )?);
+        let pinned_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let pinned_node = Arc::new(Node::with_local_storage(
+            "pinned-reporting",
+            pinned_filesystem,
+        )?);
+        let protected_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let protected_node = Arc::new(Node::with_local_storage(
+            "protected-reporting",
+            protected_filesystem,
+        )?);
+        let disposable_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let disposable_node = Arc::new(Node::with_local_storage(
+            "disposable-reporting",
+            disposable_filesystem,
+        )?);
+        let tracked_only_filesystem: Arc<dyn Filesystem> =
+            Arc::new(storage::MemoryFilesystem::new());
+        let tracked_only_node = Arc::new(Node::with_local_storage(
+            "tracked-only-reporting",
+            tracked_only_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        local_node.set_peer_connector(connector.clone());
+        pinned_node.set_peer_connector(connector.clone());
+        protected_node.set_peer_connector(connector.clone());
+        disposable_node.set_peer_connector(connector.clone());
+        tracked_only_node.set_peer_connector(connector.clone());
+        for peer in [
+            &pinned_node,
+            &protected_node,
+            &disposable_node,
+            &tracked_only_node,
+        ] {
+            peer.add_known_peer(local_node.address())?;
+        }
+
+        for peer_onion in [
+            pinned_node.address(),
+            protected_node.address(),
+            disposable_node.address(),
+            tracked_only_node.address(),
+        ] {
+            local_node.add_known_peer(peer_onion)?;
+        }
+        local_node.pin_peer(pinned_node.address())?;
+
+        *local_node.storage_config.lock().unwrap() = clirpc::StorageConfig {
+            allocated_storage_for_peers: 1_000_000,
+            min_replicas: 0,
+        };
+        CliService::new(local_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "owner.txt".to_string(),
+                    data: b"owner-data".to_vec(),
+                }),
+            }))
+            .await?;
+
+        CliService::new(pinned_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: vec![b'p'; 17],
+                }),
+            }))
+            .await?;
+        CliService::new(protected_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: vec![b'r'; 19],
+                }),
+            }))
+            .await?;
+        CliService::new(disposable_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: vec![b'd'; 23],
+                }),
+            }))
+            .await?;
+        CliService::new(tracked_only_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: vec![b't'; 1_000_000],
+                }),
+            }))
+            .await?;
+
+        let local_server =
+            spawn_registered_p2p_server(local_node.clone(), connector.as_ref()).await?;
+        let pinned_server =
+            spawn_registered_p2p_server(pinned_node.clone(), connector.as_ref()).await?;
+        let protected_server =
+            spawn_registered_p2p_server(protected_node.clone(), connector.as_ref()).await?;
+        let disposable_server =
+            spawn_registered_p2p_server(disposable_node.clone(), connector.as_ref()).await?;
+        let tracked_only_server =
+            spawn_registered_p2p_server(tracked_only_node.clone(), connector.as_ref()).await?;
+
+        local_node
+            .propose_contract_updates(pinned_node.address())
+            .await?;
+        let pinned_length = pinned_node
+            .current_content_info()?
+            .ok_or_else(|| anyhow::anyhow!("missing pinned peer content"))?
+            .content_length;
+        local_node
+            .propose_contract_updates(protected_node.address())
+            .await?;
+        let protected_length = protected_node
+            .current_content_info()?
+            .ok_or_else(|| anyhow::anyhow!("missing protected peer content"))?
+            .content_length;
+        local_node
+            .propose_contract_updates(disposable_node.address())
+            .await?;
+        let disposable_length = disposable_node
+            .current_content_info()?
+            .ok_or_else(|| anyhow::anyhow!("missing disposable peer content"))?
+            .content_length;
+        let tracked_only_length = tracked_only_node
+            .current_content_info()?
+            .ok_or_else(|| anyhow::anyhow!("missing tracked-only peer content"))?
+            .content_length;
+
+        let protected_public_key = keys::public_key_from_onion_hostname(protected_node.address())?;
+        local_node
+            .with_store(|store| store.set_peer_score(protected_public_key.as_bytes(), 90, 100))?;
+        let cached_budget = pinned_length
+            .saturating_add(protected_length)
+            .saturating_add(disposable_length);
+        assert!(tracked_only_length > cached_budget);
+        *local_node.storage_config.lock().unwrap() = clirpc::StorageConfig {
+            allocated_storage_for_peers: cached_budget,
+            min_replicas: 0,
+        };
+
+        let track_only_error = local_node
+            .propose_contract_updates(tracked_only_node.address())
+            .await
+            .unwrap_err();
+        assert_eq!(track_only_error.code(), tonic::Code::ResourceExhausted);
+
+        protected_server.abort();
+        local_node.evict_cached_peer_client(protected_node.address());
+
+        let pinned_inventory = peer_inventory_entry(local_node.as_ref(), pinned_node.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing pinned peer inventory entry"))?;
+        assert_eq!(
+            pinned_inventory.storage_protection,
+            PeerStorageProtectionClass::Pinned
+        );
+        assert_eq!(pinned_inventory.stored_content_bytes, pinned_length);
+        assert!(!pinned_inventory.tracked_only);
+
+        let protected_inventory =
+            peer_inventory_entry(local_node.as_ref(), protected_node.address())?
+                .ok_or_else(|| anyhow::anyhow!("missing protected peer inventory entry"))?;
+        assert_eq!(
+            protected_inventory.storage_protection,
+            PeerStorageProtectionClass::Protected
+        );
+        assert_eq!(protected_inventory.stored_content_bytes, protected_length);
+
+        let disposable_inventory =
+            peer_inventory_entry(local_node.as_ref(), disposable_node.address())?
+                .ok_or_else(|| anyhow::anyhow!("missing disposable peer inventory entry"))?;
+        assert_eq!(
+            disposable_inventory.storage_protection,
+            PeerStorageProtectionClass::Disposable
+        );
+        assert_eq!(disposable_inventory.stored_content_bytes, disposable_length);
+
+        let tracked_only_inventory =
+            peer_inventory_entry(local_node.as_ref(), tracked_only_node.address())?
+                .ok_or_else(|| anyhow::anyhow!("missing tracked-only peer inventory entry"))?;
+        assert!(tracked_only_inventory.tracked_only);
+        assert_eq!(
+            tracked_only_inventory.storage_protection,
+            PeerStorageProtectionClass::None
+        );
+        assert_eq!(tracked_only_inventory.stored_content_bytes, 0);
+
+        let storage_info = local_node.storage_info().await?;
+        assert_eq!(storage_info.pinned_peers_storage_bytes, pinned_length);
+        assert_eq!(storage_info.protected_peers_storage_bytes, protected_length);
+        assert_eq!(
+            storage_info.disposable_peers_storage_bytes,
+            disposable_length
+        );
+        assert_eq!(storage_info.tracked_only_peers_count, 1);
+        assert_eq!(
+            storage_info.offline_blocking_storage_bytes,
+            protected_length
+        );
+        assert_eq!(
+            storage_info.reclaimable_peer_storage_bytes,
+            disposable_length
+        );
+        assert!(storage_info.replica_horizon.is_empty());
+
+        local_server.abort();
+        pinned_server.abort();
+        disposable_server.abort();
+        tracked_only_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn storage_info_reports_replica_horizon_for_verified_peers() -> anyhow::Result<()> {
+        let owner_clock = Arc::new(ManualClock::new(Timestamp::new(1_000, 0).unwrap()));
+        let peer_a_clock = Arc::new(ManualClock::new(Timestamp::new(1_000, 0).unwrap()));
+        let peer_b_clock = Arc::new(ManualClock::new(Timestamp::new(1_000, 0).unwrap()));
+        let peer_c_clock = Arc::new(ManualClock::new(Timestamp::new(1_000, 0).unwrap()));
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner_node = Arc::new(Node::with_local_storage_and_clock(
+            "owner-horizon",
+            owner_filesystem,
+            owner_clock,
+        )?);
+        let peer_a_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer_a = Arc::new(Node::with_local_storage_and_clock(
+            "peer-a-horizon",
+            peer_a_filesystem,
+            peer_a_clock,
+        )?);
+        let peer_b_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer_b = Arc::new(Node::with_local_storage_and_clock(
+            "peer-b-horizon",
+            peer_b_filesystem,
+            peer_b_clock,
+        )?);
+        let peer_c_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer_c = Arc::new(Node::with_local_storage_and_clock(
+            "peer-c-horizon",
+            peer_c_filesystem,
+            peer_c_clock,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        owner_node.set_peer_connector(connector.clone());
+        peer_a.set_peer_connector(connector.clone());
+        peer_b.set_peer_connector(connector.clone());
+        peer_c.set_peer_connector(connector.clone());
+
+        for peer_onion in [peer_a.address(), peer_b.address(), peer_c.address()] {
+            owner_node.add_known_peer(peer_onion)?;
+        }
+
+        let owner_public_key = keys::public_key_from_onion_hostname(owner_node.address())?;
+        for peer in [&peer_a, &peer_b, &peer_c] {
+            peer.add_known_peer(owner_node.address())?;
+        }
+        peer_c.pin_peer(owner_node.address())?;
+        peer_a.with_store(|store| store.set_peer_score(owner_public_key.as_bytes(), 30, 1_000))?;
+        peer_b.with_store(|store| store.set_peer_score(owner_public_key.as_bytes(), 120, 1_000))?;
+        peer_c.with_store(|store| store.set_peer_score(owner_public_key.as_bytes(), 300, 1_000))?;
+
+        CliService::new(owner_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "owner.txt".to_string(),
+                    data: b"owner-data".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let owner_server =
+            spawn_registered_p2p_server(owner_node.clone(), connector.as_ref()).await?;
+        let peer_a_server = spawn_registered_p2p_server(peer_a.clone(), connector.as_ref()).await?;
+        let peer_b_server = spawn_registered_p2p_server(peer_b.clone(), connector.as_ref()).await?;
+        let peer_c_server = spawn_registered_p2p_server(peer_c.clone(), connector.as_ref()).await?;
+
+        for peer_onion in [peer_a.address(), peer_b.address(), peer_c.address()] {
+            owner_node.propose_contract_updates(peer_onion).await?;
+            let check = owner_node.check_contract_updates(peer_onion).await?;
+            assert!(check.last().is_some_and(|update| update.success));
+        }
+
+        let storage_info = owner_node.storage_info().await?;
+        assert_eq!(
+            storage_info.replica_horizon,
+            vec![
+                clirpc::ReplicaHorizonPoint {
+                    remaining_fresh_replicas: 2,
+                    seconds_until_threshold: 30,
+                    never: false,
+                },
+                clirpc::ReplicaHorizonPoint {
+                    remaining_fresh_replicas: 1,
+                    seconds_until_threshold: 120,
+                    never: false,
+                },
+                clirpc::ReplicaHorizonPoint {
+                    remaining_fresh_replicas: 0,
+                    seconds_until_threshold: 0,
+                    never: true,
+                },
+            ]
+        );
+
+        owner_server.abort();
+        peer_a_server.abort();
+        peer_b_server.abort();
+        peer_c_server.abort();
         Ok(())
     }
 
