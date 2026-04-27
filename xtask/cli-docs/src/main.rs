@@ -11,7 +11,7 @@ use clap_complete::shells::{Bash, Elvish, Fish, PowerShell, Zsh};
 use clap_complete::Generator;
 
 const DOCS_DIR: &str = "docs/cli";
-const MAN_DIR: &str = "man";
+const MAN_DIR: &str = "docs/man";
 const COMPLETIONS_DIR: &str = "completions";
 
 fn main() -> Result<()> {
@@ -554,7 +554,7 @@ mod tests {
             .expect("bbcli markdown output");
         let bbcli_man = rendered
             .iter()
-            .find(|output| output.relative_path.to_string_lossy() == "man/bbcli.1")
+            .find(|output| output.relative_path.to_string_lossy() == "docs/man/bbcli.1")
             .expect("bbcli man output");
         let bbd_completions: Vec<_> = rendered
             .iter()

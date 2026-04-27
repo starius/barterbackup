@@ -99,7 +99,7 @@ dynamic as usual, and the first run downloads the Microsoft SDK pieces that
 that rebuilds the workspace with AddressSanitizer instrumentation. `make rpc`
 generates the Go `clirpc` stubs under `integration/docker/gen/clirpc`.
 `make cli-docs` regenerates checked-in shell completions, man pages, and
-Markdown CLI manuals under `completions/`, `man/`, and `docs/cli/`.
+Markdown CLI manuals under `completions/`, `docs/man/`, and `docs/cli/`.
 
 ## Test
 
