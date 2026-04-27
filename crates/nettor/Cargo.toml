@@ -16,26 +16,28 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 keys = { path = "../keys" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "io-util"] }
 tracing = "0.1"
-arti-client = { version = "0.34", default-features = false, features = [
+arti-client = { version = "0.41.0", default-features = false, features = [
     "tokio",
     "onion-service-client",
     "onion-service-service",
+    "bridge-client",
+    "pt-client",
     "keymgr",
     "experimental-api",
     "rustls",
     "static-sqlite",
     "ephemeral-keystore",
 ] }
-tor-hsservice = "0.34"
-tor-hscrypto = "0.34"
-tor-llcrypto = "0.34"
-tor-cell = "0.34"
-tor-keymgr = "0.34"
-tor-config = "0.34"
-tor-proto = "0.34"
-tor-rtcompat = "0.34"
+tor-hsservice = "0.41.0"
+tor-hscrypto = "0.41.0"
+tor-llcrypto = "0.41.0"
+tor-cell = "0.41.0"
+tor-keymgr = "0.41.0"
+tor-config = "0.41.0"
+tor-proto = "0.41.0"
+tor-rtcompat = "0.41.0"
 futures = "0.3"
-safelog = "0.5"
+safelog = "0.8.1"
 tokio-rustls = "0.26"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tonic = { version = "0.14.2", features = ["transport"] }

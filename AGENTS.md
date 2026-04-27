@@ -132,4 +132,5 @@ Open product gaps
 - fresh-node bootstrap still needs a product decision when only the seed is
   available and no peer addresses survive locally;
 - divergent recovery branches still need operator-facing UX and RPC support;
-- external Tor / pluggable transport support is still undecided.
+- Tor bridges and pluggable transports are configured through `bbd
+  --arti-config`; a separate non-Tor peer transport is still undecided.

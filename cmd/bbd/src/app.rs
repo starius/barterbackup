@@ -54,7 +54,7 @@ pub struct Config {
     pub data_dir: Option<PathBuf>,
 
     /// arti_config is one optional Arti TOML file for custom test networks.
-    #[arg(long, env = "BBD_ARTI_CONFIG", hide = true)]
+    #[arg(long, env = "BBD_ARTI_CONFIG")]
     pub arti_config: Option<PathBuf>,
 
     /// test_clock enables the hidden daemon test clock control RPCs.
@@ -2916,7 +2916,7 @@ mod tests {
         let mut command = Config::command();
         let rendered = command.render_long_help().to_string();
 
-        assert!(!rendered.contains("--arti-config"));
+        assert!(rendered.contains("--arti-config"));
         assert!(!rendered.contains("--test-clock"));
         assert!(!rendered.contains("--disable-maintenance"));
     }

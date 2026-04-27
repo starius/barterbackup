@@ -25,10 +25,10 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::server::Connected;
 use tonic::transport::Endpoint;
+use tor_config::{resolve as resolve_config, ConfigurationSource, ConfigurationSources};
 use tower::service_fn;
 use tracing::{info, warn};
 use transport::{PeerClient, PeerConnector};
-use tor_config::{resolve as resolve_config, ConfigurationSource, ConfigurationSources};
 
 use tor_config::ExplicitOrAuto;
 use tor_hscrypto::pk::HsIdKeypair;
@@ -72,9 +72,14 @@ impl TorTransport {
             .nickname(nickname)
             .build()?;
         let id_keypair = hs_id_keypair_from_secret(server_priv);
-        let (running, rend_requests) = self
+        let Some((running, rend_requests)) = self
             .client
-            .launch_onion_service_with_hsid(hs_cfg, id_keypair)?;
+            .launch_onion_service_with_hsid(hs_cfg, id_keypair)?
+        else {
+            return Err(anyhow!(
+                "arti refused to launch the requested onion service identity"
+            ));
+        };
         let onion_address =
             keys::onion_hostname_from_public_key(&ed25519_dalek::PublicKey::from(server_priv));
         let tls_acceptor =
@@ -493,14 +498,17 @@ mod tests {
                 [channel]
                 padding = "none"
 
-                [[tor_network.fallback_caches]]
-                rsa_identity = "3AD93C9F25FBC37B3DF94862CDD4B24B06B67616"
-                ed_identity = "7foPjsa+e6yk7KI3vKP/VN/xuqwXHhtS1/0GnqXj4b4"
-                orports = ["127.0.0.1:5100"]
+                [bridges]
+                enabled = true
+                bridges = [
+                  "obfs4 bridge.example.net:80 $0bac39417268b69b9f514e7f63fa6fba1a788958 ed25519:dGhpcyBpcyBbpmNyZWRpYmx5IHNpbGx5ISEhISEhISA iat-mode=1",
+                ]
 
-                [[tor_network.authorities]]
-                name = "auth1"
-                v3ident = "92EEA43CA79682F4B0C812BB70D346EC6702F86C"
+                [[bridges.transports]]
+                protocols = ["obfs4"]
+                path = "/usr/bin/obfs4proxy"
+                arguments = []
+                run_on_startup = false
 
                 [storage.keystore.primary]
                 kind = "ephemeral"

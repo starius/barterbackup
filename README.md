@@ -244,6 +244,17 @@ echo 'correct horse battery staple' | \
   bbcli --data-dir /tmp/barterbackup unlock --password-stdin
 ```
 
+If Tor access needs a custom Arti client configuration, point the daemon at
+one TOML file with `--arti-config`. This is the path for bridges and
+pluggable transports such as `obfs4` or `snowflake`:
+
+```bash
+bbd --data-dir /tmp/barterbackup --arti-config /path/to/arti.toml
+```
+
+Bridge and pluggable-transport settings live in that Arti config file; they
+are passed through directly to embedded Arti.
+
 Add a peer:
 
 ```bash
