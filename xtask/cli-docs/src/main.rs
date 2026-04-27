@@ -219,11 +219,77 @@ where
 }
 
 fn render_man_page(command: Command) -> String {
-    let mut buffer = Vec::new();
-    clap_mangen::Man::new(command)
-        .render(&mut buffer)
-        .expect("render man page");
-    String::from_utf8(buffer).expect("man page output is UTF-8")
+    let name = command.get_name().to_string();
+    let about = command
+        .get_about()
+        .or_else(|| command.get_long_about())
+        .map(|text| text.to_string())
+        .unwrap_or_default();
+
+    let mut output = String::new();
+    output.push_str(".ie \\n(.g .ds Aq \\(aq\n");
+    output.push_str(".el .ds Aq '\n");
+    output.push_str(&format!(
+        ".TH {} 1  \"{} \" \n",
+        escape_man_text(&name),
+        escape_man_text(&name)
+    ));
+    output.push_str(".SH NAME\n");
+    output.push_str(&format!(
+        "{} \\- {}\n",
+        escape_man_text(&name),
+        escape_man_text(&about)
+    ));
+    output.push_str(".SH SYNOPSIS\n");
+    render_man_usage_block(&mut output, &command, &name);
+
+    if !about.is_empty() {
+        output.push_str(".SH DESCRIPTION\n");
+        output.push_str(&format!("{}\n", escape_man_text(&about)));
+        if let Some(long_about) = command.get_long_about() {
+            if Some(long_about) != command.get_about() {
+                output.push_str(".PP\n");
+                output.push_str(&format!("{}\n", escape_man_text(&long_about.to_string())));
+            }
+        }
+    }
+
+    let visible_arguments = collect_visible_arguments(&command);
+    if !visible_arguments.is_empty() {
+        output.push_str(".SH OPTIONS\n");
+        for argument in visible_arguments {
+            render_argument_man(&mut output, argument);
+        }
+    }
+
+    let visible_subcommands: Vec<_> = command
+        .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
+        .collect();
+    if !visible_subcommands.is_empty() {
+        output.push_str(".SH SUBCOMMANDS\n");
+        for subcommand in &visible_subcommands {
+            output.push_str(".TP\n");
+            output.push_str(&format!(
+                ".B \"{}\"\n",
+                escape_man_text(&format!("{name} {}", subcommand.get_name()))
+            ));
+            if let Some(about) = subcommand
+                .get_about()
+                .or_else(|| subcommand.get_long_about())
+            {
+                output.push_str(&format!("{}\n", escape_man_text(&about.to_string())));
+            }
+        }
+
+        output.push_str(".SH COMMANDS\n");
+        for subcommand in visible_subcommands {
+            let subcommand_path = format!("{name} {}", subcommand.get_name());
+            render_man_command(subcommand, &subcommand_path, &mut output);
+        }
+    }
+
+    output
 }
 
 fn render_markdown_manual(command: Command) -> String {
@@ -231,6 +297,60 @@ fn render_markdown_manual(command: Command) -> String {
     let command_path = command.get_name().to_string();
     render_markdown_command(&command, &command_path, &mut output, 1);
     output
+}
+
+fn render_man_command(command: &Command, command_path: &str, output: &mut String) {
+    output.push_str(&format!(".SS \"{}\"\n", escape_man_text(command_path)));
+
+    if let Some(about) = command.get_about() {
+        output.push_str(&format!("{}\n", escape_man_text(&about.to_string())));
+    }
+
+    if let Some(long_about) = command.get_long_about() {
+        if Some(long_about) != command.get_about() {
+            output.push_str(".PP\n");
+            output.push_str(&format!("{}\n", escape_man_text(&long_about.to_string())));
+        }
+    }
+
+    output.push_str(".PP\n");
+    render_man_usage_block(output, command, command_path);
+
+    let visible_arguments = collect_visible_arguments(command);
+    if !visible_arguments.is_empty() {
+        output.push_str(".PP\n");
+        output.push_str(".B Options\n");
+        for argument in visible_arguments {
+            render_argument_man(output, argument);
+        }
+    }
+
+    let visible_subcommands: Vec<_> = command
+        .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
+        .collect();
+    if !visible_subcommands.is_empty() {
+        output.push_str(".PP\n");
+        output.push_str(".B Subcommands\n");
+        for subcommand in &visible_subcommands {
+            output.push_str(".TP\n");
+            output.push_str(&format!(
+                ".B \"{}\"\n",
+                escape_man_text(&format!("{command_path} {}", subcommand.get_name()))
+            ));
+            if let Some(about) = subcommand
+                .get_about()
+                .or_else(|| subcommand.get_long_about())
+            {
+                output.push_str(&format!("{}\n", escape_man_text(&about.to_string())));
+            }
+        }
+
+        for subcommand in visible_subcommands {
+            let subcommand_path = format!("{command_path} {}", subcommand.get_name());
+            render_man_command(subcommand, &subcommand_path, output);
+        }
+    }
 }
 
 fn render_markdown_command(
@@ -315,6 +435,15 @@ fn render_usage(command: &Command, command_path: &str) -> String {
     )
 }
 
+fn render_man_usage_block(output: &mut String, command: &Command, command_path: &str) {
+    output.push_str(".nf\n");
+    output.push_str(".B Usage:\n");
+    for line in render_usage(command, command_path).lines() {
+        output.push_str(&format!("{}\n", escape_man_text(line)));
+    }
+    output.push_str(".fi\n");
+}
+
 fn collect_visible_arguments(command: &Command) -> Vec<&Arg> {
     command
         .get_arguments()
@@ -350,6 +479,31 @@ fn render_argument_markdown(argument: &Arg) -> String {
     line
 }
 
+fn render_argument_man(output: &mut String, argument: &Arg) {
+    output.push_str(".TP\n");
+    output.push_str(&format!(
+        ".B \"{}\"\n",
+        escape_man_text(&render_argument_signature(argument))
+    ));
+
+    if let Some(help) = argument.get_long_help().or_else(|| argument.get_help()) {
+        output.push_str(&format!("{}\n", escape_man_text(&help.to_string())));
+    }
+
+    let mut extras = Vec::new();
+    if let Some(env) = argument.get_env() {
+        extras.push(format!("env: {}", env.to_string_lossy()));
+    }
+    if let Some(defaults) = argument.get_default_values().first() {
+        extras.push(format!("default: {}", defaults.to_string_lossy()));
+    }
+    if !extras.is_empty() {
+        output.push_str(".RS\n");
+        output.push_str(&format!("{}\n", escape_man_text(&extras.join(", "))));
+        output.push_str(".RE\n");
+    }
+}
+
 fn render_argument_signature(argument: &Arg) -> String {
     let mut parts = Vec::new();
 
@@ -379,6 +533,10 @@ fn render_argument_signature(argument: &Arg) -> String {
     signature
 }
 
+fn escape_man_text(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('-', "\\-")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{render_outputs, verify_generated_outputs};
@@ -394,6 +552,10 @@ mod tests {
             .iter()
             .find(|output| output.relative_path.to_string_lossy() == "docs/cli/bbcli.md")
             .expect("bbcli markdown output");
+        let bbcli_man = rendered
+            .iter()
+            .find(|output| output.relative_path.to_string_lossy() == "man/bbcli.1")
+            .expect("bbcli man output");
         let bbd_completions: Vec<_> = rendered
             .iter()
             .filter(|output| {
@@ -420,6 +582,10 @@ mod tests {
             .contents
             .contains("--peer-metadata-flush-delay-secs"));
         assert!(bbcli_markdown.contents.contains("`peer`"));
+        assert!(bbcli_man.contents.contains(".SS \"bbcli peer\""));
+        assert!(bbcli_man.contents.contains(".SS \"bbcli peer connect\""));
+        assert!(bbcli_man.contents.contains(".B \"bbcli peer\""));
+        assert!(!bbcli_man.contents.contains("bbcli\\-peer(1)"));
         assert!(!bbcli_markdown.contents.contains("export-built-in"));
         assert!(!bbd_completions.is_empty());
         assert!(!bbcli_completions.is_empty());

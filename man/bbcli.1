@@ -4,53 +4,411 @@
 .SH NAME
 bbcli \- BarterBackup CLI
 .SH SYNOPSIS
-\fBbbcli\fR [\fB\-\-local\-addr\fR] [\fB\-\-data\-dir\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.nf
+.B Usage:
+Usage: bbcli [OPTIONS] <COMMAND>
+.fi
 .SH DESCRIPTION
 BarterBackup CLI
 .SH OPTIONS
 .TP
-\fB\-\-local\-addr\fR \fI<LOCAL_ADDR>\fR
+.B "\-\-local\-addr <LOCAL_ADDR>"
 local_addr is the local daemon endpoint
 .RS
-May also be specified with the \fBBBCLI_LOCAL_ADDR\fR environment variable. 
+env: BBCLI_LOCAL_ADDR
 .RE
 .TP
-\fB\-\-data\-dir\fR \fI<DATA_DIR>\fR
+.B "\-\-data\-dir <DATA_DIR>"
 data_dir is the base directory for daemon state and local CLI keys
 .RS
-May also be specified with the \fBBBCLI_DATA_DIR\fR environment variable. 
+env: BBCLI_DATA_DIR
 .RE
-.TP
-\fB\-h\fR, \fB\-\-help\fR
-Print help
 .SH SUBCOMMANDS
 .TP
-bbcli\-state(1)
+.B "bbcli state"
 Print daemon state
 .TP
-bbcli\-init(1)
+.B "bbcli init"
 Initialize daemon storage with the main password
 .TP
-bbcli\-unlock(1)
+.B "bbcli unlock"
 Send the main password to the daemon unlock path
 .TP
-bbcli\-stop(1)
+.B "bbcli stop"
 Ask the daemon to shut down gracefully
 .TP
-bbcli\-peer(1)
+.B "bbcli peer"
 Manage known peers
 .TP
-bbcli\-file(1)
+.B "bbcli file"
 Manage files in the latest encrypted content blob
 .TP
-bbcli\-contract(1)
+.B "bbcli contract"
 Inspect and drive contracts with peers
 .TP
-bbcli\-recovery(1)
+.B "bbcli recovery"
 Run recovery and resolve divergent revisions
 .TP
-bbcli\-config(1)
+.B "bbcli config"
 Read or update daemon configuration
+.SH COMMANDS
+.SS "bbcli state"
+Print daemon state
+.PP
+.nf
+.B Usage:
+Usage: bbcli state
+.fi
+.SS "bbcli init"
+Initialize daemon storage with the main password
+.PP
+.nf
+.B Usage:
+Usage: bbcli init [OPTIONS] [PASSWORD]
+.fi
+.PP
+.B Options
 .TP
-bbcli\-help(1)
-Print this message or the help of the given subcommand(s)
+.B "\-\-password\-stdin"
+password_stdin reads the main password from standard input
+.TP
+.B "\-\-wait\-seconds <WAIT_SECONDS>"
+wait_seconds is how long to wait for daemon startup readiness
+.RS
+default: 30
+.RE
+.TP
+.B "password <PASSWORD>"
+password is the inline main password or seed string
+.SS "bbcli unlock"
+Send the main password to the daemon unlock path
+.PP
+.nf
+.B Usage:
+Usage: bbcli unlock [OPTIONS] [PASSWORD]
+.fi
+.PP
+.B Options
+.TP
+.B "\-\-password\-stdin"
+password_stdin reads the main password from standard input
+.TP
+.B "\-\-wait\-seconds <WAIT_SECONDS>"
+wait_seconds is how long to wait for daemon startup readiness
+.RS
+default: 30
+.RE
+.TP
+.B "password <PASSWORD>"
+password is the inline main password or seed string
+.SS "bbcli stop"
+Ask the daemon to shut down gracefully
+.PP
+.nf
+.B Usage:
+Usage: bbcli stop
+.fi
+.SS "bbcli peer"
+Manage known peers
+.PP
+.nf
+.B Usage:
+Usage: bbcli peer <COMMAND>
+.fi
+.PP
+.B Subcommands
+.TP
+.B "bbcli peer connect"
+Add a peer onion identifier to the daemon's known peer list
+.TP
+.B "bbcli peer pin"
+Pin a tracked peer so local policy treats it as operator\-protected
+.TP
+.B "bbcli peer unpin"
+Remove an existing operator pin from a tracked peer
+.TP
+.B "bbcli peer list"
+Print the daemon's current peer inventory
+.SS "bbcli peer connect"
+Add a peer onion identifier to the daemon's known peer list
+.PP
+.nf
+.B Usage:
+Usage: bbcli peer connect <ONION_SERVICE_ID>
+.fi
+.PP
+.B Options
+.TP
+.B "onion_service_id <ONION_SERVICE_ID>"
+onion_service_id is the peer onion service identifier
+.SS "bbcli peer pin"
+Pin a tracked peer so local policy treats it as operator\-protected
+.PP
+.nf
+.B Usage:
+Usage: bbcli peer pin <ONION_SERVICE_ID>
+.fi
+.PP
+.B Options
+.TP
+.B "onion_service_id <ONION_SERVICE_ID>"
+onion_service_id is the peer onion service identifier
+.SS "bbcli peer unpin"
+Remove an existing operator pin from a tracked peer
+.PP
+.nf
+.B Usage:
+Usage: bbcli peer unpin <ONION_SERVICE_ID>
+.fi
+.PP
+.B Options
+.TP
+.B "onion_service_id <ONION_SERVICE_ID>"
+onion_service_id is the peer onion service identifier
+.SS "bbcli peer list"
+Print the daemon's current peer inventory
+.PP
+.nf
+.B Usage:
+Usage: bbcli peer list [OPTIONS]
+.fi
+.PP
+.B Options
+.TP
+.B "\-\-status <STATUS>"
+status filters peers by current local transport state
+.TP
+.B "\-\-with\-contract"
+with_contract keeps only peers with persisted contract state
+.TP
+.B "\-\-without\-contract"
+without_contract keeps only peers without persisted contract state
+.SS "bbcli file"
+Manage files in the latest encrypted content blob
+.PP
+.nf
+.B Usage:
+Usage: bbcli file <COMMAND>
+.fi
+.PP
+.B Subcommands
+.TP
+.B "bbcli file list"
+Print the names of all files in the latest encrypted content blob
+.TP
+.B "bbcli file set"
+Add or replace a file in the latest encrypted content blob
+.TP
+.B "bbcli file get"
+Download a file from the latest encrypted content blob
+.TP
+.B "bbcli file delete"
+Delete a file from the latest encrypted content blob
+.SS "bbcli file list"
+Print the names of all files in the latest encrypted content blob
+.PP
+.nf
+.B Usage:
+Usage: bbcli file list
+.fi
+.SS "bbcli file set"
+Add or replace a file in the latest encrypted content blob
+.PP
+.nf
+.B Usage:
+Usage: bbcli file set <NAME> <PATH>
+.fi
+.PP
+.B Options
+.TP
+.B "name <NAME>"
+name is the stable file name inside the encrypted content set
+.TP
+.B "path <PATH>"
+path is the plaintext file path to upload
+.SS "bbcli file get"
+Download a file from the latest encrypted content blob
+.PP
+.nf
+.B Usage:
+Usage: bbcli file get <NAME> [OUT]
+.fi
+.PP
+.B Options
+.TP
+.B "name <NAME>"
+name is the stable file name inside the encrypted content set
+.TP
+.B "out <OUT>"
+out is the optional output path for the downloaded plaintext file
+.SS "bbcli file delete"
+Delete a file from the latest encrypted content blob
+.PP
+.nf
+.B Usage:
+Usage: bbcli file delete <NAME>
+.fi
+.PP
+.B Options
+.TP
+.B "name <NAME>"
+name is the stable file name inside the encrypted content set
+.SS "bbcli contract"
+Inspect and drive contracts with peers
+.PP
+.nf
+.B Usage:
+Usage: bbcli contract <COMMAND>
+.fi
+.PP
+.B Subcommands
+.TP
+.B "bbcli contract list"
+Print current contract state for known peers
+.TP
+.B "bbcli contract propose"
+Form or renew a contract with a peer and print streamed updates
+.TP
+.B "bbcli contract check"
+Verify a peer contract and print streamed updates
+.SS "bbcli contract list"
+Print current contract state for known peers
+.PP
+.nf
+.B Usage:
+Usage: bbcli contract list
+.fi
+.SS "bbcli contract propose"
+Form or renew a contract with a peer and print streamed updates
+.PP
+.nf
+.B Usage:
+Usage: bbcli contract propose <ONION_SERVICE_ID>
+.fi
+.PP
+.B Options
+.TP
+.B "onion_service_id <ONION_SERVICE_ID>"
+onion_service_id is the peer onion service identifier
+.SS "bbcli contract check"
+Verify a peer contract and print streamed updates
+.PP
+.nf
+.B Usage:
+Usage: bbcli contract check <ONION_SERVICE_ID>
+.fi
+.PP
+.B Options
+.TP
+.B "onion_service_id <ONION_SERVICE_ID>"
+onion_service_id is the peer onion service identifier
+.SS "bbcli recovery"
+Run recovery and resolve divergent revisions
+.PP
+.nf
+.B Usage:
+Usage: bbcli recovery <COMMAND>
+.fi
+.PP
+.B Subcommands
+.TP
+.B "bbcli recovery run"
+Recover the newest known local content version from peers
+.TP
+.B "bbcli recovery conflicts"
+List unresolved and archived conflicting revisions
+.TP
+.B "bbcli recovery checkout"
+Write one conflicting or archived revision to a local directory
+.TP
+.B "bbcli recovery resolve"
+Choose the conflicting revision that should stay active
+.SS "bbcli recovery run"
+Recover the newest known local content version from peers
+.PP
+.nf
+.B Usage:
+Usage: bbcli recovery run
+.fi
+.SS "bbcli recovery conflicts"
+List unresolved and archived conflicting revisions
+.PP
+.nf
+.B Usage:
+Usage: bbcli recovery conflicts
+.fi
+.SS "bbcli recovery checkout"
+Write one conflicting or archived revision to a local directory
+.PP
+.nf
+.B Usage:
+Usage: bbcli recovery checkout <CONTENT_ID> <OUT_DIR>
+.fi
+.PP
+.B Options
+.TP
+.B "content_id <CONTENT_ID>"
+content_id is the hex\-encoded revision identifier
+.TP
+.B "out_dir <OUT_DIR>"
+out_dir is the local directory that receives the plaintext files
+.SS "bbcli recovery resolve"
+Choose the conflicting revision that should stay active
+.PP
+.nf
+.B Usage:
+Usage: bbcli recovery resolve <CONTENT_ID>
+.fi
+.PP
+.B Options
+.TP
+.B "content_id <CONTENT_ID>"
+content_id is the hex\-encoded revision identifier to keep active
+.SS "bbcli config"
+Read or update daemon configuration
+.PP
+.nf
+.B Usage:
+Usage: bbcli config <COMMAND>
+.fi
+.PP
+.B Subcommands
+.TP
+.B "bbcli config get"
+Print the current configuration and derived storage usage data
+.TP
+.B "bbcli config set"
+Update one or more configuration fields
+.SS "bbcli config get"
+Print the current configuration and derived storage usage data
+.PP
+.nf
+.B Usage:
+Usage: bbcli config get [OPTIONS]
+.fi
+.PP
+.B Options
+.TP
+.B "\-\-peers\-storage"
+peers_storage prints only the peer\-storage budget field
+.TP
+.B "\-\-min\-replicas"
+min_replicas prints only the minimum replica target field
+.TP
+.B "\-\-resource\-policy"
+resource_policy prints only the current read\-only peer runtime limits
+.SS "bbcli config set"
+Update one or more configuration fields
+.PP
+.nf
+.B Usage:
+Usage: bbcli config set [OPTIONS]
+.fi
+.PP
+.B Options
+.TP
+.B "\-\-peers\-storage <PEERS_STORAGE>"
+peers_storage sets the total bytes allocated to peer storage
+.TP
+.B "\-\-min\-replicas <MIN_REPLICAS>"
+min_replicas sets the minimum replica target for our content
