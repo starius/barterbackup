@@ -41,6 +41,13 @@ service BarterBackupClient {
     // try to connect to it.
     rpc ConnectPeer(ConnectPeerRequest) returns (ConnectPeerResponse);
 
+    // PinPeer marks a peer as operator-pinned so it keeps the highest
+    // priority in local peer policy.
+    rpc PinPeer(PinPeerRequest) returns (PinPeerResponse);
+
+    // UnpinPeer removes the operator pin from a peer.
+    rpc UnpinPeer(UnpinPeerRequest) returns (UnpinPeerResponse);
+
     // Peers returns the current local peer inventory without probing peers
     // live over the network.
     rpc Peers(PeersRequest) returns (PeersResponse);
@@ -271,6 +278,20 @@ message ConnectPeerRequest {
 
 message ConnectPeerResponse {}
 
+message PinPeerRequest {
+    // peer is the peer whose operator pin state should be enabled.
+    Peer peer = 1;
+}
+
+message PinPeerResponse {}
+
+message UnpinPeerRequest {
+    // peer is the peer whose operator pin state should be disabled.
+    Peer peer = 1;
+}
+
+message UnpinPeerResponse {}
+
 message PeersRequest {}
 
 enum PeerStatus
@@ -346,6 +367,9 @@ message PeerInfo {
     // next_retry_at is the next scheduled background maintenance retry time
     // for this peer.
     int64 next_retry_at = 15;
+
+    // pinned_by_us reports whether the local operator pinned this peer.
+    bool pinned_by_us = 16;
 }
 
 message PeersResponse {

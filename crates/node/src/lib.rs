@@ -159,6 +159,8 @@ struct PeerInventoryEntry {
     onion_service_id: String,
     /// status is the current locally observed transport state.
     status: PeerInventoryStatus,
+    /// pinned_by_us reports whether the local operator pinned this peer.
+    pinned_by_us: bool,
     /// has_contract reports whether persisted state indicates an active contract relationship.
     has_contract: bool,
     /// score_seconds is the peer's current persisted score.
@@ -1060,6 +1062,38 @@ impl Node {
     /// Return the configured peer onion hostnames in deterministic order.
     pub fn known_peers(&self) -> Vec<String> {
         self.known_peers.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// Persist one operator pin for a tracked peer.
+    pub fn pin_peer(&self, peer_onion: &str) -> Result<(), Status> {
+        if self.is_our_onion(peer_onion) {
+            return Err(self.self_peer_error());
+        }
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
+            .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+        if !self.is_tracked_peer(&peer_public_key)? {
+            return Err(Status::failed_precondition(
+                "peer is not tracked; connect it first",
+            ));
+        }
+
+        self.with_store(|store| store.set_peer_pinned_by_us(peer_public_key.as_bytes(), true))
+    }
+
+    /// Remove one operator pin from a tracked peer.
+    pub fn unpin_peer(&self, peer_onion: &str) -> Result<(), Status> {
+        if self.is_our_onion(peer_onion) {
+            return Err(self.self_peer_error());
+        }
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
+            .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+        if !self.is_tracked_peer(&peer_public_key)? {
+            return Err(Status::failed_precondition(
+                "peer is not tracked; connect it first",
+            ));
+        }
+
+        self.with_store(|store| store.set_peer_pinned_by_us(peer_public_key.as_bytes(), false))
     }
 
     /// Build the peer-exchange request payload from the current known peer set.
@@ -2334,6 +2368,7 @@ impl Node {
             peers.push(PeerInventoryEntry {
                 onion_service_id: peer_onion,
                 status,
+                pinned_by_us: tracked_peer.map(|peer| peer.pinned_by_us).unwrap_or(false),
                 has_contract: tracked_peer.is_some_and(peer_has_contract),
                 score_seconds: tracked_peer
                     .map(|peer| peer.score_seconds)
@@ -2414,6 +2449,7 @@ impl Node {
                         onion_service_id: peer.onion_service_id,
                     }),
                     status: proto_peer_status(peer.status),
+                    pinned_by_us: peer.pinned_by_us,
                     has_contract: peer.has_contract,
                     score_seconds: peer.score_seconds,
                     score_measured_at: peer.score_measured_at,
@@ -3276,6 +3312,38 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
 
         self.node.add_known_peer(&peer.onion_service_id)?;
         Ok(Response::new(clirpc::ConnectPeerResponse {}))
+    }
+
+    async fn pin_peer(
+        &self,
+        request: tonic::Request<clirpc::PinPeerRequest>,
+    ) -> Result<tonic::Response<clirpc::PinPeerResponse>, tonic::Status> {
+        let request = request.into_inner();
+        let peer = request
+            .peer
+            .ok_or_else(|| Status::invalid_argument("peer is required"))?;
+        if peer.onion_service_id.is_empty() {
+            return Err(Status::invalid_argument("peer onion is required"));
+        }
+
+        self.node.pin_peer(&peer.onion_service_id)?;
+        Ok(Response::new(clirpc::PinPeerResponse {}))
+    }
+
+    async fn unpin_peer(
+        &self,
+        request: tonic::Request<clirpc::UnpinPeerRequest>,
+    ) -> Result<tonic::Response<clirpc::UnpinPeerResponse>, tonic::Status> {
+        let request = request.into_inner();
+        let peer = request
+            .peer
+            .ok_or_else(|| Status::invalid_argument("peer is required"))?;
+        if peer.onion_service_id.is_empty() {
+            return Err(Status::invalid_argument("peer onion is required"));
+        }
+
+        self.node.unpin_peer(&peer.onion_service_id)?;
+        Ok(Response::new(clirpc::UnpinPeerResponse {}))
     }
 
     async fn peers(
@@ -4869,6 +4937,10 @@ mod tests {
             first_contact_direction,
             reachability: storedpb::PeerReachability::Unknown as i32,
             last_live_at: 0,
+            pinned_by_us: false,
+            pins_us: false,
+            our_content_last_verified_content_id: Vec::new(),
+            our_content_last_verified_at: 0,
         }
     }
 
@@ -5501,6 +5573,48 @@ mod tests {
                 offline_peer.address().to_string(),
             ]
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn pin_peer_rejects_self_and_unknown_peer() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Node::with_local_storage("pin-validation-owner", filesystem)?;
+        let unknown_peer = Node::new("pin-validation-unknown")?;
+
+        let self_error = node.pin_peer(node.address()).unwrap_err();
+        assert_eq!(self_error.code(), Code::FailedPrecondition);
+        assert!(self_error
+            .message()
+            .contains("local node cannot act as its own peer"));
+
+        let unknown_error = node.pin_peer(unknown_peer.address()).unwrap_err();
+        assert_eq!(unknown_error.code(), Code::FailedPrecondition);
+        assert_eq!(
+            unknown_error.message(),
+            "peer is not tracked; connect it first"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn pin_and_unpin_peer_persist_in_inventory() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Node::with_local_storage("pin-persist-owner", filesystem)?;
+        let peer = Node::new("pin-persist-peer")?;
+
+        node.add_known_peer(peer.address())?;
+        node.pin_peer(peer.address())?;
+        let pinned = peer_inventory_entry(&node, peer.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing pinned peer entry"))?;
+        assert!(pinned.pinned_by_us);
+
+        node.unpin_peer(peer.address())?;
+        let unpinned = peer_inventory_entry(&node, peer.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing unpinned peer entry"))?;
+        assert!(!unpinned.pinned_by_us);
 
         Ok(())
     }

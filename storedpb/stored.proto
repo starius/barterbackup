@@ -121,6 +121,20 @@ message Peer {
     // last_live_at is the Unix timestamp (seconds) when this peer last
     // responded successfully over the transport.
     int64 last_live_at = 10;
+
+    // pinned_by_us reports whether the local operator pinned this peer.
+    bool pinned_by_us = 11;
+
+    // pins_us reports whether this peer most recently told us that it pins us.
+    bool pins_us = 12;
+
+    // our_content_last_verified_content_id is the most recent local content
+    // revision that this peer successfully returned during a contract check.
+    bytes our_content_last_verified_content_id = 13;
+
+    // our_content_last_verified_at is when the last successful verification of
+    // our content on this peer completed.
+    int64 our_content_last_verified_at = 14;
 }
 
 // ConflictRevision describes one locally stored revision involved in a

@@ -18,9 +18,9 @@ use protos::clirpc::{
     CheckContractRequest, CheckoutRevisionRequest, ConnectPeerRequest, DeleteFileRequest,
     ExportBuiltInPeersRequest, File, GetContractsRequest, GetFileRequest, GetStorageConfigRequest,
     InitRequest, ListConflictsRequest, ListFilesRequest, PeerInfo, PeerStatus, PeersRequest,
-    PeersResponse, ProposeContractRequest, RecoverContentRequest, ResolveConflictRequest,
-    SetFileRequest, SetStorageConfigRequest, StateRequest, StateResponse, StopRequest,
-    StorageConfig, UnlockRequest,
+    PeersResponse, PinPeerRequest, ProposeContractRequest, RecoverContentRequest,
+    ResolveConflictRequest, SetFileRequest, SetStorageConfigRequest, StateRequest, StateResponse,
+    StopRequest, StorageConfig, UnlockRequest, UnpinPeerRequest,
 };
 use tlsutil::{connect_pinned_channel, read_keys};
 use tokio::time::sleep;
@@ -172,6 +172,18 @@ enum Command {
 enum PeerCommand {
     /// Add a peer onion identifier to the daemon's known peer list.
     Connect {
+        /// onion_service_id is the peer onion service identifier.
+        onion_service_id: String,
+    },
+
+    /// Pin a tracked peer so local policy treats it as operator-protected.
+    Pin {
+        /// onion_service_id is the peer onion service identifier.
+        onion_service_id: String,
+    },
+
+    /// Remove an existing operator pin from a tracked peer.
+    Unpin {
         /// onion_service_id is the peer onion service identifier.
         onion_service_id: String,
     },
@@ -444,6 +456,8 @@ async fn run_parsed(args: Args) -> Result<()> {
             PeerCommand::Connect { onion_service_id } => {
                 connect_peer(&target, &onion_service_id).await
             }
+            PeerCommand::Pin { onion_service_id } => pin_peer(&target, &onion_service_id).await,
+            PeerCommand::Unpin { onion_service_id } => unpin_peer(&target, &onion_service_id).await,
             PeerCommand::List {
                 status,
                 with_contract,
@@ -774,6 +788,18 @@ async fn connect_peer(target: &LocalCliTarget, onion_service_id: &str) -> Result
     connect_peer_with_client(&mut client, onion_service_id).await
 }
 
+/// Pin one tracked peer on the daemon.
+async fn pin_peer(target: &LocalCliTarget, onion_service_id: &str) -> Result<()> {
+    let mut client = connect_client(target).await?;
+    pin_peer_with_client(&mut client, onion_service_id).await
+}
+
+/// Remove one operator pin from a tracked peer on the daemon.
+async fn unpin_peer(target: &LocalCliTarget, onion_service_id: &str) -> Result<()> {
+    let mut client = connect_client(target).await?;
+    unpin_peer_with_client(&mut client, onion_service_id).await
+}
+
 /// Print the current configured peers.
 async fn peers(target: &LocalCliTarget, filter: PeerListFilter) -> Result<()> {
     let mut client = connect_client(target).await?;
@@ -982,9 +1008,10 @@ fn format_peer_info_line(peer: &PeerInfo) -> String {
         "never".to_string()
     };
     let mut line = format!(
-        "peer={} status={} score_seconds={} score_measured_at={} stored_content_bytes={} latest_known_content_length={} latest_cached_content_length={} stale_cache={} last_live_at={}",
+        "peer={} status={} pinned_by_us={} score_seconds={} score_measured_at={} stored_content_bytes={} latest_known_content_length={} latest_cached_content_length={} stale_cache={} last_live_at={}",
         onion_service_id,
         status,
+        peer.pinned_by_us,
         peer.score_seconds,
         peer.score_measured_at,
         peer.stored_content_bytes,
@@ -1644,6 +1671,36 @@ pub async fn connect_peer_with_client(
     Ok(())
 }
 
+/// Pin one tracked peer through an already connected client.
+pub async fn pin_peer_with_client(
+    client: &mut BarterBackupClientClient<Channel>,
+    onion_service_id: &str,
+) -> Result<()> {
+    client
+        .pin_peer(PinPeerRequest {
+            peer: Some(protos::clirpc::Peer {
+                onion_service_id: onion_service_id.to_string(),
+            }),
+        })
+        .await?;
+    Ok(())
+}
+
+/// Remove one operator pin through an already connected client.
+pub async fn unpin_peer_with_client(
+    client: &mut BarterBackupClientClient<Channel>,
+    onion_service_id: &str,
+) -> Result<()> {
+    client
+        .unpin_peer(UnpinPeerRequest {
+            peer: Some(protos::clirpc::Peer {
+                onion_service_id: onion_service_id.to_string(),
+            }),
+        })
+        .await?;
+    Ok(())
+}
+
 /// Query the current peer inventory through an already connected client.
 pub async fn peers_response_with_client(
     client: &mut BarterBackupClientClient<Channel>,
@@ -2166,6 +2223,14 @@ mod tests {
             }
         ));
 
+        let args = Args::parse_from(["bbcli", "peer", "pin", "peer.onion"]);
+        assert!(matches!(
+            args.cmd,
+            Command::Peer {
+                cmd: PeerCommand::Pin { .. }
+            }
+        ));
+
         let args = Args::parse_from(["bbcli", "file", "set", "alpha.txt", "./alpha.txt"]);
         assert!(matches!(
             args.cmd,
@@ -2304,6 +2369,22 @@ mod tests {
             peers,
             vec![peer_a.address().to_string(), peer_b.address().to_string()]
         );
+        pin_peer_with_client(&mut client, peer_b.address()).await?;
+        let peer_inventory = peers_response_with_client(&mut client).await?;
+        assert!(peer_inventory.peers.iter().any(|peer| {
+            peer.peer
+                .as_ref()
+                .is_some_and(|peer_id| peer_id.onion_service_id == peer_b.address())
+                && peer.pinned_by_us
+        }));
+        unpin_peer_with_client(&mut client, peer_b.address()).await?;
+        let peer_inventory = peers_response_with_client(&mut client).await?;
+        assert!(peer_inventory.peers.iter().any(|peer| {
+            peer.peer
+                .as_ref()
+                .is_some_and(|peer_id| peer_id.onion_service_id == peer_b.address())
+                && !peer.pinned_by_us
+        }));
 
         set_storage_config_with_client(&mut client, 1024, 3).await?;
         let config = get_storage_config_with_client(&mut client).await?;
@@ -2339,6 +2420,7 @@ mod tests {
                         onion_service_id: "contract.onion".to_string(),
                     }),
                     status: PeerStatus::Connected as i32,
+                    pinned_by_us: true,
                     has_contract: true,
                     score_seconds: 7,
                     score_measured_at: 11,
@@ -2358,6 +2440,7 @@ mod tests {
                         onion_service_id: "online.onion".to_string(),
                     }),
                     status: PeerStatus::Online as i32,
+                    pinned_by_us: false,
                     has_contract: false,
                     score_seconds: 0,
                     score_measured_at: 0,
@@ -2381,6 +2464,7 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line.contains("peer=contract.onion")));
+        assert!(lines.iter().any(|line| line.contains("pinned_by_us=true")));
         assert!(lines.iter().any(|line| line.contains("status=connected")));
         assert!(lines.iter().any(|line| line == "online: 1"));
         assert!(lines.iter().any(|line| line.contains("peer=online.onion")));
@@ -2397,6 +2481,7 @@ mod tests {
                         onion_service_id: "contract.onion".to_string(),
                     }),
                     status: PeerStatus::Connected as i32,
+                    pinned_by_us: false,
                     has_contract: true,
                     score_seconds: 7,
                     score_measured_at: 11,
@@ -2416,6 +2501,7 @@ mod tests {
                         onion_service_id: "offline.onion".to_string(),
                     }),
                     status: PeerStatus::Offline as i32,
+                    pinned_by_us: false,
                     has_contract: false,
                     score_seconds: -5,
                     score_measured_at: 31,

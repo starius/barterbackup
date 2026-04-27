@@ -449,6 +449,10 @@ impl Store {
                 first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
                 reachability: storedpb::PeerReachability::Unknown as i32,
                 last_live_at: 0,
+                pinned_by_us: false,
+                pins_us: false,
+                our_content_last_verified_content_id: Vec::new(),
+                our_content_last_verified_at: 0,
             });
         }
         self.persist_peer_state()
@@ -543,9 +547,84 @@ impl Store {
                 first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
                 reachability: storedpb::PeerReachability::Unknown as i32,
                 last_live_at: 0,
+                pinned_by_us: false,
+                pins_us: false,
+                our_content_last_verified_content_id: Vec::new(),
+                our_content_last_verified_at: 0,
             });
         }
 
+        self.persist_peer_state()
+    }
+
+    /// Persist whether the local operator pinned this peer.
+    pub fn set_peer_pinned_by_us(
+        &mut self,
+        onion_pubkey: &[u8],
+        pinned_by_us: bool,
+    ) -> Result<(), StorageError> {
+        if onion_pubkey.is_empty() {
+            return Err(StorageError::InvalidFileName);
+        }
+
+        self.ensure_peer(onion_pubkey)?;
+        let peer = self
+            .peers
+            .iter_mut()
+            .find(|peer| peer.onion_pubkey == onion_pubkey)
+            .expect("peer entry must exist after ensure_peer");
+        peer.pinned_by_us = pinned_by_us;
+        self.persist_peer_state()
+    }
+
+    /// Persist whether this peer most recently told us that it pins us.
+    pub fn set_peer_pins_us(
+        &mut self,
+        onion_pubkey: &[u8],
+        pins_us: bool,
+    ) -> Result<(), StorageError> {
+        if onion_pubkey.is_empty() {
+            return Err(StorageError::InvalidFileName);
+        }
+
+        self.ensure_peer(onion_pubkey)?;
+        let peer = self
+            .peers
+            .iter_mut()
+            .find(|peer| peer.onion_pubkey == onion_pubkey)
+            .expect("peer entry must exist after ensure_peer");
+        peer.pins_us = pins_us;
+        self.persist_peer_state()
+    }
+
+    /// Persist which local revision this peer last returned successfully during
+    /// a contract check.
+    pub fn set_peer_last_verified_our_content(
+        &mut self,
+        onion_pubkey: &[u8],
+        content_id: Option<&[u8]>,
+        verified_at: Option<i64>,
+    ) -> Result<(), StorageError> {
+        if onion_pubkey.is_empty() {
+            return Err(StorageError::InvalidFileName);
+        }
+        if content_id.is_some_and(|content_id| content_id.is_empty()) {
+            return Err(StorageError::InvalidFileName);
+        }
+        if content_id.is_some() != verified_at.is_some() {
+            return Err(StorageError::InvalidFileName);
+        }
+
+        self.ensure_peer(onion_pubkey)?;
+        let peer = self
+            .peers
+            .iter_mut()
+            .find(|peer| peer.onion_pubkey == onion_pubkey)
+            .expect("peer entry must exist after ensure_peer");
+        peer.our_content_last_verified_content_id = content_id
+            .map(|content_id| content_id.to_vec())
+            .unwrap_or_default();
+        peer.our_content_last_verified_at = verified_at.unwrap_or_default();
         self.persist_peer_state()
     }
 
@@ -1504,6 +1583,10 @@ mod tests {
                 first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
                 reachability: storedpb::PeerReachability::Unknown as i32,
                 last_live_at: 0,
+                pinned_by_us: false,
+                pins_us: false,
+                our_content_last_verified_content_id: Vec::new(),
+                our_content_last_verified_at: 0,
             }],
             active_conflict: None,
             archived_conflicts: Vec::new(),
@@ -1781,5 +1864,27 @@ mod tests {
             store.read_mirrored_blob(&content_id),
             Err(StorageError::FileNotFound)
         ));
+    }
+
+    #[test]
+    fn peer_pin_and_verification_metadata_round_trip() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let peer_key = vec![0x33; 32];
+        let content_id = b"verified-local-content-id".to_vec();
+        let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+
+        store.set_peer_pinned_by_us(&peer_key, true).unwrap();
+        store.set_peer_pins_us(&peer_key, true).unwrap();
+        store
+            .set_peer_last_verified_our_content(&peer_key, Some(&content_id), Some(456))
+            .unwrap();
+        drop(store);
+
+        let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        let peer = &reloaded.peers()[0];
+        assert!(peer.pinned_by_us);
+        assert!(peer.pins_us);
+        assert_eq!(peer.our_content_last_verified_content_id, content_id);
+        assert_eq!(peer.our_content_last_verified_at, 456);
     }
 }

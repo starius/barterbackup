@@ -1323,6 +1323,24 @@ impl BarterBackupClient for DaemonService {
         Ok(response)
     }
 
+    async fn pin_peer(
+        &self,
+        request: tonic::Request<clirpc::PinPeerRequest>,
+    ) -> Result<Response<clirpc::PinPeerResponse>, Status> {
+        CliService::new(self.unlocked_node().await?)
+            .pin_peer(request)
+            .await
+    }
+
+    async fn unpin_peer(
+        &self,
+        request: tonic::Request<clirpc::UnpinPeerRequest>,
+    ) -> Result<Response<clirpc::UnpinPeerResponse>, Status> {
+        CliService::new(self.unlocked_node().await?)
+            .unpin_peer(request)
+            .await
+    }
+
     async fn peers(
         &self,
         request: tonic::Request<clirpc::PeersRequest>,
@@ -1541,6 +1559,20 @@ impl BarterBackupClient for DaemonRpcService {
         request: tonic::Request<clirpc::ConnectPeerRequest>,
     ) -> Result<Response<clirpc::ConnectPeerResponse>, Status> {
         self.daemon.connect_peer(request).await
+    }
+
+    async fn pin_peer(
+        &self,
+        request: tonic::Request<clirpc::PinPeerRequest>,
+    ) -> Result<Response<clirpc::PinPeerResponse>, Status> {
+        self.daemon.pin_peer(request).await
+    }
+
+    async fn unpin_peer(
+        &self,
+        request: tonic::Request<clirpc::UnpinPeerRequest>,
+    ) -> Result<Response<clirpc::UnpinPeerResponse>, Status> {
+        self.daemon.unpin_peer(request).await
     }
 
     async fn peers(
@@ -2325,8 +2357,8 @@ mod tests {
     use super::*;
     use bbcli::{
         connect_client_with_keys_dir, get_file_with_client, get_storage_config_with_client,
-        init_with_keys_dir, list_files_with_client, peers_with_client, run_with_args,
-        set_file_with_client, stop_with_client, unlock_with_keys_dir,
+        init_with_keys_dir, list_files_with_client, peers_response_with_client, peers_with_client,
+        run_with_args, set_file_with_client, stop_with_client, unlock_with_keys_dir,
     };
     use clap::CommandFactory;
     #[cfg(unix)]
@@ -3623,6 +3655,17 @@ mod tests {
             "--data-dir",
             data_dir.as_str(),
             "peer",
+            "pin",
+            remote_peer.address(),
+        ])
+        .await?;
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
+            "peer",
             "list",
         ])
         .await?;
@@ -3705,6 +3748,13 @@ mod tests {
         );
         let peers = peers_with_client(&mut client).await?;
         assert_eq!(peers, vec![remote_peer.address().to_string()]);
+        let pinned_inventory = peers_response_with_client(&mut client).await?;
+        assert!(pinned_inventory.peers.iter().any(|peer| {
+            peer.peer
+                .as_ref()
+                .is_some_and(|peer_id| peer_id.onion_service_id == remote_peer.address())
+                && peer.pinned_by_us
+        }));
         let storage_config = get_storage_config_with_client(&mut client).await?;
         let storage_config = storage_config
             .config
@@ -3720,6 +3770,25 @@ mod tests {
             node::resource_policy().max_peer_content_bytes
         );
         assert!(!resource_policy.chunking_supported);
+
+        run_with_args([
+            "bbcli",
+            "--local-addr",
+            daemon_addr.as_str(),
+            "--data-dir",
+            data_dir.as_str(),
+            "peer",
+            "unpin",
+            remote_peer.address(),
+        ])
+        .await?;
+        let unpinned_inventory = peers_response_with_client(&mut client).await?;
+        assert!(unpinned_inventory.peers.iter().any(|peer| {
+            peer.peer
+                .as_ref()
+                .is_some_and(|peer_id| peer_id.onion_service_id == remote_peer.address())
+                && !peer.pinned_by_us
+        }));
 
         run_with_args([
             "bbcli",
