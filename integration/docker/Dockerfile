@@ -1,4 +1,5 @@
-FROM debian:bookworm-slim
+FROM scratch
 ARG BBD_BIN
-COPY ${BBD_BIN} /usr/local/bin/bbd
-ENTRYPOINT ["/usr/local/bin/bbd"]
+COPY integration/docker/container-etc/ /etc/
+COPY ${BBD_BIN} /bbd
+ENTRYPOINT ["/bbd"]

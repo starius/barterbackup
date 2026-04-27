@@ -162,6 +162,14 @@ func (s *Scenario) AddNode(name string, password string) (*Node, error) {
 	if err := os.MkdirAll(nodeDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create node dir for %s: %w", name, err)
 	}
+	passwdPath, groupPath, err := writeContainerIdentityFiles(
+		filepath.Join(nodeDir, "container-etc"),
+		os.Getuid(),
+		os.Getgid(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create container identity files for %s: %w", name, err)
+	}
 
 	localAddr, err := allocateLocalAddr()
 	if err != nil {
@@ -172,6 +180,8 @@ func (s *Scenario) AddNode(name string, password string) (*Node, error) {
 		name:          name,
 		containerName: makeContainerName(filepath.Base(s.rootDir), name),
 		dataDir:       nodeDir,
+		passwdPath:    passwdPath,
+		groupPath:     groupPath,
 		localAddr:     localAddr,
 		password:      password,
 	}

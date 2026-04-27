@@ -8,6 +8,11 @@ It runs real `bbd` daemons in Docker containers and talks to their local
 network in the fast lane, and there is also a separate public-Tor smoke lane.
 Together they exercise Arti, onion services, gRPC, TLS, and recovery.
 
+The runtime image is `scratch`. The harness writes one per-node `/etc/passwd`
+and `/etc/group` pair that matches the current host UID/GID and bind-mounts
+those files into each container so `fs-mistrust` can validate owner-only data
+directories without needing a fuller base image.
+
 ## Run
 
 From the repository root:

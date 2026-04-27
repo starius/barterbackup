@@ -15,6 +15,8 @@ type Node struct {
 	name                          string
 	containerName                 string
 	dataDir                       string
+	passwdPath                    string
+	groupPath                     string
 	localAddr                     string
 	password                      string
 	testClock                     bool
@@ -56,30 +58,12 @@ func (n *Node) SetPeerMetadataFlushDelaySeconds(seconds uint64) {
 // StartLocked starts the daemon container without initializing or unlocking it.
 func (n *Node) StartLocked(ctx context.Context) error {
 	n.ForceRemove(ctx)
-	dockerUser := currentDockerUser()
-	args := []string{
-		"run",
-		"-d",
-		"--name",
-		n.containerName,
-		"--user",
-		dockerUser,
-		"--network",
-		"host",
-		"-v",
-		fmt.Sprintf("%s:/data", n.dataDir),
-		n.suite.imageTag,
-		"--data-dir",
-		"/data",
-		"--local-addr",
-		n.localAddr,
-	}
 	if n.suite.artiConfig != nil {
 		if _, err := n.suite.artiConfig.WriteNodeConfig(n.dataDir); err != nil {
 			return err
 		}
-		args = append(args, "--arti-config", "/data/arti.toml")
 	}
+	args := n.dockerRunArgs()
 	if n.testClock {
 		args = append(args, "--test-clock")
 	}
@@ -100,6 +84,34 @@ func (n *Node) StartLocked(ctx context.Context) error {
 		return fmt.Errorf("start %s container: %w", n.name, err)
 	}
 	return nil
+}
+
+func (n *Node) dockerRunArgs() []string {
+	args := []string{
+		"run",
+		"-d",
+		"--name",
+		n.containerName,
+		"--user",
+		currentDockerUser(),
+		"--network",
+		"host",
+		"-v",
+		fmt.Sprintf("%s:/data", n.dataDir),
+		"-v",
+		fmt.Sprintf("%s:/etc/passwd:ro", n.passwdPath),
+		"-v",
+		fmt.Sprintf("%s:/etc/group:ro", n.groupPath),
+		n.suite.imageTag,
+		"--data-dir",
+		"/data",
+		"--local-addr",
+		n.localAddr,
+	}
+	if n.suite.artiConfig != nil {
+		args = append(args, "--arti-config", "/data/arti.toml")
+	}
+	return args
 }
 
 // ForceRemove removes the node container if it still exists.
@@ -142,4 +154,37 @@ func sanitizeName(value string) string {
 
 func currentDockerUser() string {
 	return strconv.Itoa(os.Getuid()) + ":" + strconv.Itoa(os.Getgid())
+}
+
+func writeContainerIdentityFiles(dir string, uid int, gid int) (string, string, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", "", fmt.Errorf("create container identity dir: %w", err)
+	}
+	username := "bbtest"
+	groupname := "bbtest"
+	if uid == 0 {
+		username = "root"
+	}
+	if gid == 0 {
+		groupname = "root"
+	}
+
+	passwdPath := filepath.Join(dir, "passwd")
+	passwdContents := fmt.Sprintf(
+		"%s:x:%d:%d:BarterBackup Test User:/nonexistent:/sbin/nologin\n",
+		username,
+		uid,
+		gid,
+	)
+	if err := os.WriteFile(passwdPath, []byte(passwdContents), 0o644); err != nil {
+		return "", "", fmt.Errorf("write container passwd: %w", err)
+	}
+
+	groupPath := filepath.Join(dir, "group")
+	groupContents := fmt.Sprintf("%s:x:%d:\n", groupname, gid)
+	if err := os.WriteFile(groupPath, []byte(groupContents), 0o644); err != nil {
+		return "", "", fmt.Errorf("write container group: %w", err)
+	}
+
+	return passwdPath, groupPath, nil
 }
