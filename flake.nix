@@ -162,7 +162,7 @@
           default = package;
         });
 
-      devShells = forAllSystems ({ pkgs, rustToolchain, system }:
+      devShells = forAllSystems ({ pkgs, rustToolchain, system, ... }:
         let
           commonPackages = [
             rustToolchain
