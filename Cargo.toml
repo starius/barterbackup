@@ -12,6 +12,7 @@ members = [
     "crates/nettor",
     "cmd/bbd",
     "cmd/bbcli",
+    "xtask/cli-docs",
 ]
 exclude = ["fuzz"]
 

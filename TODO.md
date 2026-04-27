@@ -4,9 +4,6 @@ These items are grouped by practical product priority.
 
 ## Should do soon
 
-- Generate shell completions, man pages, and Markdown command manuals from the
-  shared `clap` command tree for `bbcli` and `bbd` so the CLI surface stays
-  documented from one source of truth.
 - Add deferred batching for low-value peer metadata writes such as
   reachability updates and liveness-score changes. Those fields are useful,
   but they should not force an encrypted metadata rewrite on every small

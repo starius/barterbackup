@@ -1,0 +1,391 @@
+# `bbcli`
+
+BarterBackup CLI
+
+## Usage
+
+```text
+Usage: bbcli [OPTIONS] <COMMAND>
+```
+
+## Options
+
+- `--local-addr <LOCAL_ADDR>`: local_addr is the local daemon endpoint (env: `BBCLI_LOCAL_ADDR`)
+- `--data-dir <DATA_DIR>`: data_dir is the base directory for daemon state and local CLI keys (env: `BBCLI_DATA_DIR`)
+
+## Subcommands
+
+- `state`: Print daemon state
+- `init`: Initialize daemon storage with the main password
+- `unlock`: Send the main password to the daemon unlock path
+- `stop`: Ask the daemon to shut down gracefully
+- `peer`: Manage known peers
+- `file`: Manage files in the latest encrypted content blob
+- `contract`: Inspect and drive contracts with peers
+- `recovery`: Run recovery and resolve divergent revisions
+- `config`: Read or update daemon configuration
+
+## `bbcli state`
+
+Print daemon state
+
+### Usage
+
+```text
+Usage: bbcli state
+```
+
+## `bbcli init`
+
+Initialize daemon storage with the main password
+
+### Usage
+
+```text
+Usage: bbcli init [OPTIONS] [PASSWORD]
+```
+
+### Options
+
+- `--password-stdin`: password_stdin reads the main password from standard input
+- `--wait-seconds <WAIT_SECONDS>`: wait_seconds is how long to wait for daemon startup readiness (default: `30`)
+- `password <PASSWORD>`: password is the inline main password or seed string
+
+## `bbcli unlock`
+
+Send the main password to the daemon unlock path
+
+### Usage
+
+```text
+Usage: bbcli unlock [OPTIONS] [PASSWORD]
+```
+
+### Options
+
+- `--password-stdin`: password_stdin reads the main password from standard input
+- `--wait-seconds <WAIT_SECONDS>`: wait_seconds is how long to wait for daemon startup readiness (default: `30`)
+- `password <PASSWORD>`: password is the inline main password or seed string
+
+## `bbcli stop`
+
+Ask the daemon to shut down gracefully
+
+### Usage
+
+```text
+Usage: bbcli stop
+```
+
+## `bbcli peer`
+
+Manage known peers
+
+### Usage
+
+```text
+Usage: bbcli peer <COMMAND>
+```
+
+### Subcommands
+
+- `connect`: Add a peer onion identifier to the daemon's known peer list
+- `pin`: Pin a tracked peer so local policy treats it as operator-protected
+- `unpin`: Remove an existing operator pin from a tracked peer
+- `list`: Print the daemon's current peer inventory
+
+### `bbcli peer connect`
+
+Add a peer onion identifier to the daemon's known peer list
+
+#### Usage
+
+```text
+Usage: bbcli peer connect <ONION_SERVICE_ID>
+```
+
+#### Options
+
+- `onion_service_id <ONION_SERVICE_ID>`: onion_service_id is the peer onion service identifier
+
+### `bbcli peer pin`
+
+Pin a tracked peer so local policy treats it as operator-protected
+
+#### Usage
+
+```text
+Usage: bbcli peer pin <ONION_SERVICE_ID>
+```
+
+#### Options
+
+- `onion_service_id <ONION_SERVICE_ID>`: onion_service_id is the peer onion service identifier
+
+### `bbcli peer unpin`
+
+Remove an existing operator pin from a tracked peer
+
+#### Usage
+
+```text
+Usage: bbcli peer unpin <ONION_SERVICE_ID>
+```
+
+#### Options
+
+- `onion_service_id <ONION_SERVICE_ID>`: onion_service_id is the peer onion service identifier
+
+### `bbcli peer list`
+
+Print the daemon's current peer inventory
+
+#### Usage
+
+```text
+Usage: bbcli peer list [OPTIONS]
+```
+
+#### Options
+
+- `--status <STATUS>`: status filters peers by current local transport state
+- `--with-contract`: with_contract keeps only peers with persisted contract state
+- `--without-contract`: without_contract keeps only peers without persisted contract state
+
+## `bbcli file`
+
+Manage files in the latest encrypted content blob
+
+### Usage
+
+```text
+Usage: bbcli file <COMMAND>
+```
+
+### Subcommands
+
+- `list`: Print the names of all files in the latest encrypted content blob
+- `set`: Add or replace a file in the latest encrypted content blob
+- `get`: Download a file from the latest encrypted content blob
+- `delete`: Delete a file from the latest encrypted content blob
+
+### `bbcli file list`
+
+Print the names of all files in the latest encrypted content blob
+
+#### Usage
+
+```text
+Usage: bbcli file list
+```
+
+### `bbcli file set`
+
+Add or replace a file in the latest encrypted content blob
+
+#### Usage
+
+```text
+Usage: bbcli file set <NAME> <PATH>
+```
+
+#### Options
+
+- `name <NAME>`: name is the stable file name inside the encrypted content set
+- `path <PATH>`: path is the plaintext file path to upload
+
+### `bbcli file get`
+
+Download a file from the latest encrypted content blob
+
+#### Usage
+
+```text
+Usage: bbcli file get <NAME> [OUT]
+```
+
+#### Options
+
+- `name <NAME>`: name is the stable file name inside the encrypted content set
+- `out <OUT>`: out is the optional output path for the downloaded plaintext file
+
+### `bbcli file delete`
+
+Delete a file from the latest encrypted content blob
+
+#### Usage
+
+```text
+Usage: bbcli file delete <NAME>
+```
+
+#### Options
+
+- `name <NAME>`: name is the stable file name inside the encrypted content set
+
+## `bbcli contract`
+
+Inspect and drive contracts with peers
+
+### Usage
+
+```text
+Usage: bbcli contract <COMMAND>
+```
+
+### Subcommands
+
+- `list`: Print current contract state for known peers
+- `propose`: Form or renew a contract with a peer and print streamed updates
+- `check`: Verify a peer contract and print streamed updates
+
+### `bbcli contract list`
+
+Print current contract state for known peers
+
+#### Usage
+
+```text
+Usage: bbcli contract list
+```
+
+### `bbcli contract propose`
+
+Form or renew a contract with a peer and print streamed updates
+
+#### Usage
+
+```text
+Usage: bbcli contract propose <ONION_SERVICE_ID>
+```
+
+#### Options
+
+- `onion_service_id <ONION_SERVICE_ID>`: onion_service_id is the peer onion service identifier
+
+### `bbcli contract check`
+
+Verify a peer contract and print streamed updates
+
+#### Usage
+
+```text
+Usage: bbcli contract check <ONION_SERVICE_ID>
+```
+
+#### Options
+
+- `onion_service_id <ONION_SERVICE_ID>`: onion_service_id is the peer onion service identifier
+
+## `bbcli recovery`
+
+Run recovery and resolve divergent revisions
+
+### Usage
+
+```text
+Usage: bbcli recovery <COMMAND>
+```
+
+### Subcommands
+
+- `run`: Recover the newest known local content version from peers
+- `conflicts`: List unresolved and archived conflicting revisions
+- `checkout`: Write one conflicting or archived revision to a local directory
+- `resolve`: Choose the conflicting revision that should stay active
+
+### `bbcli recovery run`
+
+Recover the newest known local content version from peers
+
+#### Usage
+
+```text
+Usage: bbcli recovery run
+```
+
+### `bbcli recovery conflicts`
+
+List unresolved and archived conflicting revisions
+
+#### Usage
+
+```text
+Usage: bbcli recovery conflicts
+```
+
+### `bbcli recovery checkout`
+
+Write one conflicting or archived revision to a local directory
+
+#### Usage
+
+```text
+Usage: bbcli recovery checkout <CONTENT_ID> <OUT_DIR>
+```
+
+#### Options
+
+- `content_id <CONTENT_ID>`: content_id is the hex-encoded revision identifier
+- `out_dir <OUT_DIR>`: out_dir is the local directory that receives the plaintext files
+
+### `bbcli recovery resolve`
+
+Choose the conflicting revision that should stay active
+
+#### Usage
+
+```text
+Usage: bbcli recovery resolve <CONTENT_ID>
+```
+
+#### Options
+
+- `content_id <CONTENT_ID>`: content_id is the hex-encoded revision identifier to keep active
+
+## `bbcli config`
+
+Read or update daemon configuration
+
+### Usage
+
+```text
+Usage: bbcli config <COMMAND>
+```
+
+### Subcommands
+
+- `get`: Print the current configuration and derived storage usage data
+- `set`: Update one or more configuration fields
+
+### `bbcli config get`
+
+Print the current configuration and derived storage usage data
+
+#### Usage
+
+```text
+Usage: bbcli config get [OPTIONS]
+```
+
+#### Options
+
+- `--peers-storage`: peers_storage prints only the peer-storage budget field
+- `--min-replicas`: min_replicas prints only the minimum replica target field
+- `--resource-policy`: resource_policy prints only the current read-only peer runtime limits
+
+### `bbcli config set`
+
+Update one or more configuration fields
+
+#### Usage
+
+```text
+Usage: bbcli config set [OPTIONS]
+```
+
+#### Options
+
+- `--peers-storage <PEERS_STORAGE>`: peers_storage sets the total bytes allocated to peer storage
+- `--min-replicas <MIN_REPLICAS>`: min_replicas sets the minimum replica target for our content
+

@@ -82,6 +82,7 @@ make build-static-linux-arm64
 make build-windows
 make sanitize-address
 make rpc
+make cli-docs
 make integration-test-docker
 make integration-test-docker-tor-smoke
 ```
@@ -97,6 +98,8 @@ dynamic as usual, and the first run downloads the Microsoft SDK pieces that
 `cargo-xwin` needs. `make sanitize-address` is a Linux-only nightly target
 that rebuilds the workspace with AddressSanitizer instrumentation. `make rpc`
 generates the Go `clirpc` stubs under `integration/docker/gen/clirpc`.
+`make cli-docs` regenerates checked-in shell completions, man pages, and
+Markdown CLI manuals under `completions/`, `man/`, and `docs/cli/`.
 
 ## Test
 

@@ -47,6 +47,8 @@ Build and test
 - When preparing commits, run `make fmt` regularly so formatter output stays
   grouped with the code changes that caused it rather than leaking into later
   unrelated commits.
+- After changing the `clap` command surface for `bbd` or `bbcli`, run
+  `make cli-docs` so checked-in completions and manuals stay in sync.
 - Keep test-only CLI flags and options hidden from help output so normal users
   do not discover and invoke them accidentally.
 - Main commands:
@@ -61,6 +63,7 @@ Build and test
   - `make clippy`
   - `make install`
   - `make rpc`
+  - `make cli-docs`
   - `make integration-test-docker`
   - `make integration-test-docker-tor-smoke`
   - `make build-static`

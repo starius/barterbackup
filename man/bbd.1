@@ -1,0 +1,31 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH bbd 1  "bbd " 
+.SH NAME
+bbd \- BarterBackup daemon
+.SH SYNOPSIS
+\fBbbd\fR [\fB\-\-local\-addr\fR] [\fB\-\-data\-dir\fR] [\fB\-\-arti\-config\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+BarterBackup daemon
+.SH OPTIONS
+.TP
+\fB\-\-local\-addr\fR \fI<LOCAL_ADDR>\fR
+local_addr is the local loopback address for the CLI gRPC service
+.RS
+May also be specified with the \fBBBD_LOCAL_ADDR\fR environment variable. 
+.RE
+.TP
+\fB\-\-data\-dir\fR \fI<DATA_DIR>\fR
+data_dir is the base directory for all daemon state
+.RS
+May also be specified with the \fBBBD_DATA_DIR\fR environment variable. 
+.RE
+.TP
+\fB\-\-arti\-config\fR \fI<ARTI_CONFIG>\fR
+arti_config is one optional Arti TOML file for custom test networks
+.RS
+May also be specified with the \fBBBD_ARTI_CONFIG\fR environment variable. 
+.RE
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help

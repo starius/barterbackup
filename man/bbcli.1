@@ -1,0 +1,56 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH bbcli 1  "bbcli " 
+.SH NAME
+bbcli \- BarterBackup CLI
+.SH SYNOPSIS
+\fBbbcli\fR [\fB\-\-local\-addr\fR] [\fB\-\-data\-dir\fR] [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+BarterBackup CLI
+.SH OPTIONS
+.TP
+\fB\-\-local\-addr\fR \fI<LOCAL_ADDR>\fR
+local_addr is the local daemon endpoint
+.RS
+May also be specified with the \fBBBCLI_LOCAL_ADDR\fR environment variable. 
+.RE
+.TP
+\fB\-\-data\-dir\fR \fI<DATA_DIR>\fR
+data_dir is the base directory for daemon state and local CLI keys
+.RS
+May also be specified with the \fBBBCLI_DATA_DIR\fR environment variable. 
+.RE
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH SUBCOMMANDS
+.TP
+bbcli\-state(1)
+Print daemon state
+.TP
+bbcli\-init(1)
+Initialize daemon storage with the main password
+.TP
+bbcli\-unlock(1)
+Send the main password to the daemon unlock path
+.TP
+bbcli\-stop(1)
+Ask the daemon to shut down gracefully
+.TP
+bbcli\-peer(1)
+Manage known peers
+.TP
+bbcli\-file(1)
+Manage files in the latest encrypted content blob
+.TP
+bbcli\-contract(1)
+Inspect and drive contracts with peers
+.TP
+bbcli\-recovery(1)
+Run recovery and resolve divergent revisions
+.TP
+bbcli\-config(1)
+Read or update daemon configuration
+.TP
+bbcli\-help(1)
+Print this message or the help of the given subcommand(s)

@@ -1,0 +1,13 @@
+[package]
+name = "cli-docs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+bbcli = { path = "../../cmd/bbcli" }
+bbd = { path = "../../cmd/bbd" }
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+clap_mangen = "0.2"
+

@@ -1,0 +1,436 @@
+
+using namespace System.Management.Automation
+using namespace System.Management.Automation.Language
+
+Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
+    param($wordToComplete, $commandAst, $cursorPosition)
+
+    $commandElements = $commandAst.CommandElements
+    $command = @(
+        'bbcli'
+        for ($i = 1; $i -lt $commandElements.Count; $i++) {
+            $element = $commandElements[$i]
+            if ($element -isnot [StringConstantExpressionAst] -or
+                $element.StringConstantType -ne [StringConstantType]::BareWord -or
+                $element.Value.StartsWith('-') -or
+                $element.Value -eq $wordToComplete) {
+                break
+        }
+        $element.Value
+    }) -join ';'
+
+    $completions = @(switch ($command) {
+        'bbcli' {
+            [CompletionResult]::new('--local-addr', '--local-addr', [CompletionResultType]::ParameterName, 'local_addr is the local daemon endpoint')
+            [CompletionResult]::new('--data-dir', '--data-dir', [CompletionResultType]::ParameterName, 'data_dir is the base directory for daemon state and local CLI keys')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('state', 'state', [CompletionResultType]::ParameterValue, 'Print daemon state')
+            [CompletionResult]::new('init', 'init', [CompletionResultType]::ParameterValue, 'Initialize daemon storage with the main password')
+            [CompletionResult]::new('unlock', 'unlock', [CompletionResultType]::ParameterValue, 'Send the main password to the daemon unlock path')
+            [CompletionResult]::new('stop', 'stop', [CompletionResultType]::ParameterValue, 'Ask the daemon to shut down gracefully')
+            [CompletionResult]::new('peer', 'peer', [CompletionResultType]::ParameterValue, 'Manage known peers')
+            [CompletionResult]::new('file', 'file', [CompletionResultType]::ParameterValue, 'Manage files in the latest encrypted content blob')
+            [CompletionResult]::new('contract', 'contract', [CompletionResultType]::ParameterValue, 'Inspect and drive contracts with peers')
+            [CompletionResult]::new('recovery', 'recovery', [CompletionResultType]::ParameterValue, 'Run recovery and resolve divergent revisions')
+            [CompletionResult]::new('config', 'config', [CompletionResultType]::ParameterValue, 'Read or update daemon configuration')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'bbcli;state' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;init' {
+            [CompletionResult]::new('--wait-seconds', '--wait-seconds', [CompletionResultType]::ParameterName, 'wait_seconds is how long to wait for daemon startup readiness')
+            [CompletionResult]::new('--password-stdin', '--password-stdin', [CompletionResultType]::ParameterName, 'password_stdin reads the main password from standard input')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;unlock' {
+            [CompletionResult]::new('--wait-seconds', '--wait-seconds', [CompletionResultType]::ParameterName, 'wait_seconds is how long to wait for daemon startup readiness')
+            [CompletionResult]::new('--password-stdin', '--password-stdin', [CompletionResultType]::ParameterName, 'password_stdin reads the main password from standard input')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;stop' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;peer' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('connect', 'connect', [CompletionResultType]::ParameterValue, 'Add a peer onion identifier to the daemon''s known peer list')
+            [CompletionResult]::new('pin', 'pin', [CompletionResultType]::ParameterValue, 'Pin a tracked peer so local policy treats it as operator-protected')
+            [CompletionResult]::new('unpin', 'unpin', [CompletionResultType]::ParameterValue, 'Remove an existing operator pin from a tracked peer')
+            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print the daemon''s current peer inventory')
+            [CompletionResult]::new('export-built-in', 'export-built-in', [CompletionResultType]::ParameterValue, 'Print the Rust source file for the compiled built-in peer list')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'bbcli;peer;connect' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;peer;pin' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;peer;unpin' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;peer;list' {
+            [CompletionResult]::new('--status', '--status', [CompletionResultType]::ParameterName, 'status filters peers by current local transport state')
+            [CompletionResult]::new('--with-contract', '--with-contract', [CompletionResultType]::ParameterName, 'with_contract keeps only peers with persisted contract state')
+            [CompletionResult]::new('--without-contract', '--without-contract', [CompletionResultType]::ParameterName, 'without_contract keeps only peers without persisted contract state')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'bbcli;peer;export-built-in' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;peer;help' {
+            [CompletionResult]::new('connect', 'connect', [CompletionResultType]::ParameterValue, 'Add a peer onion identifier to the daemon''s known peer list')
+            [CompletionResult]::new('pin', 'pin', [CompletionResultType]::ParameterValue, 'Pin a tracked peer so local policy treats it as operator-protected')
+            [CompletionResult]::new('unpin', 'unpin', [CompletionResultType]::ParameterValue, 'Remove an existing operator pin from a tracked peer')
+            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print the daemon''s current peer inventory')
+            [CompletionResult]::new('export-built-in', 'export-built-in', [CompletionResultType]::ParameterValue, 'Print the Rust source file for the compiled built-in peer list')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'bbcli;peer;help;connect' {
+            break
+        }
+        'bbcli;peer;help;pin' {
+            break
+        }
+        'bbcli;peer;help;unpin' {
+            break
+        }
+        'bbcli;peer;help;list' {
+            break
+        }
+        'bbcli;peer;help;export-built-in' {
+            break
+        }
+        'bbcli;peer;help;help' {
+            break
+        }
+        'bbcli;file' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print the names of all files in the latest encrypted content blob')
+            [CompletionResult]::new('set', 'set', [CompletionResultType]::ParameterValue, 'Add or replace a file in the latest encrypted content blob')
+            [CompletionResult]::new('get', 'get', [CompletionResultType]::ParameterValue, 'Download a file from the latest encrypted content blob')
+            [CompletionResult]::new('delete', 'delete', [CompletionResultType]::ParameterValue, 'Delete a file from the latest encrypted content blob')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'bbcli;file;list' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;file;set' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;file;get' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;file;delete' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;file;help' {
+            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print the names of all files in the latest encrypted content blob')
+            [CompletionResult]::new('set', 'set', [CompletionResultType]::ParameterValue, 'Add or replace a file in the latest encrypted content blob')
+            [CompletionResult]::new('get', 'get', [CompletionResultType]::ParameterValue, 'Download a file from the latest encrypted content blob')
+            [CompletionResult]::new('delete', 'delete', [CompletionResultType]::ParameterValue, 'Delete a file from the latest encrypted content blob')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'bbcli;file;help;list' {
+            break
+        }
+        'bbcli;file;help;set' {
+            break
+        }
+        'bbcli;file;help;get' {
+            break
+        }
+        'bbcli;file;help;delete' {
+            break
+        }
+        'bbcli;file;help;help' {
+            break
+        }
+        'bbcli;contract' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print current contract state for known peers')
+            [CompletionResult]::new('propose', 'propose', [CompletionResultType]::ParameterValue, 'Form or renew a contract with a peer and print streamed updates')
+            [CompletionResult]::new('check', 'check', [CompletionResultType]::ParameterValue, 'Verify a peer contract and print streamed updates')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'bbcli;contract;list' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;contract;propose' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;contract;check' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;contract;help' {
+            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print current contract state for known peers')
+            [CompletionResult]::new('propose', 'propose', [CompletionResultType]::ParameterValue, 'Form or renew a contract with a peer and print streamed updates')
+            [CompletionResult]::new('check', 'check', [CompletionResultType]::ParameterValue, 'Verify a peer contract and print streamed updates')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'bbcli;contract;help;list' {
+            break
+        }
+        'bbcli;contract;help;propose' {
+            break
+        }
+        'bbcli;contract;help;check' {
+            break
+        }
+        'bbcli;contract;help;help' {
+            break
+        }
+        'bbcli;recovery' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('run', 'run', [CompletionResultType]::ParameterValue, 'Recover the newest known local content version from peers')
+            [CompletionResult]::new('conflicts', 'conflicts', [CompletionResultType]::ParameterValue, 'List unresolved and archived conflicting revisions')
+            [CompletionResult]::new('checkout', 'checkout', [CompletionResultType]::ParameterValue, 'Write one conflicting or archived revision to a local directory')
+            [CompletionResult]::new('resolve', 'resolve', [CompletionResultType]::ParameterValue, 'Choose the conflicting revision that should stay active')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'bbcli;recovery;run' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;recovery;conflicts' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;recovery;checkout' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;recovery;resolve' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;recovery;help' {
+            [CompletionResult]::new('run', 'run', [CompletionResultType]::ParameterValue, 'Recover the newest known local content version from peers')
+            [CompletionResult]::new('conflicts', 'conflicts', [CompletionResultType]::ParameterValue, 'List unresolved and archived conflicting revisions')
+            [CompletionResult]::new('checkout', 'checkout', [CompletionResultType]::ParameterValue, 'Write one conflicting or archived revision to a local directory')
+            [CompletionResult]::new('resolve', 'resolve', [CompletionResultType]::ParameterValue, 'Choose the conflicting revision that should stay active')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'bbcli;recovery;help;run' {
+            break
+        }
+        'bbcli;recovery;help;conflicts' {
+            break
+        }
+        'bbcli;recovery;help;checkout' {
+            break
+        }
+        'bbcli;recovery;help;resolve' {
+            break
+        }
+        'bbcli;recovery;help;help' {
+            break
+        }
+        'bbcli;config' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('get', 'get', [CompletionResultType]::ParameterValue, 'Print the current configuration and derived storage usage data')
+            [CompletionResult]::new('set', 'set', [CompletionResultType]::ParameterValue, 'Update one or more configuration fields')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'bbcli;config;get' {
+            [CompletionResult]::new('--peers-storage', '--peers-storage', [CompletionResultType]::ParameterName, 'peers_storage prints only the peer-storage budget field')
+            [CompletionResult]::new('--min-replicas', '--min-replicas', [CompletionResultType]::ParameterName, 'min_replicas prints only the minimum replica target field')
+            [CompletionResult]::new('--resource-policy', '--resource-policy', [CompletionResultType]::ParameterName, 'resource_policy prints only the current read-only peer runtime limits')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;config;set' {
+            [CompletionResult]::new('--peers-storage', '--peers-storage', [CompletionResultType]::ParameterName, 'peers_storage sets the total bytes allocated to peer storage')
+            [CompletionResult]::new('--min-replicas', '--min-replicas', [CompletionResultType]::ParameterName, 'min_replicas sets the minimum replica target for our content')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;config;help' {
+            [CompletionResult]::new('get', 'get', [CompletionResultType]::ParameterValue, 'Print the current configuration and derived storage usage data')
+            [CompletionResult]::new('set', 'set', [CompletionResultType]::ParameterValue, 'Update one or more configuration fields')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'bbcli;config;help;get' {
+            break
+        }
+        'bbcli;config;help;set' {
+            break
+        }
+        'bbcli;config;help;help' {
+            break
+        }
+        'bbcli;help' {
+            [CompletionResult]::new('state', 'state', [CompletionResultType]::ParameterValue, 'Print daemon state')
+            [CompletionResult]::new('init', 'init', [CompletionResultType]::ParameterValue, 'Initialize daemon storage with the main password')
+            [CompletionResult]::new('unlock', 'unlock', [CompletionResultType]::ParameterValue, 'Send the main password to the daemon unlock path')
+            [CompletionResult]::new('stop', 'stop', [CompletionResultType]::ParameterValue, 'Ask the daemon to shut down gracefully')
+            [CompletionResult]::new('peer', 'peer', [CompletionResultType]::ParameterValue, 'Manage known peers')
+            [CompletionResult]::new('file', 'file', [CompletionResultType]::ParameterValue, 'Manage files in the latest encrypted content blob')
+            [CompletionResult]::new('contract', 'contract', [CompletionResultType]::ParameterValue, 'Inspect and drive contracts with peers')
+            [CompletionResult]::new('recovery', 'recovery', [CompletionResultType]::ParameterValue, 'Run recovery and resolve divergent revisions')
+            [CompletionResult]::new('config', 'config', [CompletionResultType]::ParameterValue, 'Read or update daemon configuration')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'bbcli;help;state' {
+            break
+        }
+        'bbcli;help;init' {
+            break
+        }
+        'bbcli;help;unlock' {
+            break
+        }
+        'bbcli;help;stop' {
+            break
+        }
+        'bbcli;help;peer' {
+            [CompletionResult]::new('connect', 'connect', [CompletionResultType]::ParameterValue, 'Add a peer onion identifier to the daemon''s known peer list')
+            [CompletionResult]::new('pin', 'pin', [CompletionResultType]::ParameterValue, 'Pin a tracked peer so local policy treats it as operator-protected')
+            [CompletionResult]::new('unpin', 'unpin', [CompletionResultType]::ParameterValue, 'Remove an existing operator pin from a tracked peer')
+            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print the daemon''s current peer inventory')
+            [CompletionResult]::new('export-built-in', 'export-built-in', [CompletionResultType]::ParameterValue, 'Print the Rust source file for the compiled built-in peer list')
+            break
+        }
+        'bbcli;help;peer;connect' {
+            break
+        }
+        'bbcli;help;peer;pin' {
+            break
+        }
+        'bbcli;help;peer;unpin' {
+            break
+        }
+        'bbcli;help;peer;list' {
+            break
+        }
+        'bbcli;help;peer;export-built-in' {
+            break
+        }
+        'bbcli;help;file' {
+            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print the names of all files in the latest encrypted content blob')
+            [CompletionResult]::new('set', 'set', [CompletionResultType]::ParameterValue, 'Add or replace a file in the latest encrypted content blob')
+            [CompletionResult]::new('get', 'get', [CompletionResultType]::ParameterValue, 'Download a file from the latest encrypted content blob')
+            [CompletionResult]::new('delete', 'delete', [CompletionResultType]::ParameterValue, 'Delete a file from the latest encrypted content blob')
+            break
+        }
+        'bbcli;help;file;list' {
+            break
+        }
+        'bbcli;help;file;set' {
+            break
+        }
+        'bbcli;help;file;get' {
+            break
+        }
+        'bbcli;help;file;delete' {
+            break
+        }
+        'bbcli;help;contract' {
+            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print current contract state for known peers')
+            [CompletionResult]::new('propose', 'propose', [CompletionResultType]::ParameterValue, 'Form or renew a contract with a peer and print streamed updates')
+            [CompletionResult]::new('check', 'check', [CompletionResultType]::ParameterValue, 'Verify a peer contract and print streamed updates')
+            break
+        }
+        'bbcli;help;contract;list' {
+            break
+        }
+        'bbcli;help;contract;propose' {
+            break
+        }
+        'bbcli;help;contract;check' {
+            break
+        }
+        'bbcli;help;recovery' {
+            [CompletionResult]::new('run', 'run', [CompletionResultType]::ParameterValue, 'Recover the newest known local content version from peers')
+            [CompletionResult]::new('conflicts', 'conflicts', [CompletionResultType]::ParameterValue, 'List unresolved and archived conflicting revisions')
+            [CompletionResult]::new('checkout', 'checkout', [CompletionResultType]::ParameterValue, 'Write one conflicting or archived revision to a local directory')
+            [CompletionResult]::new('resolve', 'resolve', [CompletionResultType]::ParameterValue, 'Choose the conflicting revision that should stay active')
+            break
+        }
+        'bbcli;help;recovery;run' {
+            break
+        }
+        'bbcli;help;recovery;conflicts' {
+            break
+        }
+        'bbcli;help;recovery;checkout' {
+            break
+        }
+        'bbcli;help;recovery;resolve' {
+            break
+        }
+        'bbcli;help;config' {
+            [CompletionResult]::new('get', 'get', [CompletionResultType]::ParameterValue, 'Print the current configuration and derived storage usage data')
+            [CompletionResult]::new('set', 'set', [CompletionResultType]::ParameterValue, 'Update one or more configuration fields')
+            break
+        }
+        'bbcli;help;config;get' {
+            break
+        }
+        'bbcli;help;config;set' {
+            break
+        }
+        'bbcli;help;help' {
+            break
+        }
+    })
+
+    $completions.Where{ $_.CompletionText -like "$wordToComplete*" } |
+        Sort-Object -Property ListItemText
+}

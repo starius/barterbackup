@@ -32,7 +32,7 @@ STATIC_LINUX_ARM64_ENV := \
 	CXX_aarch64_unknown_linux_musl=aarch64-unknown-linux-musl-g++ \
 	AR_aarch64_unknown_linux_musl=aarch64-unknown-linux-musl-ar
 
-.PHONY: build test unit fmt clippy install rpc integration-test-docker integration-test-docker-tor-smoke build-static build-static-linux-amd64 build-static-linux-arm64 build-windows sanitize-address clean
+.PHONY: build test unit fmt clippy install rpc cli-docs integration-test-docker integration-test-docker-tor-smoke build-static build-static-linux-amd64 build-static-linux-arm64 build-windows sanitize-address clean
 
 build:
 	$(CARGO) build --workspace
@@ -62,6 +62,9 @@ rpc:
 			--go-grpc_opt=module=$(GO_RPC_MODULE) \
 			--go-grpc_opt=Mclirpc/barter_backup_client.proto=$(GO_RPC_MODULE)/gen/clirpc \
 			clirpc/barter_backup_client.proto
+
+cli-docs:
+	$(CARGO) run -p cli-docs --
 
 integration-test-docker:
 	$(MAKE) build-static

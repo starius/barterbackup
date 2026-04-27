@@ -1,7 +1,5 @@
-mod app;
-
 use anyhow::Result;
-use app::Config;
+use bbd::{run, Config};
 use clap::Parser;
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
@@ -13,5 +11,5 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env().add_directive(Level::INFO.into()))
         .init();
 
-    app::run(Config::parse()).await
+    run(Config::parse()).await
 }
