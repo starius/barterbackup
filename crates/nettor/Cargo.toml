@@ -40,6 +40,6 @@ futures = "0.3"
 safelog = "0.8.1"
 tokio-rustls = "0.26"
 tokio-stream = { version = "0.1", features = ["sync"] }
-tonic = { version = "0.14.2", features = ["transport"] }
+tonic = { version = "0.14.5", features = ["transport"] }
 tower = { version = "0.5", features = ["util"] }
 transport = { path = "../transport" }

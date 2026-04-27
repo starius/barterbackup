@@ -761,6 +761,19 @@ mod tests {
         ) -> std::result::Result<tonic::Response<protos::clirpc::PeersResponse>, Status> {
             Err(Status::unimplemented(""))
         }
+        async fn pin_peer(
+            &self,
+            _: Request<protos::clirpc::PinPeerRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::PinPeerResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+        async fn unpin_peer(
+            &self,
+            _: Request<protos::clirpc::UnpinPeerRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::UnpinPeerResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
         async fn export_built_in_peers(
             &self,
             _: Request<protos::clirpc::ExportBuiltInPeersRequest>,

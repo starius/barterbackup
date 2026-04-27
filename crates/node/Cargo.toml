@@ -11,7 +11,7 @@ path = "src/lib.rs"
 anyhow = "1"
 content = { path = "../content" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
-tonic = { version = "0.14.2", features = ["transport", "tls-connect-info", "tls-ring"] }
+tonic = { version = "0.14.5", features = ["transport", "tls-connect-info", "tls-ring"] }
 protos = { path = "../protos" }
 keys = { path = "../keys" }
 storage = { path = "../storage" }

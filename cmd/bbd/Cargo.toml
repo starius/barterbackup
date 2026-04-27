@@ -14,13 +14,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 node = { path = "../../crates/node" }
 protos = { path = "../../crates/protos" }
 storage = { path = "../../crates/storage" }
-tonic = { version = "0.14.2", features = ["transport", "tls-connect-info"] }
+tonic = { version = "0.14.5", features = ["transport", "tls-connect-info"] }
 futures-util = "0.3"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-rustls = "0.26"
 tokio-util = "0.7"
 tlsutil = { path = "../../crates/tlsutil" }
-dirs = "5"
+dirs = "6"
 fs2 = "0.4"
 hex = "0.4"
 keys = { path = "../../crates/keys" }

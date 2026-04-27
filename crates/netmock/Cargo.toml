@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
-tonic = { version = "0.14.2", features = ["transport"] }
+tonic = { version = "0.14.5", features = ["transport"] }
 anyhow = "1"
 tlsutil = { path = "../tlsutil" }
 ed25519-dalek = "1"

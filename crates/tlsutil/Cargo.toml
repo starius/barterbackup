@@ -13,13 +13,13 @@ ed25519-dalek = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 pem = "3"
 rand = "0.7"
-rustls = { version = "0.23.32", features = ["aws-lc-rs"] }
-rustls-post-quantum = "0.2.3"
+rustls = { version = "0.23.39", features = ["aws-lc-rs"] }
+rustls-post-quantum = "0.2.4"
 rcgen = { version = "0.11", default-features = false, features = ["pem"] }
 x509-parser = "0.16"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 tokio-rustls = "0.26"
-tonic = { version = "0.14.2", features = ["transport", "tls-connect-info"] }
+tonic = { version = "0.14.5", features = ["transport", "tls-connect-info"] }
 tower = { version = "0.5", features = ["util"] }
 protos = { path = "../protos" }
 pkcs8 = { version = "0.10", features = ["std"] }
