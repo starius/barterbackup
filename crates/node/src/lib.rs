@@ -107,6 +107,8 @@ enum StorageClass {
 struct PeerBlobReference {
     /// peer_public_key identifies the peer that references the blob.
     peer_public_key: Vec<u8>,
+    /// pinned_by_us reports whether the local operator pinned this peer.
+    pinned_by_us: bool,
     /// score_seconds is the peer's persisted score from our perspective.
     score_seconds: i64,
     /// score_measured_at is when `score_seconds` was last updated.
@@ -227,8 +229,15 @@ pub fn resource_policy() -> clirpc::ResourcePolicy {
 }
 
 /// Return the effective peer priority from persisted origin, score, and direction.
-fn peer_priority(origin: i32, score_seconds: i64, first_contact_direction: i32) -> u8 {
-    if origin == storedpb::PeerOrigin::Manual as i32 {
+fn peer_priority(
+    pinned_by_us: bool,
+    origin: i32,
+    score_seconds: i64,
+    first_contact_direction: i32,
+) -> u8 {
+    if pinned_by_us {
+        6
+    } else if origin == storedpb::PeerOrigin::Manual as i32 {
         5
     } else if score_seconds > 0 {
         4
@@ -247,6 +256,7 @@ fn peer_priority(origin: i32, score_seconds: i64, first_contact_direction: i32) 
 fn peer_eviction_order_key(peer: &storedpb::Peer) -> (u8, i64, i64, Vec<u8>) {
     (
         peer_priority(
+            peer.pinned_by_us,
             peer.origin,
             peer.score_seconds,
             peer.first_contact_direction,
@@ -261,6 +271,7 @@ fn peer_eviction_order_key(peer: &storedpb::Peer) -> (u8, i64, i64, Vec<u8>) {
 fn plan_peer_admission(
     existing_peers: &[storedpb::Peer],
     candidate_public_key: &[u8],
+    candidate_pinned_by_us: bool,
     candidate_origin: i32,
     candidate_score_seconds: i64,
     candidate_first_contact_direction: i32,
@@ -281,6 +292,7 @@ fn plan_peer_admission(
     }
 
     let candidate_priority = peer_priority(
+        candidate_pinned_by_us,
         candidate_origin,
         candidate_score_seconds,
         candidate_first_contact_direction,
@@ -292,6 +304,7 @@ fn plan_peer_admission(
         return PeerAdmissionPlan::Reject;
     };
     let worst_priority = peer_priority(
+        worst_peer.pinned_by_us,
         worst_peer.origin,
         worst_peer.score_seconds,
         worst_peer.first_contact_direction,
@@ -306,8 +319,8 @@ fn plan_peer_admission(
 }
 
 /// Classify one peer score into reserved or best-effort storage.
-fn storage_class(score_seconds: i64) -> StorageClass {
-    if score_seconds > 0 {
+fn storage_class(pinned_by_us: bool, score_seconds: i64) -> StorageClass {
+    if pinned_by_us || score_seconds > 0 {
         StorageClass::Reserved
     } else {
         StorageClass::BestEffort
@@ -659,6 +672,27 @@ impl Node {
             .any(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes()))
     }
 
+    /// Return whether the local operator currently pins one tracked peer.
+    fn is_peer_pinned_by_us(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+    ) -> Result<bool, Status> {
+        Ok(self
+            .tracked_peers()?
+            .into_iter()
+            .find(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes())
+            .map(|peer| peer.pinned_by_us)
+            .unwrap_or(false))
+    }
+
+    /// Return whether the local operator currently pins the peer onion.
+    fn is_peer_onion_pinned_by_us(&self, peer_onion: &str) -> bool {
+        let Ok(peer_public_key) = keys::public_key_from_onion_hostname(peer_onion) else {
+            return false;
+        };
+        self.is_peer_pinned_by_us(&peer_public_key).unwrap_or(false)
+    }
+
     /// Replace the cached known-peer list with what is currently persisted plus built-ins.
     fn refresh_known_peers_from_store(&self) -> Result<(), Status> {
         let tracked_peers = self.tracked_peers()?;
@@ -778,6 +812,7 @@ impl Node {
             match plan_peer_admission(
                 &peers,
                 peer_public_key.as_bytes(),
+                false,
                 origin,
                 0,
                 first_contact_direction,
@@ -921,11 +956,19 @@ impl Node {
             },
         );
         while cache.len() > MAX_CACHED_PEER_CLIENTS {
-            let Some(oldest_key) = cache
+            let oldest_non_pinned = cache
                 .iter()
+                .filter(|(cached_peer_onion, _)| {
+                    !self.is_peer_onion_pinned_by_us(cached_peer_onion)
+                })
                 .min_by_key(|(_, entry)| entry.last_used_at_secs)
-                .map(|(peer_onion, _)| peer_onion.clone())
-            else {
+                .map(|(peer_onion, _)| peer_onion.clone());
+            let Some(oldest_key) = oldest_non_pinned.or_else(|| {
+                cache
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.last_used_at_secs)
+                    .map(|(peer_onion, _)| peer_onion.clone())
+            }) else {
                 break;
             };
             cache.remove(&oldest_key);
@@ -1473,6 +1516,8 @@ impl Node {
             let mut client = self
                 .connect_peer_client_with_timeout(peer_onion, policy.connect_timeout)
                 .await?;
+            let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
+                .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
             let revision = self
                 .peer_rpc_with_timeout(
                     peer_onion,
@@ -1481,6 +1526,7 @@ impl Node {
                     client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
                 )
                 .await?;
+            self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned)?;
             self.maybe_exchange_peers_with_client(peer_onion, &mut client)
                 .await?;
             Ok(revision)
@@ -1664,6 +1710,7 @@ impl Node {
                     .references
                     .push(PeerBlobReference {
                         peer_public_key: peer.onion_pubkey,
+                        pinned_by_us: peer.pinned_by_us,
                         score_seconds: peer.score_seconds,
                         score_measured_at: peer.score_measured_at,
                     });
@@ -1681,7 +1728,8 @@ impl Node {
             .into_iter()
             .filter(|usage| {
                 usage.references.iter().any(|reference| {
-                    storage_class(reference.score_seconds) == StorageClass::Reserved
+                    storage_class(reference.pinned_by_us, reference.score_seconds)
+                        == StorageClass::Reserved
                 })
             })
             .fold(0i64, |used, usage| used.saturating_add(usage.blob_len));
@@ -1710,7 +1758,8 @@ impl Node {
         }
 
         let current_score = self.peer_score_state(peer_public_key)?.0;
-        let incoming_class = storage_class(current_score);
+        let pinned_by_us = self.is_peer_pinned_by_us(peer_public_key)?;
+        let incoming_class = storage_class(pinned_by_us, current_score);
         let peer_key = peer_public_key.as_bytes();
         let mut total_used = 0i64;
         let mut protected_used = 0i64;
@@ -1739,10 +1788,10 @@ impl Node {
             }
 
             total_used = total_used.saturating_add(usage.blob_len);
-            if remaining_references
-                .iter()
-                .any(|reference| storage_class(reference.score_seconds) == StorageClass::Reserved)
-            {
+            if remaining_references.iter().any(|reference| {
+                storage_class(reference.pinned_by_us, reference.score_seconds)
+                    == StorageClass::Reserved
+            }) {
                 protected_used = protected_used.saturating_add(usage.blob_len);
             } else {
                 let best_score = remaining_references
@@ -1834,6 +1883,7 @@ impl Node {
                 let mirrored_state = self.mirrored_blob_state(&content_info.content_id)?;
                 let mut storage_error = None;
                 let current_score = self.peer_score_state(peer_public_key)?.0;
+                let pinned_by_us = self.is_peer_pinned_by_us(peer_public_key)?;
                 let next_cached_content;
 
                 // Refresh the mirrored blob whenever it is missing or locally
@@ -1890,7 +1940,8 @@ impl Node {
                             next_cached_content =
                                 previous_cached_content.clone().filter(|cached_content| {
                                     cached_content.content_id != content_info.content_id
-                                        && storage_class(current_score) == StorageClass::Reserved
+                                        && storage_class(pinned_by_us, current_score)
+                                            == StorageClass::Reserved
                                 });
                             warn!(
                                 peer = %peer_onion,
@@ -1970,6 +2021,15 @@ impl Node {
                 .map(|peer| (peer.score_seconds, peer.score_measured_at))
                 .unwrap_or((0, 0)))
         })
+    }
+
+    /// Persist the latest remote claim about whether this peer pins us.
+    fn record_remote_pin_claim(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+        pins_us: bool,
+    ) -> Result<(), Status> {
+        self.with_store(|store| store.set_peer_pins_us(peer_public_key.as_bytes(), pins_us))
     }
 
     /// Persist the updated score state for a peer.
@@ -2496,6 +2556,8 @@ impl Node {
                     .await
                 {
                     online = true;
+                    let _ =
+                        self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned);
                     our_remaining_seconds = revision.requester_remaining_seconds;
                     our_content_synced =
                         self.our_content_synced_with_peer(revision.requester_content.as_ref())?;
@@ -2639,6 +2701,7 @@ impl Node {
                 client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
             )
             .await?;
+        self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned)?;
         let their_content_length = revision
             .responder_content
             .as_ref()
@@ -2828,6 +2891,7 @@ impl Node {
                 client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
             )
             .await?;
+        self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned)?;
         self.sync_peer_content_info(
             peer_onion,
             &peer_public_key,
@@ -3649,11 +3713,23 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
             })
             .transpose()?
             .flatten();
+        let requester_remaining_seconds = peer_identity
+            .as_ref()
+            .map(|peer_identity| self.node.peer_score_state(&peer_identity.public_key))
+            .transpose()?
+            .map(|(score_seconds, _)| score_seconds)
+            .unwrap_or(0);
+        let requester_pinned = peer_identity
+            .as_ref()
+            .map(|peer_identity| self.node.is_peer_pinned_by_us(&peer_identity.public_key))
+            .transpose()?
+            .unwrap_or(false);
         Ok(Response::new(bbrpc::GetContentRevisionResponse {
             requester_content,
-            requester_remaining_seconds: 0,
+            requester_remaining_seconds,
             responder_content: self.node.responder_content()?,
             requester_latest_known_content,
+            requester_pinned,
         }))
     }
 
@@ -4081,6 +4157,7 @@ mod tests {
                 requester_remaining_seconds: 0,
                 responder_content: None,
                 requester_latest_known_content: self.state.requester_content(),
+                requester_pinned: false,
             }))
         }
 
@@ -4178,6 +4255,7 @@ mod tests {
                 requester_remaining_seconds: 0,
                 responder_content: None,
                 requester_latest_known_content: Some(self.state.requester_content.clone()),
+                requester_pinned: false,
             }))
         }
 
@@ -4327,6 +4405,7 @@ mod tests {
                 requester_remaining_seconds: 0,
                 responder_content: None,
                 requester_latest_known_content: Some(self.requester_content.clone()),
+                requester_pinned: false,
             }))
         }
 
@@ -4948,21 +5027,38 @@ mod tests {
     fn peer_priority_follows_product_order() {
         assert!(
             peer_priority(
+                true,
+                storedpb::PeerOrigin::Discovered as i32,
+                0,
+                storedpb::FirstContactDirection::Unknown as i32,
+            ) > peer_priority(
+                false,
                 storedpb::PeerOrigin::Manual as i32,
                 0,
                 storedpb::FirstContactDirection::Unknown as i32,
-            ) > peer_priority(
+            )
+        );
+        assert!(
+            peer_priority(
+                false,
                 storedpb::PeerOrigin::Discovered as i32,
                 1,
+                storedpb::FirstContactDirection::Unknown as i32,
+            ) < peer_priority(
+                false,
+                storedpb::PeerOrigin::Manual as i32,
+                0,
                 storedpb::FirstContactDirection::Unknown as i32,
             )
         );
         assert!(
             peer_priority(
+                false,
                 storedpb::PeerOrigin::Discovered as i32,
                 1,
                 storedpb::FirstContactDirection::Unknown as i32,
             ) > peer_priority(
+                false,
                 storedpb::PeerOrigin::BuiltIn as i32,
                 0,
                 storedpb::FirstContactDirection::Unknown as i32,
@@ -4970,10 +5066,12 @@ mod tests {
         );
         assert!(
             peer_priority(
+                false,
                 storedpb::PeerOrigin::BuiltIn as i32,
                 0,
                 storedpb::FirstContactDirection::Unknown as i32,
             ) > peer_priority(
+                false,
                 storedpb::PeerOrigin::Discovered as i32,
                 0,
                 storedpb::FirstContactDirection::Outbound as i32,
@@ -4981,10 +5079,12 @@ mod tests {
         );
         assert!(
             peer_priority(
+                false,
                 storedpb::PeerOrigin::Discovered as i32,
                 0,
                 storedpb::FirstContactDirection::Outbound as i32,
             ) > peer_priority(
+                false,
                 storedpb::PeerOrigin::Discovered as i32,
                 0,
                 storedpb::FirstContactDirection::Inbound as i32,
@@ -4992,10 +5092,12 @@ mod tests {
         );
         assert!(
             peer_priority(
+                false,
                 storedpb::PeerOrigin::Discovered as i32,
                 0,
                 storedpb::FirstContactDirection::Inbound as i32,
             ) > peer_priority(
+                false,
                 storedpb::PeerOrigin::Discovered as i32,
                 0,
                 storedpb::FirstContactDirection::Unknown as i32,
@@ -5040,6 +5142,7 @@ mod tests {
             plan_peer_admission(
                 std::slice::from_ref(&inbound_peer),
                 &outbound_candidate.onion_pubkey,
+                outbound_candidate.pinned_by_us,
                 outbound_candidate.origin,
                 outbound_candidate.score_seconds,
                 outbound_candidate.first_contact_direction,
@@ -5053,6 +5156,7 @@ mod tests {
             plan_peer_admission(
                 std::slice::from_ref(&inbound_peer),
                 &equal_inbound_candidate.onion_pubkey,
+                equal_inbound_candidate.pinned_by_us,
                 equal_inbound_candidate.origin,
                 equal_inbound_candidate.score_seconds,
                 equal_inbound_candidate.first_contact_direction,
@@ -5064,12 +5168,45 @@ mod tests {
             plan_peer_admission(
                 std::slice::from_ref(&reserved_peer),
                 &built_in_candidate.onion_pubkey,
+                built_in_candidate.pinned_by_us,
                 built_in_candidate.origin,
                 built_in_candidate.score_seconds,
                 built_in_candidate.first_contact_direction,
                 1,
             ),
             PeerAdmissionPlan::Reject
+        );
+    }
+
+    #[test]
+    fn pinned_candidate_outranks_manual_peer_for_admission() {
+        let manual_peer = test_peer(
+            "priority-manual",
+            storedpb::PeerOrigin::Manual as i32,
+            0,
+            storedpb::FirstContactDirection::Unknown as i32,
+        );
+        let mut pinned_candidate = test_peer(
+            "priority-pinned",
+            storedpb::PeerOrigin::Discovered as i32,
+            -10,
+            storedpb::FirstContactDirection::Inbound as i32,
+        );
+        pinned_candidate.pinned_by_us = true;
+
+        assert_eq!(
+            plan_peer_admission(
+                std::slice::from_ref(&manual_peer),
+                &pinned_candidate.onion_pubkey,
+                pinned_candidate.pinned_by_us,
+                pinned_candidate.origin,
+                pinned_candidate.score_seconds,
+                pinned_candidate.first_contact_direction,
+                1,
+            ),
+            PeerAdmissionPlan::Admit {
+                evicted_public_key: Some(manual_peer.onion_pubkey.clone()),
+            }
         );
     }
 
@@ -5105,6 +5242,44 @@ mod tests {
         let known_peers = node.known_peers();
         assert_eq!(known_peers.len(), capacity);
         assert!(known_peers.contains(&manual_peer.address().to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn trim_to_capacity_preserves_pinned_peer() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Node::with_local_storage("pin-trim-owner", filesystem)?;
+        let capacity = 2;
+
+        let pinned_master = test_master_priv("pin-trim-pinned");
+        let pinned_peer = Node::new_for_tests_from_master(&pinned_master)?;
+        let pinned_public_key = keys::public_key_from_onion_hostname(pinned_peer.address())?;
+        node.track_peer_identity_with_capacity(
+            &pinned_public_key,
+            peer_origin_code(false, false),
+            storedpb::FirstContactDirection::Inbound as i32,
+            3,
+        )?;
+        node.pin_peer(pinned_peer.address())?;
+
+        for index in 0..2 {
+            let master = test_master_priv(&format!("pin-trim-peer-{index}"));
+            let peer = Node::new_for_tests_from_master(&master)?;
+            let public_key = keys::public_key_from_onion_hostname(peer.address())?;
+            node.track_peer_identity_with_capacity(
+                &public_key,
+                peer_origin_code(false, false),
+                storedpb::FirstContactDirection::Inbound as i32,
+                3,
+            )?;
+        }
+
+        node.trim_tracked_peers_to_capacity_with_limit(capacity)?;
+        let tracked_peers = node.tracked_peers()?;
+        assert_eq!(tracked_peers.len(), capacity);
+        assert!(tracked_peers
+            .iter()
+            .any(|peer| peer.onion_pubkey == pinned_public_key.as_bytes()));
         Ok(())
     }
 
@@ -5240,6 +5415,40 @@ mod tests {
                 panic!("download unexpectedly returned a reference section");
             }
         }
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn p2p_revision_reports_requester_score_and_pin() -> anyhow::Result<()> {
+        let server_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let server_node = Arc::new(Node::with_local_storage("pin-server", server_filesystem)?);
+        let client_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let client_node = Arc::new(Node::with_local_storage("pin-client", client_filesystem)?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+
+        server_node.set_peer_connector(connector.clone());
+        client_node.set_peer_connector(connector.clone());
+        server_node.add_known_peer(client_node.address())?;
+        let client_public_key = keys::public_key_from_onion_hostname(client_node.address())?;
+        server_node.with_store(|store| {
+            store.set_peer_score(client_public_key.as_bytes(), 321, 100)?;
+            store.set_peer_pinned_by_us(client_public_key.as_bytes(), true)?;
+            Ok(())
+        })?;
+
+        let server = spawn_registered_p2p_server(server_node.clone(), connector.as_ref()).await?;
+        let mut p2p =
+            connect_p2p_client(client_node.clone(), server_node.clone(), connector.as_ref())
+                .await?;
+
+        let revision = p2p
+            .get_content_revision(tonic::Request::new(bbrpc::GetContentRevisionRequest {}))
+            .await?
+            .into_inner();
+        assert_eq!(revision.requester_remaining_seconds, 321);
+        assert!(revision.requester_pinned);
 
         server.abort();
         Ok(())
@@ -5764,6 +5973,50 @@ mod tests {
 
         let _redialed = node.connect_peer_client(&peer_onions[0]).await?;
         assert_eq!(counting_connector.dial_count(), MAX_CACHED_PEER_CLIENTS + 3);
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pinned_peer_client_survives_cache_pressure() -> anyhow::Result<()> {
+        let clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage_and_clock(
+            "cache-pin-owner",
+            filesystem,
+            clock.clone(),
+        )?);
+        let base_connector = Arc::new(PlainPeerConnector::new());
+        let counting_connector = Arc::new(FlakyPeerConnector::new(base_connector.clone(), 0));
+        node.set_peer_connector(counting_connector.clone());
+
+        let (endpoint, server) = spawn_plain_peer_server(StaticPeerService::new(
+            bbrpc::GetContentRevisionResponse::default(),
+            DownloadBehavior::Response(bbrpc::DownloadResponse::default()),
+        ))
+        .await?;
+
+        let mut peer_onions = Vec::new();
+        for index in 0..(MAX_CACHED_PEER_CLIENTS + 2) {
+            let peer_identity = Node::new(&format!("cache-pin-peer-{index}"))?;
+            base_connector.register_peer(peer_identity.address(), &endpoint);
+            node.add_known_peer(peer_identity.address())?;
+            peer_onions.push(peer_identity.address().to_string());
+        }
+        node.pin_peer(&peer_onions[0])?;
+
+        for peer_onion in &peer_onions {
+            let _client = node.connect_peer_client(peer_onion).await?;
+            clock.advance(Duration::from_secs(1));
+        }
+
+        assert!(node.has_cached_peer_client(&peer_onions[0]));
+        let cached_unpinned = peer_onions[1..]
+            .iter()
+            .filter(|peer_onion| node.has_cached_peer_client(peer_onion))
+            .count();
+        assert_eq!(cached_unpinned, MAX_CACHED_PEER_CLIENTS - 1);
 
         server.abort();
         Ok(())
@@ -6413,6 +6666,45 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn get_contracts_persists_remote_pin_claim() -> anyhow::Result<()> {
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage(
+            "pin-claim-requester",
+            requester_filesystem,
+        )?);
+        let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let responder_node = Arc::new(Node::with_local_storage(
+            "pin-claim-responder",
+            responder_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        responder_node.set_peer_connector(connector.clone());
+        requester_node.add_known_peer(responder_node.address())?;
+        responder_node.add_known_peer(requester_node.address())?;
+
+        let requester_public_key = keys::public_key_from_onion_hostname(requester_node.address())?;
+        responder_node.with_store(|store| {
+            store.set_peer_pinned_by_us(requester_public_key.as_bytes(), true)?;
+            Ok(())
+        })?;
+
+        let requester_server =
+            spawn_registered_p2p_server(requester_node.clone(), connector.as_ref()).await?;
+        let responder_server =
+            spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
+
+        let _contracts = requester_node.get_contracts_response().await?;
+        let peer = peer_entry(requester_node.as_ref(), responder_node.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing peer entry"))?;
+        assert!(peer.pins_us);
+
+        requester_server.abort();
+        responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn positive_score_peer_can_evict_best_effort_cache() -> anyhow::Result<()> {
         let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let local_node = Arc::new(Node::with_local_storage("local-budget", local_filesystem)?);
@@ -6494,6 +6786,86 @@ mod tests {
 
         best_effort_server.abort();
         reserved_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pinned_peer_can_evict_best_effort_cache_even_with_negative_score() -> anyhow::Result<()>
+    {
+        let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let local_node = Arc::new(Node::with_local_storage(
+            "local-pinned-budget",
+            local_filesystem,
+        )?);
+        let best_effort_filesystem: Arc<dyn Filesystem> =
+            Arc::new(storage::MemoryFilesystem::new());
+        let best_effort_node = Arc::new(Node::with_local_storage(
+            "best-effort-pinned-peer",
+            best_effort_filesystem,
+        )?);
+        let pinned_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let pinned_node = Arc::new(Node::with_local_storage("pinned-peer", pinned_filesystem)?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        local_node.set_peer_connector(connector.clone());
+        best_effort_node.set_peer_connector(connector.clone());
+        pinned_node.set_peer_connector(connector.clone());
+        local_node.add_known_peer(best_effort_node.address())?;
+        local_node.add_known_peer(pinned_node.address())?;
+        local_node.pin_peer(pinned_node.address())?;
+
+        let best_effort_cli = CliService::new(best_effort_node.clone());
+        best_effort_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+        let pinned_cli = CliService::new(pinned_node.clone());
+        pinned_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: b"bravo-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let best_effort_server =
+            spawn_registered_p2p_server(best_effort_node.clone(), connector.as_ref()).await?;
+        let pinned_server =
+            spawn_registered_p2p_server(pinned_node.clone(), connector.as_ref()).await?;
+
+        local_node
+            .propose_contract_updates(best_effort_node.address())
+            .await?;
+        let best_effort_content = best_effort_node.current_content_info()?.unwrap();
+        assert!(cached_peer_blob(
+            local_node.as_ref(),
+            &best_effort_content.content_id
+        )?);
+
+        *local_node.storage_config.lock().unwrap() = clirpc::StorageConfig {
+            allocated_storage_for_peers: best_effort_content.content_length,
+            min_replicas: 0,
+        };
+
+        local_node
+            .propose_contract_updates(pinned_node.address())
+            .await?;
+        let pinned_content = pinned_node.current_content_info()?.unwrap();
+        assert!(!cached_peer_blob(
+            local_node.as_ref(),
+            &best_effort_content.content_id
+        )?);
+        assert!(cached_peer_blob(
+            local_node.as_ref(),
+            &pinned_content.content_id
+        )?);
+
+        best_effort_server.abort();
+        pinned_server.abort();
         Ok(())
     }
 
@@ -6605,6 +6977,95 @@ mod tests {
         let remote_public_key = keys::public_key_from_onion_hostname(remote_node.address())?;
         local_node
             .with_store(|store| store.set_peer_score(remote_public_key.as_bytes(), 10, 100))?;
+
+        remote_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: vec![b'x'; 1024 * 1024],
+                }),
+            }))
+            .await?;
+        let version_2 = remote_node.current_content_info()?.unwrap();
+        assert!(version_2.content_length > version_1.content_length);
+
+        let error = local_node
+            .propose_contract_updates(remote_node.address())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+        assert!(cached_peer_blob(
+            local_node.as_ref(),
+            &version_1.content_id
+        )?);
+        assert!(!cached_peer_blob(
+            local_node.as_ref(),
+            &version_2.content_id
+        )?);
+
+        let peer = peer_entry(local_node.as_ref(), remote_node.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing peer entry"))?;
+        assert_eq!(
+            peer.latest_known_content
+                .as_ref()
+                .map(|content| content.content_id.clone()),
+            Some(version_2.content_id.clone())
+        );
+        assert_eq!(
+            peer.latest_cached_content
+                .as_ref()
+                .map(|content| content.content_id.clone()),
+            Some(version_1.content_id.clone())
+        );
+
+        remote_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pinned_peer_keeps_previous_cached_revision_when_newest_wont_fit() -> anyhow::Result<()>
+    {
+        let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let local_node = Arc::new(Node::with_local_storage(
+            "local-pinned-reserved",
+            local_filesystem,
+        )?);
+        let remote_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let remote_node = Arc::new(Node::with_local_storage(
+            "remote-pinned-reserved",
+            remote_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        local_node.set_peer_connector(connector.clone());
+        remote_node.set_peer_connector(connector.clone());
+        local_node.add_known_peer(remote_node.address())?;
+        local_node.pin_peer(remote_node.address())?;
+
+        let remote_cli = CliService::new(remote_node.clone());
+        remote_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: b"small".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let remote_server =
+            spawn_registered_p2p_server(remote_node.clone(), connector.as_ref()).await?;
+        local_node
+            .propose_contract_updates(remote_node.address())
+            .await?;
+        let version_1 = remote_node.current_content_info()?.unwrap();
+        assert!(cached_peer_blob(
+            local_node.as_ref(),
+            &version_1.content_id
+        )?);
+
+        *local_node.storage_config.lock().unwrap() = clirpc::StorageConfig {
+            allocated_storage_for_peers: version_1.content_length,
+            min_replicas: 0,
+        };
 
         remote_cli
             .set_file(tonic::Request::new(clirpc::SetFileRequest {
@@ -7109,6 +7570,7 @@ mod tests {
                 requester_remaining_seconds: 0,
                 responder_content: None,
                 requester_latest_known_content: Some(content_info.clone()),
+                requester_pinned: false,
             },
             DownloadBehavior::Response(bbrpc::DownloadResponse {
                 total_length: i64::try_from(blob.len()).unwrap_or(i64::MAX) + 1,
@@ -7672,6 +8134,7 @@ mod tests {
                 requester_remaining_seconds: 0,
                 responder_content: None,
                 requester_latest_known_content: Some(version_2.clone()),
+                requester_pinned: false,
             },
             DownloadBehavior::Response(bbrpc::DownloadResponse {
                 total_length: i64::try_from(blob_1.len()).unwrap_or(i64::MAX),
@@ -7762,6 +8225,7 @@ mod tests {
                 requester_remaining_seconds: 0,
                 responder_content: None,
                 requester_latest_known_content: Some(version_a.clone()),
+                requester_pinned: false,
             },
             DownloadBehavior::Response(bbrpc::DownloadResponse {
                 total_length: i64::try_from(blob_a.len()).unwrap_or(i64::MAX),
@@ -7780,6 +8244,7 @@ mod tests {
                 requester_remaining_seconds: 0,
                 responder_content: None,
                 requester_latest_known_content: Some(version_b.clone()),
+                requester_pinned: false,
             },
             DownloadBehavior::Response(bbrpc::DownloadResponse {
                 total_length: i64::try_from(blob_b.len()).unwrap_or(i64::MAX),
@@ -7901,6 +8366,7 @@ mod tests {
                 requester_remaining_seconds: 0,
                 responder_content: None,
                 requester_latest_known_content: Some(version_1.clone()),
+                requester_pinned: false,
             },
             DownloadBehavior::Response(bbrpc::DownloadResponse {
                 total_length: i64::try_from(blob_1.len()).unwrap_or(i64::MAX),
@@ -7947,6 +8413,7 @@ mod tests {
                 requester_remaining_seconds: 0,
                 responder_content: None,
                 requester_latest_known_content: Some(version_2.clone()),
+                requester_pinned: false,
             },
             DownloadBehavior::Response(bbrpc::DownloadResponse {
                 total_length: i64::try_from(blob_2.len()).unwrap_or(i64::MAX),
@@ -8050,6 +8517,7 @@ mod tests {
                 requester_remaining_seconds: 0,
                 responder_content: None,
                 requester_latest_known_content: Some(version_1.clone()),
+                requester_pinned: false,
             },
             DownloadBehavior::Response(bbrpc::DownloadResponse {
                 total_length: i64::try_from(blob_1.len()).unwrap_or(i64::MAX),
@@ -8093,6 +8561,7 @@ mod tests {
                 requester_remaining_seconds: 0,
                 responder_content: None,
                 requester_latest_known_content: Some(version_2.clone()),
+                requester_pinned: false,
             },
             DownloadBehavior::Response(bbrpc::DownloadResponse {
                 total_length: i64::try_from(blob_2.len()).unwrap_or(i64::MAX),
@@ -8171,6 +8640,7 @@ mod tests {
             requester_remaining_seconds: 0,
             responder_content: None,
             requester_latest_known_content: Some(content_info.clone()),
+            requester_pinned: false,
         };
 
         // The first peer advertises the right revision but serves a corrupt

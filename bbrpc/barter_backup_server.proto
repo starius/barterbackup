@@ -78,6 +78,10 @@ message GetContentRevisionResponse {
     // requester_latest_known_content is the newest requester revision the
     // responder knows about, even if it no longer caches that revision.
     ContentInfo requester_latest_known_content = 4;
+
+    // requester_pinned reports whether the responder operator currently pins
+    // the requester locally.
+    bool requester_pinned = 5;
 }
 
 message SetContentRevisionRequest {
