@@ -1361,7 +1361,7 @@ func newPublicTorScenario(t *testing.T) *harness.Scenario {
 
 func addNode(t *testing.T, scenario *harness.Scenario, name string, password string) *harness.Node {
 	t.Helper()
-	node, err := scenario.AddNode(name, password)
+	node, err := scenario.AddNode(name, scopedTestPassword(t.Name(), password))
 	if err != nil {
 		t.Fatalf("add node %s: %v", name, err)
 	}
@@ -1380,6 +1380,23 @@ func addConflictNode(t *testing.T, scenario *harness.Scenario, name string, pass
 	node := addTestClockNode(t, scenario, name, password)
 	node.DisableMaintenance()
 	return node
+}
+
+func scopedTestPassword(testName string, password string) string {
+	return fmt.Sprintf("%s [%s]", password, testName)
+}
+
+func TestScopedTestPasswordSeparatesParallelNodeIdentities(t *testing.T) {
+	t.Parallel()
+
+	first := scopedTestPassword("TestOne", "correct horse battery staple")
+	second := scopedTestPassword("TestTwo", "correct horse battery staple")
+	if first == second {
+		t.Fatalf("expected scoped passwords to differ across tests")
+	}
+	if scopedTestPassword("TestOne", "correct horse battery staple") != first {
+		t.Fatalf("expected scoped password derivation to remain deterministic")
+	}
 }
 
 func startLockedNode(t *testing.T, node *harness.Node) {
