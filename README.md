@@ -275,6 +275,8 @@ Inspect contracts and recovery:
 
 ```bash
 bbcli peer list
+bbcli peer pin <peer-onion-id>
+bbcli peer unpin <peer-onion-id>
 bbcli config get
 bbcli config get --resource-policy
 bbcli contract list
@@ -304,10 +306,18 @@ bbcli peer export-built-in > crates/node/src/builtin_peers.rs
 Recovery and conflicts:
 
 - `bbcli peer list` reports the current local peer inventory without dialing peers
-  live, including status, scores, cached bytes, mirrored-peer staleness, and
-  recent failure/backoff context when a peer is timing out or unavailable
+  live, including pin state, storage protection class, tracked-only state,
+  cached bytes, mirrored-peer staleness, and recent failure/backoff context
+  when a peer is timing out or unavailable
+- `bbcli peer pin` marks a friend or otherwise trusted peer as operator-pinned;
+  pinned peers are never evicted from mirrored storage accounting and stay at
+  the top of outbound connection-priority decisions
+- `bbcli peer unpin` removes that local operator override without changing the
+  peer's current mirrored content directly
 - `bbcli config get` reports the current writable storage config plus derived
-  storage information
+  storage information, including pinned/protected/disposable byte totals,
+  tracked-only peer count, offline-blocking bytes, reclaimable bytes, and the
+  current fresh-replica horizon for our own content
 - `bbcli config get --resource-policy` reports the current fixed peer-content
   ceiling, peer transport message limit, retry timing policy, and related
   runtime resource bounds

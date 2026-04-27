@@ -7,9 +7,6 @@ These items are grouped by practical product priority.
 - Decide where the configurable local-content size limit belongs and what the
   default policy should be. `bbcli file set` should reject changes that exceed
   that limit once the content-size config is added.
-- Extend storage accounting beyond the fixed 1 GiB peer budget and current
-  score-tier policy. Expiration policy, historical visibility, and richer
-  operator reporting for mirrored peer storage are still basic.
 
 ## Should do soon
 
