@@ -575,15 +575,24 @@ impl Store {
                 .iter_mut()
                 .find(|peer| peer.onion_pubkey == onion_pubkey)
                 .expect("peer entry must exist after ensure");
-            peer.latest_known_content = latest_known_content_id.map(|content_id| {
+            let next_latest_known = latest_known_content_id.map(|content_id| {
                 peer_content_summary(content_id, latest_known_content_length.unwrap_or(0))
             });
-            peer.latest_cached_content = latest_cached_content_id.map(|content_id| {
+            let next_latest_cached = latest_cached_content_id.map(|content_id| {
                 peer_content_summary(content_id, latest_cached_content_length.unwrap_or(0))
             });
-            peer.content_id = latest_known_content_id
+            let next_content_id = latest_known_content_id
                 .map(|content_id| content_id.to_vec())
                 .unwrap_or_default();
+            if peer.latest_known_content == next_latest_known
+                && peer.latest_cached_content == next_latest_cached
+                && peer.content_id == next_content_id
+            {
+                return Ok(false);
+            }
+            peer.latest_known_content = next_latest_known;
+            peer.latest_cached_content = next_latest_cached;
+            peer.content_id = next_content_id;
             Ok(true)
         })
     }
@@ -595,16 +604,42 @@ impl Store {
         score_seconds: i64,
         score_measured_at: i64,
     ) -> Result<(), StorageError> {
+        self.set_peer_score_with_persist(onion_pubkey, score_seconds, score_measured_at, true)
+            .map(|_| ())
+    }
+
+    /// Stage the persisted score state for a peer without immediately writing
+    /// the encrypted peer sidecar.
+    pub fn set_peer_score_pending(
+        &mut self,
+        onion_pubkey: &[u8],
+        score_seconds: i64,
+        score_measured_at: i64,
+    ) -> Result<bool, StorageError> {
+        self.set_peer_score_with_persist(onion_pubkey, score_seconds, score_measured_at, false)
+    }
+
+    /// Set the persisted score state for a peer with explicit write policy.
+    fn set_peer_score_with_persist(
+        &mut self,
+        onion_pubkey: &[u8],
+        score_seconds: i64,
+        score_measured_at: i64,
+        persist: bool,
+    ) -> Result<bool, StorageError> {
         if onion_pubkey.is_empty() {
             return Err(StorageError::InvalidFileName);
         }
 
-        self.update_peers(|peers| {
+        self.update_peers_with_persist(persist, |peers| {
             ensure_peer_entry(peers, onion_pubkey);
             let peer = peers
                 .iter_mut()
                 .find(|peer| peer.onion_pubkey == onion_pubkey)
                 .expect("peer entry must exist after ensure");
+            if peer.score_seconds == score_seconds && peer.score_measured_at == score_measured_at {
+                return Ok(false);
+            }
             peer.score_seconds = score_seconds;
             peer.score_measured_at = score_measured_at;
             Ok(true)
@@ -641,11 +676,33 @@ impl Store {
         onion_pubkey: &[u8],
         pins_us: bool,
     ) -> Result<(), StorageError> {
+        self.set_peer_pins_us_with_persist(onion_pubkey, pins_us, true)
+            .map(|_| ())
+    }
+
+    /// Stage whether this peer most recently told us that it pins us without
+    /// immediately writing the encrypted peer sidecar.
+    pub fn set_peer_pins_us_pending(
+        &mut self,
+        onion_pubkey: &[u8],
+        pins_us: bool,
+    ) -> Result<bool, StorageError> {
+        self.set_peer_pins_us_with_persist(onion_pubkey, pins_us, false)
+    }
+
+    /// Persist whether this peer most recently told us that it pins us under
+    /// the requested durability policy.
+    fn set_peer_pins_us_with_persist(
+        &mut self,
+        onion_pubkey: &[u8],
+        pins_us: bool,
+        persist: bool,
+    ) -> Result<bool, StorageError> {
         if onion_pubkey.is_empty() {
             return Err(StorageError::InvalidFileName);
         }
 
-        self.update_peers(|peers| {
+        self.update_peers_with_persist(persist, |peers| {
             ensure_peer_entry(peers, onion_pubkey);
             let peer = peers
                 .iter_mut()
@@ -667,6 +724,40 @@ impl Store {
         content_id: Option<&[u8]>,
         verified_at: Option<i64>,
     ) -> Result<(), StorageError> {
+        self.set_peer_last_verified_our_content_with_persist(
+            onion_pubkey,
+            content_id,
+            verified_at,
+            true,
+        )
+        .map(|_| ())
+    }
+
+    /// Stage which local revision this peer most recently passed a contract
+    /// check for without immediately writing the encrypted peer sidecar.
+    pub fn set_peer_last_verified_our_content_pending(
+        &mut self,
+        onion_pubkey: &[u8],
+        content_id: Option<&[u8]>,
+        verified_at: Option<i64>,
+    ) -> Result<bool, StorageError> {
+        self.set_peer_last_verified_our_content_with_persist(
+            onion_pubkey,
+            content_id,
+            verified_at,
+            false,
+        )
+    }
+
+    /// Persist which local revision this peer last returned successfully during
+    /// a contract check under the requested durability policy.
+    fn set_peer_last_verified_our_content_with_persist(
+        &mut self,
+        onion_pubkey: &[u8],
+        content_id: Option<&[u8]>,
+        verified_at: Option<i64>,
+        persist: bool,
+    ) -> Result<bool, StorageError> {
         if onion_pubkey.is_empty() {
             return Err(StorageError::InvalidFileName);
         }
@@ -677,16 +768,23 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
-        self.update_peers(|peers| {
+        self.update_peers_with_persist(persist, |peers| {
             ensure_peer_entry(peers, onion_pubkey);
             let peer = peers
                 .iter_mut()
                 .find(|peer| peer.onion_pubkey == onion_pubkey)
                 .expect("peer entry must exist after ensure");
-            peer.our_content_last_verified_content_id = content_id
+            let next_content_id = content_id
                 .map(|content_id| content_id.to_vec())
                 .unwrap_or_default();
-            peer.our_content_last_verified_at = verified_at.unwrap_or_default();
+            let next_verified_at = verified_at.unwrap_or_default();
+            if peer.our_content_last_verified_content_id == next_content_id
+                && peer.our_content_last_verified_at == next_verified_at
+            {
+                return Ok(false);
+            }
+            peer.our_content_last_verified_content_id = next_content_id;
+            peer.our_content_last_verified_at = next_verified_at;
             Ok(true)
         })
     }
@@ -698,20 +796,46 @@ impl Store {
         reachability: i32,
         last_live_at: Option<i64>,
     ) -> Result<(), StorageError> {
+        self.set_peer_reachability_with_persist(onion_pubkey, reachability, last_live_at, true)
+            .map(|_| ())
+    }
+
+    /// Stage the latest observed transport reachability for a peer without
+    /// immediately writing the encrypted peer sidecar.
+    pub fn set_peer_reachability_pending(
+        &mut self,
+        onion_pubkey: &[u8],
+        reachability: i32,
+        last_live_at: Option<i64>,
+    ) -> Result<bool, StorageError> {
+        self.set_peer_reachability_with_persist(onion_pubkey, reachability, last_live_at, false)
+    }
+
+    /// Record the latest observed transport reachability for a peer under the
+    /// requested durability policy.
+    fn set_peer_reachability_with_persist(
+        &mut self,
+        onion_pubkey: &[u8],
+        reachability: i32,
+        last_live_at: Option<i64>,
+        persist: bool,
+    ) -> Result<bool, StorageError> {
         if onion_pubkey.is_empty() {
             return Err(StorageError::InvalidFileName);
         }
 
-        self.update_peers(|peers| {
+        self.update_peers_with_persist(persist, |peers| {
             ensure_peer_entry(peers, onion_pubkey);
             let peer = peers
                 .iter_mut()
                 .find(|peer| peer.onion_pubkey == onion_pubkey)
                 .expect("peer entry must exist after ensure");
-            peer.reachability = reachability;
-            if let Some(last_live_at) = last_live_at {
-                peer.last_live_at = last_live_at;
+            let next_last_live_at = last_live_at.unwrap_or(peer.last_live_at);
+            if peer.reachability == reachability && peer.last_live_at == next_last_live_at {
+                return Ok(false);
             }
+            peer.reachability = reachability;
+            peer.last_live_at = next_last_live_at;
             Ok(true)
         })
     }
@@ -751,6 +875,12 @@ impl Store {
                 .iter_mut()
                 .find(|peer| peer.onion_pubkey == onion_pubkey)
             {
+                if peer.content_id.is_empty()
+                    && peer.latest_known_content.is_none()
+                    && peer.latest_cached_content.is_none()
+                {
+                    return Ok(false);
+                }
                 peer.content_id.clear();
                 peer.latest_known_content = None;
                 peer.latest_cached_content = None;
@@ -781,6 +911,11 @@ impl Store {
         let files = self.current_plain_files();
         self.enforce_shared_blob_limit_for_state(&files, &migrated)?;
         self.peers = std::mem::take(&mut migrated);
+        self.persist_peer_state()
+    }
+
+    /// Persist the current in-memory peer sidecar immediately.
+    pub fn flush_peer_state(&self) -> Result<(), StorageError> {
         self.persist_peer_state()
     }
 
@@ -1214,14 +1349,27 @@ impl Store {
         &mut self,
         update: impl FnOnce(&mut Vec<storedpb::Peer>) -> Result<bool, StorageError>,
     ) -> Result<(), StorageError> {
+        self.update_peers_with_persist(true, update).map(|_| ())
+    }
+
+    /// Apply one peer metadata mutation transactionally with explicit
+    /// durability.
+    fn update_peers_with_persist(
+        &mut self,
+        persist: bool,
+        update: impl FnOnce(&mut Vec<storedpb::Peer>) -> Result<bool, StorageError>,
+    ) -> Result<bool, StorageError> {
         let mut next_peers = self.peers.clone();
         if !update(&mut next_peers)? {
-            return Ok(());
+            return Ok(false);
         }
         let files = self.current_plain_files();
         self.enforce_shared_blob_limit_for_state(&files, &next_peers)?;
         self.peers = next_peers;
-        self.persist_peer_state()
+        if persist {
+            self.persist_peer_state()?;
+        }
+        Ok(true)
     }
 
     /// Persist the encrypted peer sidecar without touching the content blob.
@@ -1405,6 +1553,12 @@ mod tests {
         fail_next_write: Mutex<bool>,
     }
 
+    /// CountingFilesystem counts peer-sidecar writes while delegating storage.
+    struct CountingFilesystem {
+        inner: Arc<dyn Filesystem>,
+        peer_state_writes: Mutex<u64>,
+    }
+
     impl Filesystem for FailingFilesystem {
         fn read(&self, name: &str) -> Result<Vec<u8>, StorageError> {
             self.inner.read(name)
@@ -1415,6 +1569,27 @@ mod tests {
             if *fail_next {
                 *fail_next = false;
                 return Err(StorageError::Message("forced write failure".to_string()));
+            }
+            self.inner.write_atomic(name, data)
+        }
+
+        fn remove(&self, name: &str) -> Result<(), StorageError> {
+            self.inner.remove(name)
+        }
+
+        fn list(&self) -> Result<Vec<String>, StorageError> {
+            self.inner.list()
+        }
+    }
+
+    impl Filesystem for CountingFilesystem {
+        fn read(&self, name: &str) -> Result<Vec<u8>, StorageError> {
+            self.inner.read(name)
+        }
+
+        fn write_atomic(&self, name: &str, data: &[u8]) -> Result<(), StorageError> {
+            if name == PEER_STATE_FILE {
+                *self.peer_state_writes.lock().unwrap() += 1;
             }
             self.inner.write_atomic(name, data)
         }
@@ -1549,6 +1724,53 @@ mod tests {
         let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
         assert_eq!(reloaded.peers().len(), 1);
         assert_eq!(reloaded.peers()[0].onion_pubkey, b"peer-a".to_vec());
+    }
+
+    #[test]
+    fn unchanged_peer_content_state_is_a_noop() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+        let peer_key = b"peer-a";
+        let content_id = b"peer-content";
+
+        store
+            .set_peer_content_state(
+                peer_key,
+                Some(content_id),
+                Some(123),
+                Some(content_id),
+                Some(123),
+            )
+            .unwrap();
+        let first_sidecar = fs.read(PEER_STATE_FILE).unwrap();
+
+        store
+            .set_peer_content_state(
+                peer_key,
+                Some(content_id),
+                Some(123),
+                Some(content_id),
+                Some(123),
+            )
+            .unwrap();
+        let second_sidecar = fs.read(PEER_STATE_FILE).unwrap();
+
+        assert_eq!(first_sidecar, second_sidecar);
+    }
+
+    #[test]
+    fn clearing_empty_peer_content_state_is_a_noop() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+        let peer_key = b"peer-a";
+
+        store.ensure_peer(peer_key).unwrap();
+        let first_sidecar = fs.read(PEER_STATE_FILE).unwrap();
+
+        store.clear_peer_content_id(peer_key).unwrap();
+        let second_sidecar = fs.read(PEER_STATE_FILE).unwrap();
+
+        assert_eq!(first_sidecar, second_sidecar);
     }
 
     #[test]
@@ -1791,6 +2013,58 @@ mod tests {
         );
         assert_eq!(reloaded.archived_conflicts()[0].resolved_at, 50);
         assert_eq!(reloaded.archived_conflicts()[0].resolved_at_ns, 60);
+    }
+
+    #[test]
+    fn pending_peer_metadata_requires_explicit_flush() {
+        let base: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let counting = Arc::new(CountingFilesystem {
+            inner: base.clone(),
+            peer_state_writes: Mutex::new(0),
+        });
+        let fs: Arc<dyn Filesystem> = counting.clone();
+        let mut store = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        let peer_key = b"pending-peer";
+
+        store.ensure_peer(peer_key).unwrap();
+        let writes_after_ensure = *counting.peer_state_writes.lock().unwrap();
+        assert_eq!(writes_after_ensure, 1);
+
+        assert!(store.set_peer_score_pending(peer_key, 42, 99).unwrap());
+        assert_eq!(
+            *counting.peer_state_writes.lock().unwrap(),
+            writes_after_ensure
+        );
+        assert_eq!(store.peers()[0].score_seconds, 42);
+
+        let reloaded = Store::new_with_time_source(base.clone(), &master(), time_source()).unwrap();
+        assert_eq!(reloaded.peers()[0].score_seconds, 0);
+
+        store.flush_peer_state().unwrap();
+        assert_eq!(
+            *counting.peer_state_writes.lock().unwrap(),
+            writes_after_ensure + 1
+        );
+
+        let reloaded = Store::new_with_time_source(base, &master(), time_source()).unwrap();
+        assert_eq!(reloaded.peers()[0].score_seconds, 42);
+        assert_eq!(reloaded.peers()[0].score_measured_at, 99);
+    }
+
+    #[test]
+    fn immediate_peer_sidecar_write_persists_pending_low_value_metadata() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+        let peer_key = b"mixed-peer";
+
+        store.ensure_peer(peer_key).unwrap();
+        assert!(store.set_peer_score_pending(peer_key, 12, 34).unwrap());
+        store.set_peer_pinned_by_us(peer_key, true).unwrap();
+
+        let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        assert_eq!(reloaded.peers()[0].score_seconds, 12);
+        assert_eq!(reloaded.peers()[0].score_measured_at, 34);
+        assert!(reloaded.peers()[0].pinned_by_us);
     }
 
     #[test]

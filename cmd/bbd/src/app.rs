@@ -64,6 +64,15 @@ pub struct Config {
     /// disable_maintenance disables the background maintenance loop for tests.
     #[arg(long, env = "BBD_DISABLE_MAINTENANCE", hide = true)]
     pub disable_maintenance: bool,
+
+    /// peer_metadata_flush_delay_secs delays low-value peer metadata writes.
+    #[arg(
+        long,
+        env = "BBD_PEER_METADATA_FLUSH_DELAY_SECS",
+        hide = true,
+        default_value_t = 60
+    )]
+    pub peer_metadata_flush_delay_secs: u64,
 }
 
 impl Config {
@@ -820,6 +829,8 @@ pub struct DaemonService {
     maintenance_config: MaintenanceConfig,
     /// maintenance_wakeup wakes the maintenance loop after local mutations.
     maintenance_wakeup: Arc<Notify>,
+    /// peer_metadata_flush_delay delays low-value peer metadata rewrites.
+    peer_metadata_flush_delay: Duration,
     /// node_state stores the current lock/unlock lifecycle state.
     node_state: Mutex<DaemonNodeState>,
     /// shutdown_request cancels the local RPC server for graceful daemon stop.
@@ -847,6 +858,7 @@ impl DaemonService {
             maintenance_config,
             Arc::new(SystemClock),
             None,
+            node::DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY,
         )
     }
 
@@ -857,6 +869,7 @@ impl DaemonService {
         maintenance_config: MaintenanceConfig,
         clock: Arc<dyn Clock>,
         test_clock: Option<Arc<ManualClock>>,
+        peer_metadata_flush_delay: Duration,
     ) -> Self {
         let started_at = clock.now();
         Self {
@@ -867,6 +880,7 @@ impl DaemonService {
             peer_runtime_factory,
             maintenance_config,
             maintenance_wakeup: Arc::new(Notify::new()),
+            peer_metadata_flush_delay,
             node_state: Mutex::new(DaemonNodeState::Locked),
             shutdown_request: CancellationToken::new(),
         }
@@ -888,6 +902,7 @@ impl DaemonService {
             maintenance_config,
             clock,
             Some(test_clock),
+            node::DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY,
         )
     }
 
@@ -988,10 +1003,11 @@ impl DaemonService {
         // runtime so RPCs can serve real content immediately after unlock.
         let store_dir = self.data_dir.join("local");
         let filesystem = Arc::new(OsFilesystem::new(&store_dir)?);
-        let node = Arc::new(Node::with_local_storage_and_clock(
+        let node = Arc::new(Node::with_local_storage_and_clock_and_flush_delay(
             password,
             filesystem,
             self.clock.clone(),
+            self.peer_metadata_flush_delay,
         )?);
         node.mark_started();
 
@@ -1016,7 +1032,11 @@ impl DaemonService {
             std::mem::replace(&mut *node_state, DaemonNodeState::Locked)
         };
         match previous_state {
-            DaemonNodeState::Unlocked(unlocked) => unlocked.peer_runtime.shutdown().await,
+            DaemonNodeState::Unlocked(unlocked) => {
+                unlocked.peer_runtime.shutdown().await?;
+                unlocked.node.flush_pending_peer_metadata()?;
+                Ok(())
+            }
             DaemonNodeState::Locked | DaemonNodeState::Unlocking => Ok(()),
         }
     }
@@ -2259,6 +2279,7 @@ where
         maintenance_config,
         clock,
         test_clock,
+        Duration::from_secs(config.peer_metadata_flush_delay_secs),
     ));
     let shutdown = service.shutdown_request();
     let listener = tokio::net::TcpListener::bind(config.resolved_local_addr()).await?;
@@ -2554,6 +2575,27 @@ mod tests {
             peer_runtime_factory,
             maintenance_config,
             initial_time,
+        )
+    }
+
+    /// Build a daemon service with the hidden manual test clock, custom runtime
+    /// wiring, and custom low-value peer metadata flush delay.
+    fn test_service_with_test_clock_and_flush_delay(
+        temp_dir: &TempDir,
+        peer_runtime_factory: Arc<dyn PeerRuntimeFactory>,
+        maintenance_config: MaintenanceConfig,
+        initial_time: Timestamp,
+        peer_metadata_flush_delay: Duration,
+    ) -> DaemonService {
+        let test_clock = Arc::new(ManualClock::new(initial_time));
+        let clock: Arc<dyn Clock> = test_clock.clone();
+        DaemonService::with_clock(
+            temp_dir.path().to_path_buf(),
+            peer_runtime_factory,
+            maintenance_config,
+            clock,
+            Some(test_clock),
+            peer_metadata_flush_delay,
         )
     }
 
@@ -2912,6 +2954,12 @@ mod tests {
     }
 
     #[test]
+    fn config_accepts_hidden_peer_metadata_flush_delay_flag() {
+        let parsed = Config::parse_from(["bbd", "--peer-metadata-flush-delay-secs", "15"]);
+        assert_eq!(parsed.peer_metadata_flush_delay_secs, 15);
+    }
+
+    #[test]
     fn help_hides_test_flags() {
         let mut command = Config::command();
         let rendered = command.render_long_help().to_string();
@@ -2919,6 +2967,7 @@ mod tests {
         assert!(rendered.contains("--arti-config"));
         assert!(!rendered.contains("--test-clock"));
         assert!(!rendered.contains("--disable-maintenance"));
+        assert!(!rendered.contains("--peer-metadata-flush-delay-secs"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3419,6 +3468,85 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn peer_metadata_flush_delay_uses_test_clock() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        let service = test_service_with_test_clock_and_flush_delay(
+            &temp_dir,
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            MaintenanceConfig::default().disabled(),
+            Timestamp::new(800, 0).unwrap(),
+            Duration::from_secs(15),
+        );
+        let remote_node = Arc::new(Node::with_local_storage(
+            "peer-metadata-delay-remote",
+            Arc::new(storage::MemoryFilesystem::new()),
+        )?);
+        let remote_server =
+            spawn_registered_mock_peer_server(remote_node.clone(), connector.clone()).await?;
+        init_and_unlock_service(&service, "peer-metadata-delay").await?;
+
+        let mut stream = service
+            .timer_intercept(tonic::Request::new(clirpc::TimerInterceptRequest {
+                label: node::TIMER_LABEL_PEER_METADATA_FLUSH_DELAY.to_string(),
+            }))
+            .await?
+            .into_inner();
+        service
+            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: remote_node.address().to_string(),
+                }),
+            }))
+            .await?;
+        service
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+        let mut proposal_updates = service
+            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: remote_node.address().to_string(),
+                }),
+            }))
+            .await?
+            .into_inner();
+        while let Some(update) = proposal_updates.next().await {
+            let update = update?;
+            if update.state == clirpc::ContractState::Completed as i32 && update.success {
+                break;
+            }
+        }
+
+        let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await?
+            .transpose()?
+            .unwrap();
+        assert_eq!(first.label, node::TIMER_LABEL_PEER_METADATA_FLUSH_DELAY);
+        assert_eq!(first.wait_seconds, 15);
+        assert_eq!(first.wait_nanoseconds, 0);
+        assert_eq!(first.registered_unix_seconds, 800);
+        assert_eq!(first.registered_nanoseconds, 0);
+
+        service
+            .advance_test_time(tonic::Request::new(clirpc::AdvanceTestTimeRequest {
+                seconds: 15,
+                nanoseconds: 0,
+            }))
+            .await?;
+
+        service.shutdown().await?;
+        remote_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn peer_runtime_restart_backoff_uses_test_clock() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let connector = Arc::new(netmock::MockPeerConnector::new());
@@ -3504,6 +3632,7 @@ mod tests {
             arti_config: None,
             test_clock: false,
             disable_maintenance: false,
+            peer_metadata_flush_delay_secs: 60,
         };
         let daemon_task = tokio::spawn(async move {
             run_with_peer_runtime_until(config, Arc::new(NoopPeerRuntimeFactory), async move {
@@ -3563,6 +3692,7 @@ mod tests {
             arti_config: None,
             test_clock: false,
             disable_maintenance: false,
+            peer_metadata_flush_delay_secs: 60,
         };
         let daemon_task = tokio::spawn(async move {
             run_with_peer_runtime_until(config, Arc::new(NoopPeerRuntimeFactory), async move {
@@ -3840,6 +3970,7 @@ mod tests {
             arti_config: None,
             test_clock: false,
             disable_maintenance: false,
+            peer_metadata_flush_delay_secs: 60,
         };
         let daemon_task = tokio::spawn(async move {
             run_with_peer_runtime_until(config, Arc::new(NoopPeerRuntimeFactory), async move {

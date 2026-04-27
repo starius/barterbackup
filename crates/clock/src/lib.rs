@@ -58,6 +58,16 @@ pub trait Clock: Send + Sync {
 
     /// Wait for one labeled logical duration.
     async fn wait_for(&self, duration: Duration, label: &'static str);
+
+    /// Wait until one labeled absolute logical deadline is reached.
+    async fn wait_until(&self, deadline: Timestamp, label: &'static str) {
+        let now = self.now();
+        if now >= deadline {
+            return;
+        }
+        self.wait_for(deadline.saturating_duration_since(now), label)
+            .await;
+    }
 }
 
 /// SystemClock reads timestamps from the host clock and waits on Tokio time.
@@ -302,6 +312,37 @@ impl Clock for ManualClock {
         notify.notified().await;
         guard.disarm();
     }
+
+    async fn wait_until(&self, deadline: Timestamp, label: &'static str) {
+        let notify = Arc::new(Notify::new());
+        let maybe_guard = {
+            let mut state = self.state.lock().unwrap();
+            let registered_at = state.current;
+            let duration = deadline.saturating_duration_since(registered_at);
+            state.emit_timer_intercept(TimerInterceptEvent::new(label, duration, registered_at));
+            if registered_at >= deadline {
+                None
+            } else {
+                let wait_id = state.next_wait_id;
+                state.next_wait_id = state.next_wait_id.saturating_add(1);
+                state.waits.insert(
+                    wait_id,
+                    PendingWait {
+                        deadline,
+                        notify: notify.clone(),
+                    },
+                );
+                Some(RegisteredWait::new(self.state.clone(), wait_id))
+            }
+        };
+
+        let Some(guard) = maybe_guard else {
+            return;
+        };
+
+        notify.notified().await;
+        guard.disarm();
+    }
 }
 
 #[cfg(test)]
@@ -322,8 +363,14 @@ mod tests {
 
     #[test]
     fn timestamp_duration_since_clamps_at_zero() {
-        assert_eq!(ts(10, 0).saturating_duration_since(ts(10, 0)), Duration::ZERO);
-        assert_eq!(ts(10, 0).saturating_duration_since(ts(11, 0)), Duration::ZERO);
+        assert_eq!(
+            ts(10, 0).saturating_duration_since(ts(10, 0)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            ts(10, 0).saturating_duration_since(ts(11, 0)),
+            Duration::ZERO
+        );
         assert_eq!(
             ts(12, 100).saturating_duration_since(ts(10, 50)),
             Duration::new(2, 50)
@@ -353,9 +400,18 @@ mod tests {
         clock.set(ts(20, 0));
 
         let started = std::time::Instant::now();
-        clock
-            .wait_for(Duration::ZERO, "test.immediate")
-            .await;
+        clock.wait_for(Duration::ZERO, "test.immediate").await;
+        assert!(started.elapsed() < Duration::from_millis(50));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn manual_clock_wait_until_returns_immediately_after_deadline() {
+        let clock = ManualClock::new(ts(10, 0));
+        let deadline = ts(15, 0);
+        clock.set(ts(20, 0));
+
+        let started = std::time::Instant::now();
+        clock.wait_until(deadline, "test.absolute").await;
         assert!(started.elapsed() < Duration::from_millis(50));
     }
 
@@ -366,9 +422,7 @@ mod tests {
         let waiter = {
             let clock = clock.clone();
             tokio::spawn(async move {
-                clock
-                    .wait_for(Duration::from_secs(5), "test.advance")
-                    .await;
+                clock.wait_for(Duration::from_secs(5), "test.advance").await;
             })
         };
 

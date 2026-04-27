@@ -18,6 +18,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use storage::{Filesystem, StorageError, Store};
+use tokio::runtime::Handle;
+use tokio::sync::Notify;
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tonic::{Code, Response, Status};
 use tracing::{debug, info, warn};
@@ -42,7 +44,9 @@ pub struct Node {
     /// started_at tracks daemon uptime for local health checks.
     started_at: Mutex<Option<Timestamp>>,
     /// store holds the encrypted local content store when configured.
-    store: Option<Mutex<Store>>,
+    store: Option<Arc<Mutex<Store>>>,
+    /// peer_metadata_batcher coalesces low-value peer metadata writes.
+    peer_metadata_batcher: Option<PeerMetadataBatcher>,
     /// known_peers is the locally configured peer list.
     known_peers: Mutex<BTreeSet<String>>,
     /// storage_config is the current local storage policy snapshot.
@@ -66,6 +70,48 @@ struct RecentPeerFailure {
     last_error_class: i32,
     /// last_error_message stores the failure summary.
     last_error_message: String,
+}
+
+/// DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY is the default delay before
+/// low-value peer metadata writes are flushed to disk.
+pub const DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY: Duration = Duration::from_secs(60);
+
+/// TIMER_LABEL_PEER_METADATA_FLUSH_DELAY names the delayed low-value peer
+/// metadata flush timer exposed through the hidden test-clock interfaces.
+pub const TIMER_LABEL_PEER_METADATA_FLUSH_DELAY: &str = "peer-metadata.flush-delay";
+
+/// PendingPeerMetadataFlush tracks the currently scheduled delayed sidecar
+/// flush for low-value peer metadata.
+#[derive(Debug, Default)]
+struct PendingPeerMetadataFlush {
+    /// dirty reports whether in-memory peer metadata has unflushed low-value changes.
+    dirty: bool,
+    /// deadline is the next logical time at which the sidecar should flush.
+    deadline: Option<Timestamp>,
+    /// task_spawned reports whether the background flusher task already exists.
+    task_spawned: bool,
+    /// shutdown requests background task exit after any final synchronous flush.
+    shutdown: bool,
+}
+
+/// PeerMetadataBatcher coalesces low-value peer metadata rewrites into delayed
+/// sidecar flushes while preserving immediate writes for correctness-critical state.
+struct PeerMetadataBatcher {
+    inner: Arc<PeerMetadataBatcherInner>,
+}
+
+/// PeerMetadataBatcherInner holds the shared delayed-flush state.
+struct PeerMetadataBatcherInner {
+    /// store is the encrypted local store whose peer sidecar is being updated.
+    store: Arc<Mutex<Store>>,
+    /// clock provides the logical timer surface used by the delayed flusher.
+    clock: Arc<dyn Clock>,
+    /// flush_delay is the time low-value updates may remain in memory.
+    flush_delay: Duration,
+    /// pending tracks whether one delayed flush is currently armed.
+    pending: Mutex<PendingPeerMetadataFlush>,
+    /// notify wakes the background task when the schedule changes or shutdown starts.
+    notify: Notify,
 }
 
 /// Return the peer-content size limit as an `i64` for protobuf comparisons.
@@ -248,6 +294,246 @@ fn default_storage_config() -> clirpc::StorageConfig {
     clirpc::StorageConfig {
         allocated_storage_for_peers: DEFAULT_ALLOCATED_STORAGE_FOR_PEERS,
         min_replicas: 0,
+    }
+}
+
+impl PeerMetadataBatcher {
+    /// Build one delayed peer-metadata batcher.
+    fn new(store: Arc<Mutex<Store>>, clock: Arc<dyn Clock>, flush_delay: Duration) -> Self {
+        Self {
+            inner: Arc::new(PeerMetadataBatcherInner {
+                store,
+                clock,
+                flush_delay,
+                pending: Mutex::new(PendingPeerMetadataFlush::default()),
+                notify: Notify::new(),
+            }),
+        }
+    }
+
+    /// Stage one low-value reachability update in memory.
+    fn set_peer_reachability(
+        &self,
+        onion_pubkey: &[u8],
+        reachability: i32,
+        last_live_at: Option<i64>,
+    ) -> Result<(), Status> {
+        let changed = self
+            .inner
+            .store
+            .lock()
+            .unwrap()
+            .set_peer_reachability_pending(onion_pubkey, reachability, last_live_at)
+            .map_err(map_storage_error)?;
+        if changed {
+            self.inner.schedule_flush();
+        }
+        Ok(())
+    }
+
+    /// Stage one low-value score update in memory.
+    fn set_peer_score(
+        &self,
+        onion_pubkey: &[u8],
+        score_seconds: i64,
+        score_measured_at: i64,
+    ) -> Result<(), Status> {
+        let changed = self
+            .inner
+            .store
+            .lock()
+            .unwrap()
+            .set_peer_score_pending(onion_pubkey, score_seconds, score_measured_at)
+            .map_err(map_storage_error)?;
+        if changed {
+            self.inner.schedule_flush();
+        }
+        Ok(())
+    }
+
+    /// Stage one low-value remote pin-claim update in memory.
+    fn set_peer_pins_us(&self, onion_pubkey: &[u8], pins_us: bool) -> Result<(), Status> {
+        let changed = self
+            .inner
+            .store
+            .lock()
+            .unwrap()
+            .set_peer_pins_us_pending(onion_pubkey, pins_us)
+            .map_err(map_storage_error)?;
+        if changed {
+            self.inner.schedule_flush();
+        }
+        Ok(())
+    }
+
+    /// Stage one low-value last-verified-our-content update in memory.
+    fn set_peer_last_verified_our_content(
+        &self,
+        onion_pubkey: &[u8],
+        content_id: Option<&[u8]>,
+        verified_at: Option<i64>,
+    ) -> Result<(), Status> {
+        let changed = self
+            .inner
+            .store
+            .lock()
+            .unwrap()
+            .set_peer_last_verified_our_content_pending(onion_pubkey, content_id, verified_at)
+            .map_err(map_storage_error)?;
+        if changed {
+            self.inner.schedule_flush();
+        }
+        Ok(())
+    }
+
+    /// Flush any pending low-value peer metadata immediately.
+    fn flush_now(&self) -> Result<(), Status> {
+        self.inner.flush_now()
+    }
+}
+
+impl Drop for PeerMetadataBatcher {
+    fn drop(&mut self) {
+        self.inner.shutdown_and_flush();
+    }
+}
+
+impl PeerMetadataBatcherInner {
+    /// Schedule one delayed sidecar flush and start the background task if possible.
+    fn schedule_flush(self: &Arc<Self>) {
+        let mut pending = self.pending.lock().unwrap();
+        pending.dirty = true;
+        pending.deadline = Some(self.clock.now().advance(self.flush_delay));
+        if !pending.task_spawned {
+            if let Ok(handle) = Handle::try_current() {
+                pending.task_spawned = true;
+                let inner = Arc::clone(self);
+                handle.spawn(async move {
+                    inner.run().await;
+                });
+            }
+        }
+        drop(pending);
+        self.notify.notify_waiters();
+    }
+
+    /// Run the delayed flusher until shutdown is requested.
+    async fn run(self: Arc<Self>) {
+        loop {
+            let deadline = {
+                let pending = self.pending.lock().unwrap();
+                if pending.shutdown {
+                    return;
+                }
+                pending.deadline
+            };
+
+            let Some(deadline) = deadline else {
+                self.notify.notified().await;
+                continue;
+            };
+
+            let now = self.clock.now();
+            if now >= deadline {
+                if let Err(error) = self.flush_due(now) {
+                    warn!(%error, "failed to flush delayed peer metadata");
+                }
+                continue;
+            }
+
+            tokio::select! {
+                _ = self.clock.wait_until(deadline, TIMER_LABEL_PEER_METADATA_FLUSH_DELAY) => {}
+                _ = self.notify.notified() => {}
+            }
+        }
+    }
+
+    /// Flush the peer sidecar when the pending deadline has elapsed.
+    fn flush_due(&self, now: Timestamp) -> Result<(), Status> {
+        let should_flush = {
+            let mut pending = self.pending.lock().unwrap();
+            if pending.shutdown || !pending.dirty {
+                return Ok(());
+            }
+            let Some(deadline) = pending.deadline else {
+                return Ok(());
+            };
+            if now < deadline {
+                return Ok(());
+            }
+            pending.dirty = false;
+            pending.deadline = None;
+            true
+        };
+
+        if !should_flush {
+            return Ok(());
+        }
+
+        match self.store.lock().unwrap().flush_peer_state() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let retry_at = self.clock.now().advance(self.flush_delay);
+                let mut pending = self.pending.lock().unwrap();
+                if !pending.shutdown {
+                    pending.dirty = true;
+                    pending.deadline = Some(retry_at);
+                }
+                drop(pending);
+                self.notify.notify_waiters();
+                Err(map_storage_error(error))
+            }
+        }
+    }
+
+    /// Flush the peer sidecar immediately if low-value changes are pending.
+    fn flush_now(&self) -> Result<(), Status> {
+        let should_flush = {
+            let mut pending = self.pending.lock().unwrap();
+            if !pending.dirty {
+                return Ok(());
+            }
+            pending.dirty = false;
+            pending.deadline = None;
+            true
+        };
+
+        if !should_flush {
+            return Ok(());
+        }
+
+        match self.store.lock().unwrap().flush_peer_state() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let retry_at = self.clock.now().advance(self.flush_delay);
+                let mut pending = self.pending.lock().unwrap();
+                if !pending.shutdown {
+                    pending.dirty = true;
+                    pending.deadline = Some(retry_at);
+                }
+                drop(pending);
+                self.notify.notify_waiters();
+                Err(map_storage_error(error))
+            }
+        }
+    }
+
+    /// Request background exit and synchronously flush any remaining metadata.
+    fn shutdown_and_flush(&self) {
+        let should_flush = {
+            let mut pending = self.pending.lock().unwrap();
+            pending.shutdown = true;
+            let should_flush = pending.dirty;
+            pending.dirty = false;
+            pending.deadline = None;
+            should_flush
+        };
+        if should_flush {
+            if let Err(error) = self.store.lock().unwrap().flush_peer_state() {
+                warn!(%error, "failed to flush delayed peer metadata during shutdown");
+            }
+        }
+        self.notify.notify_waiters();
     }
 }
 
@@ -705,13 +991,23 @@ impl Node {
     /// Create a node identity without attaching a local encrypted store.
     pub fn new(seed: &str) -> Result<Self> {
         let master = keys::derive_master_priv(seed);
-        Self::build_from_master(&master, None, Arc::new(SystemClock))
+        Self::build_from_master(
+            &master,
+            None,
+            Arc::new(SystemClock),
+            DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY,
+        )
     }
 
     /// Create a node identity with a local encrypted store.
     pub fn with_local_storage(seed: &str, filesystem: Arc<dyn Filesystem>) -> Result<Self> {
         let master = keys::derive_master_priv(seed);
-        Self::build_from_master(&master, Some(filesystem), Arc::new(SystemClock))
+        Self::build_from_master(
+            &master,
+            Some(filesystem),
+            Arc::new(SystemClock),
+            DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY,
+        )
     }
 
     /// Create a node identity with a local encrypted store and explicit clock.
@@ -720,8 +1016,24 @@ impl Node {
         filesystem: Arc<dyn Filesystem>,
         clock: Arc<dyn Clock>,
     ) -> Result<Self> {
+        Self::with_local_storage_and_clock_and_flush_delay(
+            seed,
+            filesystem,
+            clock,
+            DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY,
+        )
+    }
+
+    /// Create a node identity with a local encrypted store, explicit clock,
+    /// and delayed low-value peer metadata flush policy.
+    pub fn with_local_storage_and_clock_and_flush_delay(
+        seed: &str,
+        filesystem: Arc<dyn Filesystem>,
+        clock: Arc<dyn Clock>,
+        peer_metadata_flush_delay: Duration,
+    ) -> Result<Self> {
         let master = keys::derive_master_priv(seed);
-        Self::build_from_master(&master, Some(filesystem), clock)
+        Self::build_from_master(&master, Some(filesystem), clock, peer_metadata_flush_delay)
     }
 
     /// Return the node onion hostname.
@@ -742,7 +1054,12 @@ impl Node {
     /// Create a node identity from already-derived master material in tests.
     #[cfg(test)]
     fn new_for_tests_from_master(master_priv: &[u8]) -> Result<Self> {
-        Self::build_from_master(master_priv, None, Arc::new(SystemClock))
+        Self::build_from_master(
+            master_priv,
+            None,
+            Arc::new(SystemClock),
+            DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY,
+        )
     }
 
     /// Build a node, optionally attaching an encrypted local store.
@@ -750,13 +1067,17 @@ impl Node {
         master_priv: &[u8],
         filesystem: Option<Arc<dyn Filesystem>>,
         clock: Arc<dyn Clock>,
+        peer_metadata_flush_delay: Duration,
     ) -> Result<Self> {
         let (keypair, public_key) = keys::derive_ed25519_from_master(master_priv, "tor/onion/v3")?;
         let onion_address = keys::onion_hostname_from_public_key(&public_key);
         let store = filesystem
             .map(|filesystem| Store::new_with_time_source(filesystem, master_priv, clock.clone()))
             .transpose()?
-            .map(Mutex::new);
+            .map(|store| Arc::new(Mutex::new(store)));
+        let peer_metadata_batcher = store.as_ref().map(|store| {
+            PeerMetadataBatcher::new(store.clone(), clock.clone(), peer_metadata_flush_delay)
+        });
         let built_in_peer_list = built_in_peers();
         let node = Self {
             ed25519_keypair: keypair,
@@ -764,6 +1085,7 @@ impl Node {
             clock,
             started_at: Mutex::new(None),
             store,
+            peer_metadata_batcher,
             known_peers: Mutex::new(BTreeSet::new()),
             storage_config: Mutex::new(default_storage_config()),
             peer_connector: Mutex::new(None),
@@ -811,6 +1133,14 @@ impl Node {
             .ok_or_else(|| Status::failed_precondition("local store is not configured"))?;
         let mut store = store.lock().unwrap();
         operation(&mut store).map_err(map_storage_error)
+    }
+
+    /// Flush any pending low-value peer metadata sidecar changes immediately.
+    pub fn flush_pending_peer_metadata(&self) -> Result<(), Status> {
+        let Some(batcher) = &self.peer_metadata_batcher else {
+            return Ok(());
+        };
+        batcher.flush_now()
     }
 
     /// Convert one public key byte slice into an onion hostname.
@@ -1161,20 +1491,18 @@ impl Node {
         if self.is_our_onion(peer_onion) {
             return Ok(());
         }
-        if self.store.is_none() {
+        let Some(batcher) = &self.peer_metadata_batcher else {
             return Ok(());
-        }
+        };
 
         let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
             .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
         let now_secs = i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX);
-        self.with_store(|store| {
-            store.set_peer_reachability(
-                peer_public_key.as_bytes(),
-                storedpb::PeerReachability::Online as i32,
-                Some(now_secs),
-            )
-        })
+        batcher.set_peer_reachability(
+            peer_public_key.as_bytes(),
+            storedpb::PeerReachability::Online as i32,
+            Some(now_secs),
+        )
     }
 
     /// Persist a failed live transport interaction with one peer.
@@ -1182,19 +1510,17 @@ impl Node {
         if self.is_our_onion(peer_onion) {
             return Ok(());
         }
-        if self.store.is_none() {
+        let Some(batcher) = &self.peer_metadata_batcher else {
             return Ok(());
-        }
+        };
 
         let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
             .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
-        self.with_store(|store| {
-            store.set_peer_reachability(
-                peer_public_key.as_bytes(),
-                storedpb::PeerReachability::Offline as i32,
-                None,
-            )
-        })
+        batcher.set_peer_reachability(
+            peer_public_key.as_bytes(),
+            storedpb::PeerReachability::Offline as i32,
+            None,
+        )
     }
 
     /// Classify one peer-operation failure for local operator-facing status.
@@ -2205,7 +2531,10 @@ impl Node {
         peer_public_key: &ed25519_dalek::PublicKey,
         pins_us: bool,
     ) -> Result<(), Status> {
-        self.with_store(|store| store.set_peer_pins_us(peer_public_key.as_bytes(), pins_us))
+        let Some(batcher) = &self.peer_metadata_batcher else {
+            return Ok(());
+        };
+        batcher.set_peer_pins_us(peer_public_key.as_bytes(), pins_us)
     }
 
     /// Persist which current local revision this peer most recently passed a
@@ -2215,15 +2544,16 @@ impl Node {
         peer_public_key: &ed25519_dalek::PublicKey,
         content_id: Option<&[u8]>,
     ) -> Result<(), Status> {
+        let Some(batcher) = &self.peer_metadata_batcher else {
+            return Ok(());
+        };
         let verified_at =
             content_id.map(|_| i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX));
-        self.with_store(|store| {
-            store.set_peer_last_verified_our_content(
-                peer_public_key.as_bytes(),
-                content_id,
-                verified_at,
-            )
-        })
+        batcher.set_peer_last_verified_our_content(
+            peer_public_key.as_bytes(),
+            content_id,
+            verified_at,
+        )
     }
 
     /// Persist the updated score state for a peer.
@@ -2247,10 +2577,10 @@ impl Node {
         } else {
             score_seconds.saturating_sub(elapsed)
         };
-
-        self.with_store(|store| {
-            store.set_peer_score(peer_public_key.as_bytes(), new_score, now_secs)
-        })?;
+        let Some(batcher) = &self.peer_metadata_batcher else {
+            return Ok(new_score);
+        };
+        batcher.set_peer_score(peer_public_key.as_bytes(), new_score, now_secs)?;
         Ok(new_score)
     }
 
@@ -4159,6 +4489,52 @@ mod tests {
     use tonic::transport::Endpoint;
     use tonic::{Request, Response};
     use transport::PeerConnector;
+
+    /// CountingFilesystem counts peer-sidecar writes while delegating storage.
+    struct CountingFilesystem {
+        inner: Arc<dyn Filesystem>,
+        peer_state_writes: AtomicUsize,
+    }
+
+    impl CountingFilesystem {
+        /// Return the number of peer-sidecar writes observed so far.
+        fn peer_state_writes(&self) -> usize {
+            self.peer_state_writes.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Filesystem for CountingFilesystem {
+        fn read(&self, name: &str) -> Result<Vec<u8>, StorageError> {
+            self.inner.read(name)
+        }
+
+        fn write_atomic(&self, name: &str, data: &[u8]) -> Result<(), StorageError> {
+            if name == ".peer-state.v1" {
+                self.peer_state_writes.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.write_atomic(name, data)
+        }
+
+        fn remove(&self, name: &str) -> Result<(), StorageError> {
+            self.inner.remove(name)
+        }
+
+        fn list(&self) -> Result<Vec<String>, StorageError> {
+            self.inner.list()
+        }
+    }
+
+    /// Wait until the supplied predicate becomes true.
+    async fn wait_until(mut predicate: impl FnMut() -> bool) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            if predicate() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(predicate(), "timed out waiting for condition");
+    }
 
     /// Spawn an h2c local CLI server for integration-style node tests.
     async fn spawn_cli_server(
@@ -6255,6 +6631,100 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn delayed_peer_metadata_flush_coalesces_multiple_updates() -> anyhow::Result<()> {
+        let base: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let counting = Arc::new(CountingFilesystem {
+            inner: base.clone(),
+            peer_state_writes: AtomicUsize::new(0),
+        });
+        let filesystem: Arc<dyn Filesystem> = counting.clone();
+        let clock = Arc::new(ManualClock::new(Timestamp::new(1_000, 0).unwrap()));
+        let mut timer_intercepts =
+            clock.subscribe_timer_intercepts(TIMER_LABEL_PEER_METADATA_FLUSH_DELAY);
+        let node = Node::with_local_storage_and_clock_and_flush_delay(
+            "batched-peer-metadata-owner",
+            filesystem,
+            clock.clone(),
+            Duration::from_secs(60),
+        )?;
+        let peer = Node::new("batched-peer-metadata-remote")?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer.address())?;
+
+        node.add_known_peer(peer.address())?;
+        node.with_store(|store| store.set_peer_score(peer_public_key.as_bytes(), 10, 900))?;
+        let writes_before_delayed_updates = counting.peer_state_writes();
+
+        node.note_peer_live(peer.address())?;
+        assert_eq!(node.update_peer_score(&peer_public_key, true)?, 110);
+        node.record_remote_pin_claim(&peer_public_key, true)?;
+
+        let timer = timer_intercepts
+            .recv()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("missing delayed peer metadata timer"))?;
+        assert_eq!(timer.duration, Duration::from_secs(60));
+        assert_eq!(counting.peer_state_writes(), writes_before_delayed_updates);
+
+        clock.advance(Duration::from_secs(59));
+        tokio::task::yield_now().await;
+        assert_eq!(counting.peer_state_writes(), writes_before_delayed_updates);
+
+        clock.advance(Duration::from_secs(1));
+        wait_until(|| counting.peer_state_writes() == writes_before_delayed_updates + 1).await;
+
+        let reloaded = Node::with_local_storage_and_clock_and_flush_delay(
+            "batched-peer-metadata-owner",
+            base,
+            clock,
+            Duration::from_secs(60),
+        )?;
+        let peer = peer_inventory_entry(&reloaded, peer.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing peer inventory entry"))?;
+        assert_eq!(peer.status, PeerInventoryStatus::Online);
+        assert_eq!(peer.last_live_at, 1_000);
+        assert_eq!(peer.score_seconds, 110);
+        assert!(peer.pins_us);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drop_flushes_pending_low_value_peer_metadata() -> anyhow::Result<()> {
+        let base: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let counting = Arc::new(CountingFilesystem {
+            inner: base.clone(),
+            peer_state_writes: AtomicUsize::new(0),
+        });
+        let filesystem: Arc<dyn Filesystem> = counting.clone();
+        let clock = Arc::new(ManualClock::new(Timestamp::new(2_000, 0).unwrap()));
+        let peer = Node::new("drop-flush-remote")?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer.address())?;
+
+        {
+            let node = Node::with_local_storage_and_clock_and_flush_delay(
+                "drop-flush-owner",
+                filesystem,
+                clock.clone(),
+                Duration::from_secs(300),
+            )?;
+            node.add_known_peer(peer.address())?;
+            let writes_before_delayed_update = counting.peer_state_writes();
+            node.record_remote_pin_claim(&peer_public_key, true)?;
+            assert_eq!(counting.peer_state_writes(), writes_before_delayed_update);
+        }
+
+        let reloaded = Node::with_local_storage_and_clock_and_flush_delay(
+            "drop-flush-owner",
+            base,
+            clock,
+            Duration::from_secs(300),
+        )?;
+        let peer = peer_inventory_entry(&reloaded, peer.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing peer inventory entry"))?;
+        assert!(peer.pins_us);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn peer_client_cache_reuses_recent_dials() -> anyhow::Result<()> {
         let node = Arc::new(Node::new("cache-reuse-owner")?);
         let peer_identity = Node::new("cache-reuse-peer")?;
@@ -7943,6 +8413,130 @@ mod tests {
         assert_eq!(
             peer_score_seconds(&requester_node, responder_node.address())?,
             3_600
+        );
+
+        requester_server.abort();
+        responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn successful_check_contract_does_not_immediately_flush_pending_peer_metadata(
+    ) -> anyhow::Result<()> {
+        let requester_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let mut timer_intercepts =
+            requester_clock.subscribe_timer_intercepts(TIMER_LABEL_PEER_METADATA_FLUSH_DELAY);
+        let responder_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let requester_base: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_counting = Arc::new(CountingFilesystem {
+            inner: requester_base.clone(),
+            peer_state_writes: AtomicUsize::new(0),
+        });
+        let requester_filesystem: Arc<dyn Filesystem> = requester_counting.clone();
+        let requester_node = Arc::new(Node::with_local_storage_and_clock_and_flush_delay(
+            "requester-delayed-check",
+            requester_filesystem,
+            requester_clock.clone(),
+            Duration::from_secs(60),
+        )?);
+        let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let responder_node = Arc::new(Node::with_local_storage_and_clock(
+            "responder-delayed-check",
+            responder_filesystem,
+            responder_clock.clone(),
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        responder_node.set_peer_connector(connector.clone());
+        requester_node
+            .known_peers
+            .lock()
+            .unwrap()
+            .insert(responder_node.address().to_string());
+
+        let requester_cli = CliService::new(requester_node.clone());
+        requester_cli
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let requester_server =
+            spawn_registered_p2p_server(requester_node.clone(), connector.as_ref()).await?;
+        let responder_server =
+            spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
+        let mut requester_to_responder = connect_p2p_client(
+            requester_node.clone(),
+            responder_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
+        requester_to_responder
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                requester_content: Some(requester_node.responder_content()?.unwrap()),
+            })
+            .await?;
+
+        let first_updates = requester_cli
+            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: responder_node.address().to_string(),
+                }),
+            }))
+            .await?
+            .into_inner()
+            .try_collect::<Vec<_>>()
+            .await?;
+        assert_eq!(
+            first_updates.last().map(|update| update.success),
+            Some(true)
+        );
+
+        let first_timer = timer_intercepts
+            .recv()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("missing first delayed metadata timer"))?;
+        let writes_before_first_flush = requester_counting.peer_state_writes();
+        requester_clock.advance(first_timer.duration);
+        wait_until(|| requester_counting.peer_state_writes() == writes_before_first_flush + 1)
+            .await;
+        let writes_after_first_flush = requester_counting.peer_state_writes();
+        let peer_before_second =
+            peer_inventory_entry(&requester_node, responder_node.address())?
+                .ok_or_else(|| anyhow::anyhow!("missing responder peer after first check"))?;
+
+        requester_clock.advance(Duration::from_secs(1));
+        let second_updates = requester_cli
+            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: responder_node.address().to_string(),
+                }),
+            }))
+            .await?
+            .into_inner()
+            .try_collect::<Vec<_>>()
+            .await?;
+        assert_eq!(
+            second_updates.last().map(|update| update.success),
+            Some(true)
+        );
+        let peer_after_second = peer_inventory_entry(&requester_node, responder_node.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing responder peer after second check"))?;
+        assert_eq!(
+            requester_counting.peer_state_writes(),
+            writes_after_first_flush,
+            "second successful check should not flush pending low-value peer metadata immediately; before={peer_before_second:?} after={peer_after_second:?}",
+        );
+        assert_eq!(
+            peer_before_second.latest_known_content_length,
+            peer_after_second.latest_known_content_length
+        );
+        assert_eq!(
+            peer_before_second.latest_cached_content_length,
+            peer_after_second.latest_cached_content_length
         );
 
         requester_server.abort();
