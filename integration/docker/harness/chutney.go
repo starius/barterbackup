@@ -60,8 +60,10 @@ type translatedArtiConfig struct {
 	OverrideNetParams map[string]any `toml:"override_net_params,omitempty"`
 	Bridges           map[string]any `toml:"bridges,omitempty"`
 	TorNetwork        struct {
-		Authorities    []authorityConfig `toml:"authorities"`
-		FallbackCaches []fallbackCache   `toml:"fallback_caches"`
+		Authorities struct {
+			V3Idents []string `toml:"v3idents"`
+		} `toml:"authorities"`
+		FallbackCaches []fallbackCache `toml:"fallback_caches"`
 	} `toml:"tor_network"`
 }
 
@@ -69,11 +71,6 @@ type fallbackCache struct {
 	RSAIdentity string   `toml:"rsa_identity"`
 	EDIdentity  string   `toml:"ed_identity"`
 	ORPorts     []string `toml:"orports"`
-}
-
-type authorityConfig struct {
-	Name    string `toml:"name"`
-	V3Ident string `toml:"v3ident"`
 }
 
 // PrepareChutneyNetwork ensures one pinned Chutney checkout exists, starts one
@@ -246,17 +243,14 @@ func translateChutneyConfig(raw rawChutneyConfig) translatedArtiConfig {
 		translated.TorNetwork.FallbackCaches,
 		raw.TorNetwork.FallbackCaches...,
 	)
-	for index, v3ident := range raw.TorNetwork.Authorities.V3Idents {
+	for _, v3ident := range raw.TorNetwork.Authorities.V3Idents {
 		trimmed := strings.TrimSpace(v3ident)
 		if trimmed == "" {
 			continue
 		}
-		translated.TorNetwork.Authorities = append(
-			translated.TorNetwork.Authorities,
-			authorityConfig{
-				Name:    fmt.Sprintf("auth%d", index+1),
-				V3Ident: trimmed,
-			},
+		translated.TorNetwork.Authorities.V3Idents = append(
+			translated.TorNetwork.Authorities.V3Idents,
+			trimmed,
 		)
 	}
 	return translated

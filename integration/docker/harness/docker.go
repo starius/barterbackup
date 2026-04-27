@@ -11,14 +11,15 @@ import (
 
 // Node represents one bbd container plus its host-side bind-mounted state.
 type Node struct {
-	suite              *Suite
-	name               string
-	containerName      string
-	dataDir            string
-	localAddr          string
-	password           string
-	testClock          bool
-	disableMaintenance bool
+	suite                         *Suite
+	name                          string
+	containerName                 string
+	dataDir                       string
+	localAddr                     string
+	password                      string
+	testClock                     bool
+	disableMaintenance            bool
+	peerMetadataFlushDelaySeconds uint64
 }
 
 // Name returns the logical test node name.
@@ -44,6 +45,12 @@ func (n *Node) EnableTestClock() {
 // DisableMaintenance starts this node with hidden background maintenance disabled.
 func (n *Node) DisableMaintenance() {
 	n.disableMaintenance = true
+}
+
+// SetPeerMetadataFlushDelaySeconds overrides the hidden low-value peer
+// metadata flush delay used by this daemon instance.
+func (n *Node) SetPeerMetadataFlushDelaySeconds(seconds uint64) {
+	n.peerMetadataFlushDelaySeconds = seconds
 }
 
 // StartLocked starts the daemon container without initializing or unlocking it.
@@ -78,6 +85,9 @@ func (n *Node) StartLocked(ctx context.Context) error {
 	}
 	if n.disableMaintenance {
 		args = append(args, "--disable-maintenance")
+	}
+	if n.peerMetadataFlushDelaySeconds != 0 {
+		args = append(args, "--peer-metadata-flush-delay-secs", strconv.FormatUint(n.peerMetadataFlushDelaySeconds, 10))
 	}
 	_, err := runCommand(
 		ctx,

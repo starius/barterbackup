@@ -29,14 +29,14 @@ func TestTranslateChutneyConfig(t *testing.T) {
 	if len(translated.TorNetwork.FallbackCaches) != 2 {
 		t.Fatalf("unexpected fallback cache count: %d", len(translated.TorNetwork.FallbackCaches))
 	}
-	if len(translated.TorNetwork.Authorities) != 3 {
-		t.Fatalf("unexpected authority count: %d", len(translated.TorNetwork.Authorities))
+	if len(translated.TorNetwork.Authorities.V3Idents) != 3 {
+		t.Fatalf("unexpected authority count: %d", len(translated.TorNetwork.Authorities.V3Idents))
 	}
-	if translated.TorNetwork.Authorities[0].Name != "auth1" {
-		t.Fatalf("unexpected first authority name: %q", translated.TorNetwork.Authorities[0].Name)
+	if translated.TorNetwork.Authorities.V3Idents[0] != "30A3F82DE0485F8666C05CC807FD7EDE832ABD8A" {
+		t.Fatalf("unexpected first authority id: %q", translated.TorNetwork.Authorities.V3Idents[0])
 	}
-	if translated.TorNetwork.Authorities[2].V3Ident != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" {
-		t.Fatalf("unexpected third authority id: %q", translated.TorNetwork.Authorities[2].V3Ident)
+	if translated.TorNetwork.Authorities.V3Idents[2] != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" {
+		t.Fatalf("unexpected third authority id: %q", translated.TorNetwork.Authorities.V3Idents[2])
 	}
 	if translated.AddressFilter["allow_local_addrs"] != true {
 		t.Fatalf("allow_local_addrs was not preserved: %#v", translated.AddressFilter)

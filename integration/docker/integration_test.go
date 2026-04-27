@@ -356,6 +356,124 @@ func TestDockerLogicalClockDrivesMaintenance(t *testing.T) {
 	waitForPeerStorage(t, peer, ownerOnion, int64(len(payloadV2)))
 }
 
+func TestDockerDelayedPeerMetadataFlushPersistsAfterConfiguredDelay(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	owner := addNode(t, scenario, "owner", "correct horse battery staple")
+	peer := addNode(t, scenario, "peer", "peer password")
+	owner.EnableTestClock()
+	peer.EnableTestClock()
+	owner.DisableMaintenance()
+	peer.DisableMaintenance()
+	owner.SetPeerMetadataFlushDelaySeconds(5)
+
+	ownerOnion := startInitializedReadyTestClockNode(t, owner, 1_000)
+	peerOnion := startInitializedReadyTestClockNode(t, peer, 1_000)
+
+	connectPeer(t, owner, peerOnion)
+	connectPeer(t, peer, ownerOnion)
+
+	payload := randomPayload(96 * 1024)
+	setFile(t, owner, "payload.bin", payload)
+	proposeContract(t, owner, peerOnion)
+	waitForPeerStorage(t, peer, ownerOnion, int64(len(payload)))
+
+	stream := openTimerIntercept(t, owner, "peer-metadata.flush-delay")
+	checkContract(t, owner, peerOnion)
+	first := recvTimerEventAtOrAfter(t, stream, 1_000)
+	advanceNodeTime(t, owner, first.GetWaitSeconds(), first.GetWaitNanoseconds())
+	waitForPeerStateFile(t, owner)
+	baselineHash := waitForPeerStateHashStable(t, owner, 750*time.Millisecond, 5*time.Second)
+
+	checkContract(t, owner, peerOnion)
+	if got := peerStateHash(t, owner); got != baselineHash {
+		t.Fatalf("peer sidecar changed immediately after low-value update: got %s want %s", got, baselineHash)
+	}
+	second := recvTimerEventAtOrAfter(t, stream, first.GetRegisteredUnixSeconds()+first.GetWaitSeconds())
+	advanceNodeTime(t, owner, second.GetWaitSeconds()-1, second.GetWaitNanoseconds())
+	if got := peerStateHash(t, owner); got != baselineHash {
+		t.Fatalf("peer sidecar changed before the delayed flush deadline: got %s want %s", got, baselineHash)
+	}
+	advanceNodeTime(t, owner, 1, 0)
+	if got := waitForPeerStateHashChange(t, owner, baselineHash, 5*time.Second); got == baselineHash {
+		t.Fatalf("peer sidecar hash did not change after delayed flush")
+	}
+}
+
+func TestDockerStopFlushesPendingPeerMetadata(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	owner := addNode(t, scenario, "owner", "correct horse battery staple")
+	peer := addNode(t, scenario, "peer", "peer password")
+	owner.EnableTestClock()
+	peer.EnableTestClock()
+	owner.DisableMaintenance()
+	peer.DisableMaintenance()
+	owner.SetPeerMetadataFlushDelaySeconds(30)
+
+	ownerOnion := startInitializedReadyTestClockNode(t, owner, 1_000)
+	peerOnion := startInitializedReadyTestClockNode(t, peer, 1_000)
+
+	connectPeer(t, owner, peerOnion)
+	connectPeer(t, peer, ownerOnion)
+
+	payload := randomPayload(96 * 1024)
+	setFile(t, owner, "payload.bin", payload)
+	proposeContract(t, owner, peerOnion)
+	waitForPeerStorage(t, peer, ownerOnion, int64(len(payload)))
+
+	stopNode(t, owner)
+	startLockedNode(t, owner)
+	waitForReadyNode(t, owner)
+	setNodeTime(t, owner, 2_000, 0)
+	unlockTestClockAndWaitReady(t, owner)
+	waitForPeerStateFile(t, owner)
+	baselineHash := waitForPeerStateHashStable(t, owner, 1500*time.Millisecond, 5*time.Second)
+	beforeLiveAt := peerInfoByOnion(t, owner, peerOnion).GetLastLiveAt()
+	currentTime := getNodeTime(t, owner)
+	if beforeLiveAt >= 0 && currentTime.GetUnixSeconds() <= uint64(beforeLiveAt) {
+		setNodeTime(t, owner, uint64(beforeLiveAt)+100, 0)
+	}
+
+	advanceNodeTime(t, owner, 10, 0)
+	checkContract(t, owner, peerOnion)
+	if got := peerStateHash(t, owner); got != baselineHash {
+		t.Fatalf("peer sidecar changed before shutdown flush: got %s want %s", got, baselineHash)
+	}
+	afterCheckLiveAt := peerInfoByOnion(t, owner, peerOnion).GetLastLiveAt()
+	if afterCheckLiveAt <= beforeLiveAt {
+		t.Fatalf(
+			"expected in-memory low-value metadata to advance before shutdown flush, got %d want > %d",
+			afterCheckLiveAt,
+			beforeLiveAt,
+		)
+	}
+
+	stopNode(t, owner)
+	assertCLIKeysRemoved(t, owner)
+	if got := peerStateHash(t, owner); got == baselineHash {
+		t.Fatalf("peer sidecar hash did not change during shutdown flush")
+	}
+
+	startLockedNode(t, owner)
+	waitForReadyNode(t, owner)
+	if afterCheckLiveAt < 0 {
+		t.Fatalf("expected non-negative last_live_at after low-value update, got %d", afterCheckLiveAt)
+	}
+	setNodeTime(t, owner, uint64(afterCheckLiveAt)+100, 0)
+	unlockTestClockAndWaitReady(t, owner)
+	info := waitForPeerVisible(t, owner, peerOnion)
+	if info.GetLastLiveAt() != afterCheckLiveAt {
+		t.Fatalf(
+			"expected shutdown flush to persist last_live_at %d, got %d",
+			afterCheckLiveAt,
+			info.GetLastLiveAt(),
+		)
+	}
+}
+
 func TestDockerConflictRecoveryKeepRemoteVersion(t *testing.T) {
 	scenario := prepareConflictScenarioBase(t)
 	localBranch := bytes.Repeat([]byte("local-branch\n"), 1536)
@@ -1806,6 +1924,99 @@ func assertCLIKeysRemoved(t *testing.T, node *harness.Node) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("expected %s to be removed after stop, got %v", path, err)
 		}
+	}
+}
+
+func peerStatePath(node *harness.Node) string {
+	return filepath.Join(node.DataDir(), "local", ".peer-state.v1")
+}
+
+func peerStateHash(t *testing.T, node *harness.Node) string {
+	t.Helper()
+	data, err := os.ReadFile(peerStatePath(node))
+	if err != nil {
+		t.Fatalf("read peer sidecar for %s: %v", node.Name(), err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
+func waitForPeerStateFile(t *testing.T, node *harness.Node) {
+	t.Helper()
+	deadline := time.Now().Add(harnessDefaultTimeout())
+	path := peerStatePath(node)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat peer sidecar for %s: %v", node.Name(), err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for peer sidecar for %s", node.Name())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func waitForPeerStateHashStable(
+	t *testing.T,
+	node *harness.Node,
+	hold time.Duration,
+	timeout time.Duration,
+) string {
+	t.Helper()
+	waitForPeerStateFile(t, node)
+	deadline := time.Now().Add(timeout)
+	lastHash := peerStateHash(t, node)
+	stableSince := time.Now()
+	for {
+		time.Sleep(100 * time.Millisecond)
+		currentHash := peerStateHash(t, node)
+		if currentHash != lastHash {
+			lastHash = currentHash
+			stableSince = time.Now()
+		}
+		if time.Since(stableSince) >= hold {
+			return lastHash
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for peer sidecar hash to stabilize on %s", node.Name())
+		}
+	}
+}
+
+func assertPeerStateHashStableFor(
+	t *testing.T,
+	node *harness.Node,
+	expected string,
+	duration time.Duration,
+) {
+	t.Helper()
+	deadline := time.Now().Add(duration)
+	for time.Now().Before(deadline) {
+		if currentHash := peerStateHash(t, node); currentHash != expected {
+			t.Fatalf("peer sidecar hash changed unexpectedly on %s: got %s want %s", node.Name(), currentHash, expected)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func waitForPeerStateHashChange(
+	t *testing.T,
+	node *harness.Node,
+	baseline string,
+	timeout time.Duration,
+) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		currentHash := peerStateHash(t, node)
+		if currentHash != baseline {
+			return currentHash
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for peer sidecar hash to change on %s", node.Name())
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
