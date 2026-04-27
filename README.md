@@ -100,6 +100,10 @@ that rebuilds the workspace with AddressSanitizer instrumentation. `make rpc`
 generates the Go `clirpc` stubs under `integration/docker/gen/clirpc`.
 `make cli-docs` regenerates checked-in shell completions, man pages, and
 Markdown CLI manuals under `completions/`, `docs/man/`, and `docs/cli/`.
+The generated Markdown manuals are:
+
+- [docs/cli/bbd.md](/home/user/barterbackup/rust2/docs/cli/bbd.md)
+- [docs/cli/bbcli.md](/home/user/barterbackup/rust2/docs/cli/bbcli.md)
 
 ## Test
 
