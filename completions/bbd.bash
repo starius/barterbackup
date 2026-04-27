@@ -23,7 +23,7 @@ _bbd() {
 
     case "${cmd}" in
         bbd)
-            opts="-h --local-addr --data-dir --arti-config --test-clock --disable-maintenance --help"
+            opts="-h --local-addr --data-dir --arti-config --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

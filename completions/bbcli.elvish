@@ -60,7 +60,6 @@ set edit:completion:arg-completer[bbcli] = {|@words|
             cand pin 'Pin a tracked peer so local policy treats it as operator-protected'
             cand unpin 'Remove an existing operator pin from a tracked peer'
             cand list 'Print the daemon''s current peer inventory'
-            cand export-built-in 'Print the Rust source file for the compiled built-in peer list'
             cand help 'Print this message or the help of the given subcommand(s)'
         }
         &'bbcli;peer;connect'= {
@@ -82,16 +81,11 @@ set edit:completion:arg-completer[bbcli] = {|@words|
             cand -h 'Print help (see more with ''--help'')'
             cand --help 'Print help (see more with ''--help'')'
         }
-        &'bbcli;peer;export-built-in'= {
-            cand -h 'Print help'
-            cand --help 'Print help'
-        }
         &'bbcli;peer;help'= {
             cand connect 'Add a peer onion identifier to the daemon''s known peer list'
             cand pin 'Pin a tracked peer so local policy treats it as operator-protected'
             cand unpin 'Remove an existing operator pin from a tracked peer'
             cand list 'Print the daemon''s current peer inventory'
-            cand export-built-in 'Print the Rust source file for the compiled built-in peer list'
             cand help 'Print this message or the help of the given subcommand(s)'
         }
         &'bbcli;peer;help;connect'= {
@@ -101,8 +95,6 @@ set edit:completion:arg-completer[bbcli] = {|@words|
         &'bbcli;peer;help;unpin'= {
         }
         &'bbcli;peer;help;list'= {
-        }
-        &'bbcli;peer;help;export-built-in'= {
         }
         &'bbcli;peer;help;help'= {
         }
@@ -280,7 +272,6 @@ set edit:completion:arg-completer[bbcli] = {|@words|
             cand pin 'Pin a tracked peer so local policy treats it as operator-protected'
             cand unpin 'Remove an existing operator pin from a tracked peer'
             cand list 'Print the daemon''s current peer inventory'
-            cand export-built-in 'Print the Rust source file for the compiled built-in peer list'
         }
         &'bbcli;help;peer;connect'= {
         }
@@ -289,8 +280,6 @@ set edit:completion:arg-completer[bbcli] = {|@words|
         &'bbcli;help;peer;unpin'= {
         }
         &'bbcli;help;peer;list'= {
-        }
-        &'bbcli;help;peer;export-built-in'= {
         }
         &'bbcli;help;file'= {
             cand list 'Print the names of all files in the latest encrypted content blob'

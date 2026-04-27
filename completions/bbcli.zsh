@@ -104,12 +104,6 @@ offline\:"Offline peers were last observed unreachable or have never been seen l
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
-(export-built-in)
-_arguments "${_arguments_options[@]}" : \
-'-h[Print help]' \
-'--help[Print help]' \
-&& ret=0
-;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 ":: :_bbcli__subcmd__peer__subcmd__help_commands" \
@@ -135,10 +129,6 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (list)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(export-built-in)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -504,10 +494,6 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (list)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(export-built-in)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -930,7 +916,6 @@ _bbcli__subcmd__help__subcmd__peer_commands() {
 'pin:Pin a tracked peer so local policy treats it as operator-protected' \
 'unpin:Remove an existing operator pin from a tracked peer' \
 'list:Print the daemon'\''s current peer inventory' \
-'export-built-in:Print the Rust source file for the compiled built-in peer list' \
     )
     _describe -t commands 'bbcli help peer commands' commands "$@"
 }
@@ -938,11 +923,6 @@ _bbcli__subcmd__help__subcmd__peer_commands() {
 _bbcli__subcmd__help__subcmd__peer__subcmd__connect_commands() {
     local commands; commands=()
     _describe -t commands 'bbcli help peer connect commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__help__subcmd__peer__subcmd__export-built-in_commands] )) ||
-_bbcli__subcmd__help__subcmd__peer__subcmd__export-built-in_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli help peer export-built-in commands' commands "$@"
 }
 (( $+functions[_bbcli__subcmd__help__subcmd__peer__subcmd__list_commands] )) ||
 _bbcli__subcmd__help__subcmd__peer__subcmd__list_commands() {
@@ -1016,7 +996,6 @@ _bbcli__subcmd__peer_commands() {
 'pin:Pin a tracked peer so local policy treats it as operator-protected' \
 'unpin:Remove an existing operator pin from a tracked peer' \
 'list:Print the daemon'\''s current peer inventory' \
-'export-built-in:Print the Rust source file for the compiled built-in peer list' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'bbcli peer commands' commands "$@"
@@ -1026,11 +1005,6 @@ _bbcli__subcmd__peer__subcmd__connect_commands() {
     local commands; commands=()
     _describe -t commands 'bbcli peer connect commands' commands "$@"
 }
-(( $+functions[_bbcli__subcmd__peer__subcmd__export-built-in_commands] )) ||
-_bbcli__subcmd__peer__subcmd__export-built-in_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli peer export-built-in commands' commands "$@"
-}
 (( $+functions[_bbcli__subcmd__peer__subcmd__help_commands] )) ||
 _bbcli__subcmd__peer__subcmd__help_commands() {
     local commands; commands=(
@@ -1038,7 +1012,6 @@ _bbcli__subcmd__peer__subcmd__help_commands() {
 'pin:Pin a tracked peer so local policy treats it as operator-protected' \
 'unpin:Remove an existing operator pin from a tracked peer' \
 'list:Print the daemon'\''s current peer inventory' \
-'export-built-in:Print the Rust source file for the compiled built-in peer list' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'bbcli peer help commands' commands "$@"
@@ -1047,11 +1020,6 @@ _bbcli__subcmd__peer__subcmd__help_commands() {
 _bbcli__subcmd__peer__subcmd__help__subcmd__connect_commands() {
     local commands; commands=()
     _describe -t commands 'bbcli peer help connect commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__peer__subcmd__help__subcmd__export-built-in_commands] )) ||
-_bbcli__subcmd__peer__subcmd__help__subcmd__export-built-in_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli peer help export-built-in commands' commands "$@"
 }
 (( $+functions[_bbcli__subcmd__peer__subcmd__help__subcmd__help_commands] )) ||
 _bbcli__subcmd__peer__subcmd__help__subcmd__help_commands() {

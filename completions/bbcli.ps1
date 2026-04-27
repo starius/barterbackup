@@ -68,7 +68,6 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             [CompletionResult]::new('pin', 'pin', [CompletionResultType]::ParameterValue, 'Pin a tracked peer so local policy treats it as operator-protected')
             [CompletionResult]::new('unpin', 'unpin', [CompletionResultType]::ParameterValue, 'Remove an existing operator pin from a tracked peer')
             [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print the daemon''s current peer inventory')
-            [CompletionResult]::new('export-built-in', 'export-built-in', [CompletionResultType]::ParameterValue, 'Print the Rust source file for the compiled built-in peer list')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
         }
@@ -95,17 +94,11 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
             break
         }
-        'bbcli;peer;export-built-in' {
-            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
-            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
-            break
-        }
         'bbcli;peer;help' {
             [CompletionResult]::new('connect', 'connect', [CompletionResultType]::ParameterValue, 'Add a peer onion identifier to the daemon''s known peer list')
             [CompletionResult]::new('pin', 'pin', [CompletionResultType]::ParameterValue, 'Pin a tracked peer so local policy treats it as operator-protected')
             [CompletionResult]::new('unpin', 'unpin', [CompletionResultType]::ParameterValue, 'Remove an existing operator pin from a tracked peer')
             [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print the daemon''s current peer inventory')
-            [CompletionResult]::new('export-built-in', 'export-built-in', [CompletionResultType]::ParameterValue, 'Print the Rust source file for the compiled built-in peer list')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
         }
@@ -119,9 +112,6 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             break
         }
         'bbcli;peer;help;list' {
-            break
-        }
-        'bbcli;peer;help;export-built-in' {
             break
         }
         'bbcli;peer;help;help' {
@@ -344,7 +334,6 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             [CompletionResult]::new('pin', 'pin', [CompletionResultType]::ParameterValue, 'Pin a tracked peer so local policy treats it as operator-protected')
             [CompletionResult]::new('unpin', 'unpin', [CompletionResultType]::ParameterValue, 'Remove an existing operator pin from a tracked peer')
             [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print the daemon''s current peer inventory')
-            [CompletionResult]::new('export-built-in', 'export-built-in', [CompletionResultType]::ParameterValue, 'Print the Rust source file for the compiled built-in peer list')
             break
         }
         'bbcli;help;peer;connect' {
@@ -357,9 +346,6 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             break
         }
         'bbcli;help;peer;list' {
-            break
-        }
-        'bbcli;help;peer;export-built-in' {
             break
         }
         'bbcli;help;file' {

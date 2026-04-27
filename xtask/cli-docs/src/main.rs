@@ -101,16 +101,17 @@ where
     F: Fn() -> Command + Copy,
 {
     let mut outputs = Vec::new();
+    let command = command_builder();
     outputs.push(GeneratedOutput {
         relative_path: PathBuf::from(DOCS_DIR).join(format!("{name}.md")),
-        contents: render_markdown_manual(command_builder()),
+        contents: render_markdown_manual(command.clone()),
     });
     outputs.push(GeneratedOutput {
         relative_path: PathBuf::from(MAN_DIR).join(format!("{name}.1")),
-        contents: render_man_page(command_builder()),
+        contents: render_man_page(command.clone()),
     });
 
-    for (shell_name, contents) in render_completions(name, command_builder()) {
+    for (shell_name, contents) in render_completions(name, visible_completion_command(command)) {
         outputs.push(GeneratedOutput {
             relative_path: PathBuf::from(COMPLETIONS_DIR).join(format!("{name}.{shell_name}")),
             contents,
@@ -128,6 +129,84 @@ fn render_completions(name: &str, command: Command) -> Vec<(&'static str, String
         ("ps1", render_completion(name, command.clone(), PowerShell)),
         ("zsh", render_completion(name, command, Zsh)),
     ]
+}
+
+fn leak_str(value: impl Into<String>) -> &'static str {
+    Box::leak(value.into().into_boxed_str())
+}
+
+fn visible_completion_command(command: Command) -> Command {
+    let mut visible = Command::new(leak_str(command.get_name()))
+        .args(
+            command
+                .get_arguments()
+                .filter(|argument| !argument.is_hide_set())
+                .cloned(),
+        )
+        .subcommands(
+            command
+                .get_subcommands()
+                .filter(|subcommand| !subcommand.is_hide_set())
+                .cloned()
+                .map(visible_completion_command),
+        );
+
+    if let Some(about) = command.get_about() {
+        visible = visible.about(about.clone());
+    }
+    if let Some(long_about) = command.get_long_about() {
+        visible = visible.long_about(long_about.clone());
+    }
+    if let Some(version) = command.get_version() {
+        visible = visible.version(leak_str(version));
+    }
+    if let Some(long_version) = command.get_long_version() {
+        visible = visible.long_version(leak_str(long_version));
+    }
+    if let Some(heading) = command.get_subcommand_help_heading() {
+        visible = visible.subcommand_help_heading(leak_str(heading.to_string()));
+    }
+    if let Some(value_name) = command.get_subcommand_value_name() {
+        visible = visible.subcommand_value_name(leak_str(value_name.to_string()));
+    }
+    if command.is_arg_required_else_help_set() {
+        visible = visible.arg_required_else_help(true);
+    }
+    if command.is_args_conflicts_with_subcommands_set() {
+        visible = visible.args_conflicts_with_subcommands(true);
+    }
+    if command.is_disable_help_flag_set() {
+        visible = visible.disable_help_flag(true);
+    }
+    if command.is_disable_help_subcommand_set() {
+        visible = visible.disable_help_subcommand(true);
+    }
+    if command.is_disable_version_flag_set() {
+        visible = visible.disable_version_flag(true);
+    }
+    if command.is_multicall_set() {
+        visible = visible.multicall(true);
+    }
+    if command.is_next_line_help_set() {
+        visible = visible.next_line_help(true);
+    }
+    if command.is_no_binary_name_set() {
+        visible = visible.no_binary_name(true);
+    }
+    if command.is_propagate_version_set() {
+        visible = visible.propagate_version(true);
+    }
+    if command.is_subcommand_negates_reqs_set() {
+        visible = visible.subcommand_negates_reqs(true);
+    }
+    if command.is_subcommand_precedence_over_arg_set() {
+        visible = visible.subcommand_precedence_over_arg(true);
+    }
+    if command.is_subcommand_required_set() {
+        visible = visible.subcommand_required(true);
+    }
+
+    visible
 }
 
 fn render_completion<G>(name: &str, mut command: Command, generator: G) -> String
@@ -315,12 +394,45 @@ mod tests {
             .iter()
             .find(|output| output.relative_path.to_string_lossy() == "docs/cli/bbcli.md")
             .expect("bbcli markdown output");
+        let bbd_completions: Vec<_> = rendered
+            .iter()
+            .filter(|output| {
+                output
+                    .relative_path
+                    .to_string_lossy()
+                    .starts_with("completions/bbd.")
+            })
+            .collect();
+        let bbcli_completions: Vec<_> = rendered
+            .iter()
+            .filter(|output| {
+                output
+                    .relative_path
+                    .to_string_lossy()
+                    .starts_with("completions/bbcli.")
+            })
+            .collect();
 
         assert!(bbd_markdown.contents.contains("--arti-config"));
         assert!(!bbd_markdown.contents.contains("--test-clock"));
         assert!(!bbd_markdown.contents.contains("--disable-maintenance"));
+        assert!(!bbd_markdown
+            .contents
+            .contains("--peer-metadata-flush-delay-secs"));
         assert!(bbcli_markdown.contents.contains("`peer`"));
         assert!(!bbcli_markdown.contents.contains("export-built-in"));
+        assert!(!bbd_completions.is_empty());
+        assert!(!bbcli_completions.is_empty());
+        for completion in bbd_completions {
+            assert!(!completion.contents.contains("--test-clock"));
+            assert!(!completion.contents.contains("--disable-maintenance"));
+            assert!(!completion
+                .contents
+                .contains("--peer-metadata-flush-delay-secs"));
+        }
+        for completion in bbcli_completions {
+            assert!(!completion.contents.contains("export-built-in"));
+        }
     }
 
     #[test]
