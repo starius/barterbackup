@@ -53,16 +53,19 @@ func PrepareSuite(ctx context.Context) (*Suite, error) {
 	return PrepareChutneySuite(ctx)
 }
 
-// PrepareChutneySuite boots the shared image and private Tor network used by
-// the Chutney-backed Docker integration tests.
-func PrepareChutneySuite(ctx context.Context) (*Suite, error) {
+func prepareBaseSuite(baseWorkRoot string) (*Suite, error) {
 	repoRoot, err := findRepoRoot()
 	if err != nil {
 		return nil, err
 	}
-	workRoot, err := configuredWorkRoot()
-	if err != nil {
-		return nil, err
+	workRoot := baseWorkRoot
+	if workRoot == "" {
+		workRoot, err = configuredWorkRoot()
+		if err != nil {
+			return nil, err
+		}
+	} else if err := os.MkdirAll(workRoot, 0o755); err != nil {
+		return nil, fmt.Errorf("create integration work root: %w", err)
 	}
 	if runtime.GOOS != "linux" {
 		return nil, fmt.Errorf("Docker integration tests require Linux hosts")
@@ -71,17 +74,26 @@ func PrepareChutneySuite(ctx context.Context) (*Suite, error) {
 		return nil, err
 	}
 
-	suite := &Suite{
+	return &Suite{
 		repoRoot:     repoRoot,
 		workRoot:     workRoot,
 		imageTag:     "barterbackup-integration:local",
 		parallelGate: make(chan struct{}, configuredParallelism()),
+	}, nil
+}
+
+// PrepareChutneySuite boots the shared image and private Tor network used by
+// the Chutney-backed Docker integration tests.
+func PrepareChutneySuite(ctx context.Context) (*Suite, error) {
+	suite, err := prepareBaseSuite("")
+	if err != nil {
+		return nil, err
 	}
 
 	if err := suite.buildImage(ctx); err != nil {
 		return nil, err
 	}
-	network, err := PrepareChutneyNetwork(ctx, workRoot)
+	network, err := PrepareChutneyNetwork(ctx, suite.workRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -92,26 +104,9 @@ func PrepareChutneySuite(ctx context.Context) (*Suite, error) {
 // PreparePublicTorSuite boots the shared image for Docker smoke tests that use
 // the default public Tor network instead of a private Chutney network.
 func PreparePublicTorSuite(ctx context.Context) (*Suite, error) {
-	repoRoot, err := findRepoRoot()
+	suite, err := prepareBaseSuite("")
 	if err != nil {
 		return nil, err
-	}
-	workRoot, err := configuredWorkRoot()
-	if err != nil {
-		return nil, err
-	}
-	if runtime.GOOS != "linux" {
-		return nil, fmt.Errorf("Docker integration tests require Linux hosts")
-	}
-	if _, err := execLookPath("docker"); err != nil {
-		return nil, err
-	}
-
-	suite := &Suite{
-		repoRoot:     repoRoot,
-		workRoot:     workRoot,
-		imageTag:     "barterbackup-integration:local",
-		parallelGate: make(chan struct{}, configuredParallelism()),
 	}
 
 	if err := suite.buildImage(ctx); err != nil {
@@ -257,6 +252,12 @@ func findStaticBBDBinary(repoRoot string) (string, error) {
 	return findStaticBBDBinaryForGOARCH(repoRoot, runtime.GOARCH)
 }
 
+// FindStaticBBCLIBinary returns one host-side static bbcli binary that matches
+// the current Go architecture.
+func FindStaticBBCLIBinary(repoRoot string) (string, error) {
+	return findStaticBBCLIBinaryForGOARCH(repoRoot, runtime.GOARCH)
+}
+
 func findStaticBBDBinaryForGOARCH(repoRoot string, goarch string) (string, error) {
 	if override := os.Getenv("BB_DOCKER_BBD_BIN"); override != "" {
 		return override, nil
@@ -285,6 +286,37 @@ func staticBBDBinaryCandidates(repoRoot string, goarch string) ([]string, error)
 	case "arm64":
 		return []string{
 			filepath.Join(repoRoot, "target-static", "aarch64-unknown-linux-musl", "aarch64-unknown-linux-musl", "release", "bbd"),
+		}, nil
+	default:
+		return nil, fmt.Errorf("Docker integration tests do not support GOARCH=%s", goarch)
+	}
+}
+
+func findStaticBBCLIBinaryForGOARCH(repoRoot string, goarch string) (string, error) {
+	candidates, err := staticBBCLIBinaryCandidates(repoRoot, goarch)
+	if err != nil {
+		return "", err
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf(
+		"could not find a static bbcli binary for %s; run make build-static first",
+		goarch,
+	)
+}
+
+func staticBBCLIBinaryCandidates(repoRoot string, goarch string) ([]string, error) {
+	switch goarch {
+	case "amd64":
+		return []string{
+			filepath.Join(repoRoot, "target-static", "x86_64-unknown-linux-musl", "x86_64-unknown-linux-musl", "release", "bbcli"),
+		}, nil
+	case "arm64":
+		return []string{
+			filepath.Join(repoRoot, "target-static", "aarch64-unknown-linux-musl", "aarch64-unknown-linux-musl", "release", "bbcli"),
 		}, nil
 	default:
 		return nil, fmt.Errorf("Docker integration tests do not support GOARCH=%s", goarch)

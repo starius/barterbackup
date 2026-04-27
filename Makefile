@@ -32,7 +32,7 @@ STATIC_LINUX_ARM64_ENV := \
 	CXX_aarch64_unknown_linux_musl=aarch64-unknown-linux-musl-g++ \
 	AR_aarch64_unknown_linux_musl=aarch64-unknown-linux-musl-ar
 
-.PHONY: build test unit fmt clippy install rpc cli-docs integration-test-docker integration-test-docker-tor-smoke build-static build-static-linux-amd64 build-static-linux-arm64 build-windows sanitize-address clean
+.PHONY: build test unit fmt clippy install rpc cli-docs integration-test-docker integration-test-docker-tor-smoke docker-dev-env-build docker-dev-env build-static build-static-linux-amd64 build-static-linux-arm64 build-windows sanitize-address clean
 
 build:
 	$(CARGO) build --workspace
@@ -75,6 +75,13 @@ integration-test-docker-tor-smoke:
 	$(MAKE) build-static
 	$(MAKE) rpc
 	cd integration/docker && BB_DOCKER_REAL_TOR=1 $(GO) test -run TestDockerRealTorRecoverySmoke -count=1 -timeout 30m
+
+docker-dev-env-build:
+	$(MAKE) build-static
+	$(MAKE) rpc
+
+docker-dev-env:
+	cd integration/docker && $(GO) run ./cmd/bbdevenv -- $(ARGS)
 
 install:
 	$(CARGO) install --path cmd/bbd --locked

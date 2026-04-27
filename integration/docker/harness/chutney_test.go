@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 	"time"
 
@@ -157,5 +158,47 @@ func TestDisableChutneyTorSandboxLeavesMissingDirectiveUnchanged(t *testing.T) {
 	}
 	if string(updated) != string(original) {
 		t.Fatalf("expected unchanged torrc, got %q", string(updated))
+	}
+}
+
+func TestCollectChutneyListenerPIDs(t *testing.T) {
+	pids := map[int]struct{}{}
+	output := []byte(`
+LISTEN 0 128 127.0.0.1:5101 0.0.0.0:* users:(("tor",pid=111,fd=7))
+LISTEN 0 128 127.0.0.1:9999 0.0.0.0:* users:(("ignored",pid=222,fd=7))
+LISTEN 0 128 [::1]:8003 [::]:* users:(("tor",pid=333,fd=7),("python3",pid=444,fd=8))
+`)
+
+	collectChutneyListenerPIDs(pids, regexp.MustCompile(`pid=(\d+)`), output)
+
+	if len(pids) != 3 {
+		t.Fatalf("unexpected pid count: %+v", pids)
+	}
+	if _, ok := pids[111]; !ok {
+		t.Fatalf("missing pid 111: %+v", pids)
+	}
+	if _, ok := pids[333]; !ok {
+		t.Fatalf("missing pid 333: %+v", pids)
+	}
+	if _, ok := pids[444]; !ok {
+		t.Fatalf("missing pid 444: %+v", pids)
+	}
+	if _, ok := pids[222]; ok {
+		t.Fatalf("unexpected non-Chutney pid: %+v", pids)
+	}
+}
+
+func TestCollectPIDList(t *testing.T) {
+	pids := map[int]struct{}{}
+	collectPIDList(pids, []byte("123\n456\nnot-a-pid\n123\n"))
+
+	if len(pids) != 2 {
+		t.Fatalf("unexpected pid count: %+v", pids)
+	}
+	if _, ok := pids[123]; !ok {
+		t.Fatalf("missing pid 123: %+v", pids)
+	}
+	if _, ok := pids[456]; !ok {
+		t.Fatalf("missing pid 456: %+v", pids)
 	}
 }

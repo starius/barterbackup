@@ -2,6 +2,7 @@ package harness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,6 +33,11 @@ func (n *Node) Name() string {
 // LocalAddr returns the node's host-side local clirpc address.
 func (n *Node) LocalAddr() string {
 	return n.localAddr
+}
+
+// ContainerName returns the backing Docker container name.
+func (n *Node) ContainerName() string {
+	return n.containerName
 }
 
 // DataDir returns the node's host-side data directory.
@@ -119,9 +125,46 @@ func (n *Node) ForceRemove(ctx context.Context) {
 	_, _ = runCommand(ctx, n.suite.repoRoot, nil, "docker", "rm", "-f", n.containerName)
 }
 
+// ContainerState returns the backing Docker container runtime state.
+func (n *Node) ContainerState(ctx context.Context) (string, error) {
+	output, err := runCommand(
+		ctx,
+		n.suite.repoRoot,
+		nil,
+		"docker",
+		"inspect",
+		"-f",
+		"{{.State.Status}}",
+		n.containerName,
+	)
+	if err != nil {
+		if strings.Contains(err.Error(), "No such object") {
+			return "", os.ErrNotExist
+		}
+		return "", err
+	}
+	state := string(bytesTrimSpace(output))
+	if state == "" {
+		return "", errors.New("docker inspect returned an empty container state")
+	}
+	return state, nil
+}
+
+// CurrentLogs returns the current docker logs output for the node.
+func (n *Node) CurrentLogs(ctx context.Context) ([]byte, error) {
+	output, err := runCommand(ctx, n.suite.repoRoot, nil, "docker", "logs", n.containerName)
+	if err != nil {
+		if strings.Contains(err.Error(), "No such container") {
+			return nil, os.ErrNotExist
+		}
+		return nil, err
+	}
+	return output, nil
+}
+
 // FetchLogs writes the node's container logs to logPath.
 func (n *Node) FetchLogs(ctx context.Context, logPath string) error {
-	output, err := runCommand(ctx, n.suite.repoRoot, nil, "docker", "logs", n.containerName)
+	output, err := n.CurrentLogs(ctx)
 	if err != nil {
 		output = []byte(err.Error())
 	}

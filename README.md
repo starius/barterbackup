@@ -85,6 +85,8 @@ make rpc
 make cli-docs
 make integration-test-docker
 make integration-test-docker-tor-smoke
+make docker-dev-env-build
+make docker-dev-env ARGS='--name lab up --nodes 3'
 ```
 
 `make build-static` produces musl-linked Linux binaries for the current Linux
@@ -160,7 +162,8 @@ The Docker integration harness requires:
 - a working Docker daemon
 
 For the detailed Docker workflow, runtime layout, artifact handling, timeout
-debugging, and harness-specific knobs, see
+debugging, harness-specific knobs, and the persistent manual Docker
+environment, see
 [integration/docker/README.md](/home/user/barterbackup/rust2/integration/docker/README.md).
 
 ## Configuration

@@ -14,16 +14,15 @@ import (
 
 // WaitForState waits until local cli keys exist and the node answers State.
 func (n *Node) WaitForState(ctx context.Context) (*clirpc.StateResponse, error) {
+	if err := n.WaitForLocalRPC(ctx); err != nil {
+		return nil, err
+	}
 	deadline, cancel := context.WithTimeout(ctx, defaultLongTimeout)
 	defer cancel()
 
 	for {
 		if err := ctxErr(deadline); err != nil {
 			return nil, err
-		}
-		if !n.hasCLIKeys() {
-			time.Sleep(200 * time.Millisecond)
-			continue
 		}
 		client, conn, err := DialLocalClient(deadline, n.localAddr, n.keysDir())
 		if err != nil {
@@ -37,6 +36,43 @@ func (n *Node) WaitForState(ctx context.Context) (*clirpc.StateResponse, error) 
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// WaitForLocalRPC waits until local cli keys exist and the node accepts one
+// local mTLS connection.
+func (n *Node) WaitForLocalRPC(ctx context.Context) error {
+	deadline, cancel := context.WithTimeout(ctx, defaultLongTimeout)
+	defer cancel()
+
+	for {
+		if err := ctxErr(deadline); err != nil {
+			return err
+		}
+		if !n.hasCLIKeys() {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		_, conn, err := DialLocalClient(deadline, n.localAddr, n.keysDir())
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// State returns one direct State RPC response from the local daemon.
+func (n *Node) State(ctx context.Context) (*clirpc.StateResponse, error) {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	response, err := client.State(ctx, &clirpc.StateRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("get state from %s: %w", n.name, err)
+	}
+	return response, nil
 }
 
 // Init initializes the node's storage with its configured password.

@@ -34,6 +34,33 @@ nix develop --command make integration-test-docker-tor-smoke
 - regenerates the Go `clirpc` stubs
 - runs `TestDockerRealTorRecoverySmoke` against public Tor
 
+## Persistent Manual Environment
+
+The same Docker/Chutney runtime can also stay up as a persistent manual lab for
+interactive `bbcli` work and recovery drills.
+
+Prepare the binaries and generated Go stubs once:
+
+```bash
+nix develop --command make docker-dev-env-build
+```
+
+Then drive the environment through `bbdevenv`:
+
+```bash
+nix develop --command make docker-dev-env ARGS='--name lab up --nodes 3'
+nix develop --command make docker-dev-env ARGS='--name lab status'
+nix develop --command make docker-dev-env ARGS='--name lab cli 0 -- init hunter2'
+nix develop --command make docker-dev-env ARGS='--name lab cli 0 -- unlock hunter2'
+nix develop --command make docker-dev-env ARGS='--name lab cli peer1 -- state'
+nix develop --command make docker-dev-env ARGS='--name lab recreate 0'
+nix develop --command make docker-dev-env ARGS='--name lab down'
+```
+
+`bbdevenv` always runs `bbcli` on the host side. Only `bbd` runs inside Docker.
+See [cmd/bbdevenv/README.md](/home/user/barterbackup/rust2/integration/docker/cmd/bbdevenv/README.md)
+for the command layout, clock controls, and recovery workflow.
+
 If Docker is not already running on the machine, start `dockerd` from the dev
 shell in a separate terminal:
 

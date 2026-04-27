@@ -76,12 +76,56 @@ type fallbackCache struct {
 // PrepareChutneyNetwork ensures one pinned Chutney checkout exists, starts one
 // private hs-v3-arti network, and loads the translated Arti client template.
 func PrepareChutneyNetwork(ctx context.Context, workRoot string) (*ChutneyNetwork, error) {
+	return prepareChutneyNetwork(ctx, workRoot, filepath.Join(workRoot, "chutney-network"), true)
+}
+
+// PreparePersistentChutneyNetwork ensures one pinned Chutney checkout exists
+// and reuses or recreates one persistent private hs-v3-arti network rooted at
+// dataDir.
+func PreparePersistentChutneyNetwork(
+	ctx context.Context,
+	workRoot string,
+	dataDir string,
+) (*ChutneyNetwork, error) {
+	return prepareChutneyNetwork(ctx, workRoot, dataDir, false)
+}
+
+func prepareChutneyNetwork(
+	ctx context.Context,
+	workRoot string,
+	dataDir string,
+	cleanStart bool,
+) (*ChutneyNetwork, error) {
+	network, err := openChutneyNetwork(workRoot, dataDir)
+	if err != nil {
+		return nil, err
+	}
+	if cleanStart {
+		_ = cleanupStaleChutneyListeners(ctx)
+		_ = network.Close()
+		if err := os.MkdirAll(network.dataDir, 0o755); err != nil {
+			return nil, fmt.Errorf("create chutney data dir: %w", err)
+		}
+		if err := network.start(ctx); err != nil {
+			_ = network.Close()
+			return nil, err
+		}
+		return network, nil
+	}
+	if err := network.ensureStarted(ctx); err != nil {
+		_ = network.Close()
+		return nil, err
+	}
+	return network, nil
+}
+
+func openChutneyNetwork(workRoot string, dataDir string) (*ChutneyNetwork, error) {
 	if err := os.MkdirAll(workRoot, 0o755); err != nil {
 		return nil, fmt.Errorf("create integration work root: %w", err)
 	}
 
 	chutneyDir := filepath.Join(workRoot, "chutney-src")
-	if err := ensureChutneyCheckout(ctx, chutneyDir); err != nil {
+	if err := ensureChutneyCheckout(context.Background(), chutneyDir); err != nil {
 		return nil, err
 	}
 
@@ -96,24 +140,13 @@ func PrepareChutneyNetwork(ctx context.Context, workRoot string) (*ChutneyNetwor
 		return nil, err
 	}
 
-	network := &ChutneyNetwork{
+	return &ChutneyNetwork{
 		repoDir:      chutneyDir,
-		dataDir:      filepath.Join(workRoot, "chutney-network"),
+		dataDir:      dataDir,
 		artiBinary:   artiBinary,
-		commandEnv:   []string{"CHUTNEY_DATA_DIR=" + filepath.Join(workRoot, "chutney-network"), "CHUTNEY_ARTI=" + artiBinary},
+		commandEnv:   []string{"CHUTNEY_DATA_DIR=" + dataDir, "CHUTNEY_ARTI=" + artiBinary},
 		chutneyEntry: filepath.Join(chutneyDir, "chutney"),
-	}
-
-	_ = cleanupStaleChutneyListeners(ctx)
-	_ = network.Close()
-	if err := os.MkdirAll(network.dataDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create chutney data dir: %w", err)
-	}
-	if err := network.start(ctx); err != nil {
-		_ = network.Close()
-		return nil, err
-	}
-	return network, nil
+	}, nil
 }
 
 // Close stops the private Tor network and removes its temporary state.
@@ -123,6 +156,12 @@ func (n *ChutneyNetwork) Close() error {
 
 	_, _ = runCommand(ctx, n.repoDir, n.commandEnv, n.chutneyEntry, "stop")
 	return os.RemoveAll(n.dataDir)
+}
+
+// Healthy reports whether the private Chutney network is currently responding
+// to `chutney status`.
+func (n *ChutneyNetwork) Healthy(ctx context.Context) error {
+	return n.waitForHealthyStatus(ctx)
 }
 
 // WriteNodeConfig renders one translated Arti client config into nodeDataDir.
@@ -160,6 +199,35 @@ func (n *ChutneyNetwork) start(ctx context.Context) error {
 		return fmt.Errorf("check chutney network status: %w", err)
 	}
 
+	if err := n.loadTranslatedConfig(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (n *ChutneyNetwork) ensureStarted(ctx context.Context) error {
+	if _, err := os.Stat(n.dataDir); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("stat chutney data dir: %w", err)
+		}
+		_ = cleanupStaleChutneyListeners(ctx)
+		if err := os.MkdirAll(n.dataDir, 0o755); err != nil {
+			return fmt.Errorf("create chutney data dir: %w", err)
+		}
+		return n.start(ctx)
+	}
+	if err := n.waitForHealthyStatus(ctx); err == nil {
+		return n.loadTranslatedConfig()
+	}
+	_ = n.Close()
+	_ = cleanupStaleChutneyListeners(ctx)
+	if err := os.MkdirAll(n.dataDir, 0o755); err != nil {
+		return fmt.Errorf("create chutney data dir: %w", err)
+	}
+	return n.start(ctx)
+}
+
+func (n *ChutneyNetwork) loadTranslatedConfig() error {
 	rawConfigPath, err := n.findRawConfigPath()
 	if err != nil {
 		return err
@@ -257,11 +325,34 @@ func translateChutneyConfig(raw rawChutneyConfig) translatedArtiConfig {
 }
 
 func cleanupStaleChutneyListeners(ctx context.Context) error {
-	output, err := runCommand(ctx, "", nil, "ss", "-H", "-ltnp")
-	if err != nil {
-		return err
+	pidPattern := regexp.MustCompile(`pid=(\d+)`)
+	pids := map[int]struct{}{}
+	if output, err := runCommand(ctx, "", nil, "ss", "-H", "-ltnp"); err == nil {
+		collectChutneyListenerPIDs(pids, pidPattern, output)
+	}
+	if output, err := runCommand(ctx, "", nil, "pgrep", "-f", "/tmp/bbmc/.*/torrc"); err == nil {
+		collectPIDList(pids, output)
 	}
 
+	if len(pids) == 0 {
+		return nil
+	}
+
+	for pid := range pids {
+		_, _ = runCommand(ctx, "", nil, "kill", "-TERM", strconv.Itoa(pid))
+	}
+	time.Sleep(500 * time.Millisecond)
+	for pid := range pids {
+		_, _ = runCommand(ctx, "", nil, "kill", "-KILL", strconv.Itoa(pid))
+	}
+	return nil
+}
+
+func collectChutneyListenerPIDs(
+	pids map[int]struct{},
+	pidPattern *regexp.Regexp,
+	output []byte,
+) {
 	targetPorts := map[int]struct{}{}
 	for port := 5100; port <= 5108; port++ {
 		targetPorts[port] = struct{}{}
@@ -273,8 +364,6 @@ func cleanupStaleChutneyListeners(ctx context.Context) error {
 		targetPorts[port] = struct{}{}
 	}
 
-	pidPattern := regexp.MustCompile(`pid=(\d+)`)
-	pids := map[int]struct{}{}
 	for _, line := range strings.Split(string(output), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 5 {
@@ -299,19 +388,19 @@ func cleanupStaleChutneyListeners(ctx context.Context) error {
 			}
 		}
 	}
+}
 
-	if len(pids) == 0 {
-		return nil
+func collectPIDList(pids map[int]struct{}, output []byte) {
+	for _, line := range strings.Split(string(output), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		pidValue, err := strconv.Atoi(trimmed)
+		if err == nil {
+			pids[pidValue] = struct{}{}
+		}
 	}
-
-	for pid := range pids {
-		_, _ = runCommand(ctx, "", nil, "kill", "-TERM", strconv.Itoa(pid))
-	}
-	time.Sleep(500 * time.Millisecond)
-	for pid := range pids {
-		_, _ = runCommand(ctx, "", nil, "kill", "-KILL", strconv.Itoa(pid))
-	}
-	return nil
 }
 
 func disableChutneyTorSandbox(dataDir string) error {
