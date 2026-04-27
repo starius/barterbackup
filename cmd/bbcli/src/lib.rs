@@ -1576,6 +1576,13 @@ fn friendly_cli_error(error: anyhow::Error, daemon_addr: &str) -> anyhow::Error 
                     "peer content exceeds the current mirrored-peer size limit; inspect `bbcli config get --resource-policy` for the active ceiling"
                 )
             }
+            Code::ResourceExhausted
+                if status.message() == "current shared content exceeds the fixed 4 MiB limit" =>
+            {
+                anyhow!(
+                    "the resulting shared content blob would exceed the fixed 4 MiB limit; shrink file data or reduce shared metadata before retrying"
+                )
+            }
             Code::FailedPrecondition
                 if status.message() == "current content exceeds the peer transport limit" =>
             {
@@ -2648,6 +2655,17 @@ mod tests {
         assert!(current_content_oversize
             .to_string()
             .contains("current local content exceeds the mirrored-peer size limit"));
+
+        let local_shared_blob_oversize = friendly_cli_error(
+            tonic::Status::resource_exhausted(
+                "current shared content exceeds the fixed 4 MiB limit",
+            )
+            .into(),
+            "https://127.0.0.1:9911",
+        );
+        assert!(local_shared_blob_oversize
+            .to_string()
+            .contains("resulting shared content blob would exceed the fixed 4 MiB limit"));
 
         let timeout = friendly_cli_error(
             tonic::Status::deadline_exceeded("connect peer timed out").into(),

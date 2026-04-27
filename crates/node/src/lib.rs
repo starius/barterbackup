@@ -4130,6 +4130,9 @@ fn map_storage_error(error: StorageError) -> Status {
         StorageError::CannotDeleteLastFile => {
             Status::failed_precondition("cannot delete the last file")
         }
+        StorageError::LocalContentTooLarge => {
+            Status::resource_exhausted("current shared content exceeds the fixed 4 MiB limit")
+        }
         StorageError::RecoveryRequired(message) => Status::failed_precondition(message),
         other => Status::new(Code::Internal, other.to_string()),
     }
@@ -5102,6 +5105,10 @@ mod tests {
         assert_eq!(
             storage_policy.max_peer_content_bytes,
             max_peer_content_bytes_i64()
+        );
+        assert_eq!(
+            storage_policy.max_peer_content_bytes,
+            i64::try_from(storage::MAX_SHARED_CONTENT_BLOB_BYTES).unwrap_or(i64::MAX)
         );
         assert_eq!(
             storage_policy.peer_grpc_message_limit_bytes,

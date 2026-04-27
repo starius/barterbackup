@@ -255,6 +255,31 @@ impl ContentCodec {
         })
     }
 
+    /// Return the encoded blob length for one revision without allocating or
+    /// producing ciphertext bytes.
+    pub fn encoded_len(
+        &self,
+        files: &[PlainFile],
+        peers: &[storedpb::Peer],
+    ) -> Result<usize, ContentError> {
+        let ordered_files = normalize_files(files)?;
+        let metadata = build_metadata(&ordered_files, peers);
+        let metadata_plain = metadata.encode_to_vec();
+        let metadata_ciphertext_len = encrypted_segment_len(metadata_plain.len());
+
+        let mut total_len = HEADER_MAGIC.len() + 1 + CONTENT_ID_LEN + metadata_ciphertext_len;
+        for file in &ordered_files {
+            total_len = total_len
+                .checked_add(encrypted_segment_len(file.data.len()))
+                .ok_or(ContentError::InvalidMetadataLength)?;
+        }
+        total_len = total_len
+            .checked_add(aligned_padding(total_len, CONTENT_ALIGNMENT))
+            .ok_or(ContentError::InvalidMetadataLength)?;
+
+        Ok(total_len)
+    }
+
     /// Decode an encrypted content blob into plaintext files and metadata.
     pub fn decode(&self, encoded: &[u8]) -> Result<DecodedContent, ContentError> {
         // Parse and authenticate the outer header before touching inner data.
@@ -678,6 +703,10 @@ mod tests {
             first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
             reachability: storedpb::PeerReachability::Unknown as i32,
             last_live_at: 0,
+            pinned_by_us: false,
+            pins_us: false,
+            our_content_last_verified_content_id: Vec::new(),
+            our_content_last_verified_at: 0,
         }];
         let encoded = codec
             .encode(sample_seed(7), &sample_files(), &peers)
@@ -717,6 +746,15 @@ mod tests {
         assert_ne!(first.bytes, second.bytes);
         assert_eq!(first.revision, second.revision);
         assert_eq!(first.content_id, second.content_id);
+    }
+
+    #[test]
+    fn encoded_len_matches_encoded_blob_length() {
+        let codec = codec();
+        let files = sample_files();
+        let encoded = codec.encode(sample_seed(11), &files, &[]).unwrap();
+
+        assert_eq!(codec.encoded_len(&files, &[]).unwrap(), encoded.bytes.len());
     }
 
     #[test]

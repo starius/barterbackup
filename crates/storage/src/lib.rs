@@ -28,6 +28,9 @@ const PEER_STATE_TAG_LEN: usize = 16;
 const MIRRORED_BLOB_VERSION: u8 = 1;
 const MIRRORED_BLOB_NONCE_LEN: usize = 12;
 const MIRRORED_BLOB_TAG_LEN: usize = 16;
+/// MAX_SHARED_CONTENT_BLOB_BYTES is the fixed largest local shared blob that
+/// may be accepted as the active current revision.
+pub const MAX_SHARED_CONTENT_BLOB_BYTES: usize = 4 * 1024 * 1024;
 
 /// StorageError reports persistence, recovery, and validation failures.
 #[derive(Debug, Error)]
@@ -55,6 +58,10 @@ pub enum StorageError {
     /// The provided timestamp is invalid.
     #[error("invalid timestamp")]
     InvalidTimestamp,
+
+    /// The projected shared blob would exceed the fixed local ceiling.
+    #[error("current shared content exceeds the fixed 4 MiB limit")]
+    LocalContentTooLarge,
 
     /// The content codec rejected the blob.
     #[error("content error: {0}")]
@@ -289,6 +296,33 @@ fn migrate_peer(peer: &mut storedpb::Peer) {
     }
 }
 
+/// Ensure one peer entry exists in a mutable peer vector.
+fn ensure_peer_entry(peers: &mut Vec<storedpb::Peer>, onion_pubkey: &[u8]) {
+    if peers
+        .iter()
+        .any(|peer| peer.onion_pubkey.as_slice() == onion_pubkey)
+    {
+        return;
+    }
+
+    peers.push(storedpb::Peer {
+        onion_pubkey: onion_pubkey.to_vec(),
+        score_seconds: 0,
+        score_measured_at: 0,
+        content_id: Vec::new(),
+        latest_known_content: None,
+        latest_cached_content: None,
+        origin: storedpb::PeerOrigin::Discovered as i32,
+        first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
+        reachability: storedpb::PeerReachability::Unknown as i32,
+        last_live_at: 0,
+        pinned_by_us: false,
+        pins_us: false,
+        our_content_last_verified_content_id: Vec::new(),
+        our_content_last_verified_at: 0,
+    });
+}
+
 impl Store {
     /// Create a store backed by the system clock.
     pub fn new(fs: Arc<dyn Filesystem>, master: &[u8]) -> Result<Self, StorageError> {
@@ -373,8 +407,29 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
-        self.files.insert(name.to_string(), data);
-        self.persist_files()
+        let mut next_files = self.current_plain_files();
+        if let Some(file) = next_files.iter_mut().find(|file| file.name == name) {
+            file.data = data.clone();
+        } else {
+            next_files.push(PlainFile {
+                name: name.to_string(),
+                data: data.clone(),
+            });
+        }
+        self.enforce_shared_blob_limit_for_state(&next_files, &self.peers)?;
+
+        let previous = self.files.insert(name.to_string(), data);
+        match self.persist_files() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                if let Some(previous) = previous {
+                    self.files.insert(name.to_string(), previous);
+                } else {
+                    self.files.remove(name);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Delete a plaintext file while preserving at least one file.
@@ -386,8 +441,24 @@ impl Store {
             return Err(StorageError::CannotDeleteLastFile);
         }
 
-        self.files.remove(name);
-        self.persist_files()
+        let next_files = self
+            .current_plain_files()
+            .into_iter()
+            .filter(|file| file.name != name)
+            .collect::<Vec<_>>();
+        self.enforce_shared_blob_limit_for_state(&next_files, &self.peers)?;
+
+        let removed = self
+            .files
+            .remove(name)
+            .expect("checked above that the file exists");
+        match self.persist_files() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.files.insert(name.to_string(), removed);
+                Err(error)
+            }
+        }
     }
 
     /// Return a copy of the tracked peer metadata.
@@ -420,42 +491,42 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
-        if let Some(peer) = self
-            .peers
-            .iter()
-            .find(|peer| peer.onion_pubkey.as_slice() == onion_pubkey)
-        {
-            let merged_origin = merge_peer_origin(peer.origin, origin);
-            if merged_origin == peer.origin {
-                return Ok(());
+        self.update_peers(|peers| {
+            if let Some(peer) = peers
+                .iter()
+                .find(|peer| peer.onion_pubkey.as_slice() == onion_pubkey)
+            {
+                let merged_origin = merge_peer_origin(peer.origin, origin);
+                if merged_origin == peer.origin {
+                    return Ok(false);
+                }
             }
-        }
 
-        if let Some(peer) = self
-            .peers
-            .iter_mut()
-            .find(|peer| peer.onion_pubkey.as_slice() == onion_pubkey)
-        {
-            peer.origin = merge_peer_origin(peer.origin, origin);
-        } else {
-            self.peers.push(storedpb::Peer {
-                onion_pubkey: onion_pubkey.to_vec(),
-                score_seconds: 0,
-                score_measured_at: 0,
-                content_id: Vec::new(),
-                latest_known_content: None,
-                latest_cached_content: None,
-                origin,
-                first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
-                reachability: storedpb::PeerReachability::Unknown as i32,
-                last_live_at: 0,
-                pinned_by_us: false,
-                pins_us: false,
-                our_content_last_verified_content_id: Vec::new(),
-                our_content_last_verified_at: 0,
-            });
-        }
-        self.persist_peer_state()
+            if let Some(peer) = peers
+                .iter_mut()
+                .find(|peer| peer.onion_pubkey.as_slice() == onion_pubkey)
+            {
+                peer.origin = merge_peer_origin(peer.origin, origin);
+            } else {
+                peers.push(storedpb::Peer {
+                    onion_pubkey: onion_pubkey.to_vec(),
+                    score_seconds: 0,
+                    score_measured_at: 0,
+                    content_id: Vec::new(),
+                    latest_known_content: None,
+                    latest_cached_content: None,
+                    origin,
+                    first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
+                    reachability: storedpb::PeerReachability::Unknown as i32,
+                    last_live_at: 0,
+                    pinned_by_us: false,
+                    pins_us: false,
+                    our_content_last_verified_content_id: Vec::new(),
+                    our_content_last_verified_at: 0,
+                });
+            }
+            Ok(true)
+        })
     }
 
     /// Upsert the latest known content id for a peer.
@@ -498,23 +569,23 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
-        self.ensure_peer(onion_pubkey)?;
-        let peer = self
-            .peers
-            .iter_mut()
-            .find(|peer| peer.onion_pubkey == onion_pubkey)
-            .expect("peer entry must exist after ensure_peer");
-        peer.latest_known_content = latest_known_content_id.map(|content_id| {
-            peer_content_summary(content_id, latest_known_content_length.unwrap_or(0))
-        });
-        peer.latest_cached_content = latest_cached_content_id.map(|content_id| {
-            peer_content_summary(content_id, latest_cached_content_length.unwrap_or(0))
-        });
-        peer.content_id = latest_known_content_id
-            .map(|content_id| content_id.to_vec())
-            .unwrap_or_default();
-
-        self.persist_peer_state()
+        self.update_peers(|peers| {
+            ensure_peer_entry(peers, onion_pubkey);
+            let peer = peers
+                .iter_mut()
+                .find(|peer| peer.onion_pubkey == onion_pubkey)
+                .expect("peer entry must exist after ensure");
+            peer.latest_known_content = latest_known_content_id.map(|content_id| {
+                peer_content_summary(content_id, latest_known_content_length.unwrap_or(0))
+            });
+            peer.latest_cached_content = latest_cached_content_id.map(|content_id| {
+                peer_content_summary(content_id, latest_cached_content_length.unwrap_or(0))
+            });
+            peer.content_id = latest_known_content_id
+                .map(|content_id| content_id.to_vec())
+                .unwrap_or_default();
+            Ok(true)
+        })
     }
 
     /// Set the persisted score state for a peer.
@@ -528,33 +599,16 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
-        if let Some(peer) = self
-            .peers
-            .iter_mut()
-            .find(|peer| peer.onion_pubkey == onion_pubkey)
-        {
+        self.update_peers(|peers| {
+            ensure_peer_entry(peers, onion_pubkey);
+            let peer = peers
+                .iter_mut()
+                .find(|peer| peer.onion_pubkey == onion_pubkey)
+                .expect("peer entry must exist after ensure");
             peer.score_seconds = score_seconds;
             peer.score_measured_at = score_measured_at;
-        } else {
-            self.peers.push(storedpb::Peer {
-                onion_pubkey: onion_pubkey.to_vec(),
-                score_seconds,
-                score_measured_at,
-                content_id: Vec::new(),
-                latest_known_content: None,
-                latest_cached_content: None,
-                origin: storedpb::PeerOrigin::Discovered as i32,
-                first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
-                reachability: storedpb::PeerReachability::Unknown as i32,
-                last_live_at: 0,
-                pinned_by_us: false,
-                pins_us: false,
-                our_content_last_verified_content_id: Vec::new(),
-                our_content_last_verified_at: 0,
-            });
-        }
-
-        self.persist_peer_state()
+            Ok(true)
+        })
     }
 
     /// Persist whether the local operator pinned this peer.
@@ -567,14 +621,18 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
-        self.ensure_peer(onion_pubkey)?;
-        let peer = self
-            .peers
-            .iter_mut()
-            .find(|peer| peer.onion_pubkey == onion_pubkey)
-            .expect("peer entry must exist after ensure_peer");
-        peer.pinned_by_us = pinned_by_us;
-        self.persist_peer_state()
+        self.update_peers(|peers| {
+            ensure_peer_entry(peers, onion_pubkey);
+            let peer = peers
+                .iter_mut()
+                .find(|peer| peer.onion_pubkey == onion_pubkey)
+                .expect("peer entry must exist after ensure");
+            if peer.pinned_by_us == pinned_by_us {
+                return Ok(false);
+            }
+            peer.pinned_by_us = pinned_by_us;
+            Ok(true)
+        })
     }
 
     /// Persist whether this peer most recently told us that it pins us.
@@ -587,14 +645,18 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
-        self.ensure_peer(onion_pubkey)?;
-        let peer = self
-            .peers
-            .iter_mut()
-            .find(|peer| peer.onion_pubkey == onion_pubkey)
-            .expect("peer entry must exist after ensure_peer");
-        peer.pins_us = pins_us;
-        self.persist_peer_state()
+        self.update_peers(|peers| {
+            ensure_peer_entry(peers, onion_pubkey);
+            let peer = peers
+                .iter_mut()
+                .find(|peer| peer.onion_pubkey == onion_pubkey)
+                .expect("peer entry must exist after ensure");
+            if peer.pins_us == pins_us {
+                return Ok(false);
+            }
+            peer.pins_us = pins_us;
+            Ok(true)
+        })
     }
 
     /// Persist which local revision this peer last returned successfully during
@@ -615,17 +677,18 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
-        self.ensure_peer(onion_pubkey)?;
-        let peer = self
-            .peers
-            .iter_mut()
-            .find(|peer| peer.onion_pubkey == onion_pubkey)
-            .expect("peer entry must exist after ensure_peer");
-        peer.our_content_last_verified_content_id = content_id
-            .map(|content_id| content_id.to_vec())
-            .unwrap_or_default();
-        peer.our_content_last_verified_at = verified_at.unwrap_or_default();
-        self.persist_peer_state()
+        self.update_peers(|peers| {
+            ensure_peer_entry(peers, onion_pubkey);
+            let peer = peers
+                .iter_mut()
+                .find(|peer| peer.onion_pubkey == onion_pubkey)
+                .expect("peer entry must exist after ensure");
+            peer.our_content_last_verified_content_id = content_id
+                .map(|content_id| content_id.to_vec())
+                .unwrap_or_default();
+            peer.our_content_last_verified_at = verified_at.unwrap_or_default();
+            Ok(true)
+        })
     }
 
     /// Record the latest observed transport reachability for a peer.
@@ -639,18 +702,18 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
-        self.ensure_peer(onion_pubkey)?;
-        let peer = self
-            .peers
-            .iter_mut()
-            .find(|peer| peer.onion_pubkey == onion_pubkey)
-            .expect("peer entry must exist after ensure_peer");
-        peer.reachability = reachability;
-        if let Some(last_live_at) = last_live_at {
-            peer.last_live_at = last_live_at;
-        }
-
-        self.persist_peer_state()
+        self.update_peers(|peers| {
+            ensure_peer_entry(peers, onion_pubkey);
+            let peer = peers
+                .iter_mut()
+                .find(|peer| peer.onion_pubkey == onion_pubkey)
+                .expect("peer entry must exist after ensure");
+            peer.reachability = reachability;
+            if let Some(last_live_at) = last_live_at {
+                peer.last_live_at = last_live_at;
+            }
+            Ok(true)
+        })
     }
 
     /// Record the first contact direction if it was still unknown.
@@ -663,17 +726,18 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
-        self.ensure_peer(onion_pubkey)?;
-        let peer = self
-            .peers
-            .iter_mut()
-            .find(|peer| peer.onion_pubkey == onion_pubkey)
-            .expect("peer entry must exist after ensure_peer");
-        if peer.first_contact_direction != storedpb::FirstContactDirection::Unknown as i32 {
-            return Ok(());
-        }
-        peer.first_contact_direction = first_contact_direction;
-        self.persist_peer_state()
+        self.update_peers(|peers| {
+            ensure_peer_entry(peers, onion_pubkey);
+            let peer = peers
+                .iter_mut()
+                .find(|peer| peer.onion_pubkey == onion_pubkey)
+                .expect("peer entry must exist after ensure");
+            if peer.first_contact_direction != storedpb::FirstContactDirection::Unknown as i32 {
+                return Ok(false);
+            }
+            peer.first_contact_direction = first_contact_direction;
+            Ok(true)
+        })
     }
 
     /// Clear the mirrored content id for a peer while preserving score state.
@@ -682,40 +746,41 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
-        if let Some(peer) = self
-            .peers
-            .iter_mut()
-            .find(|peer| peer.onion_pubkey == onion_pubkey)
-        {
-            peer.content_id.clear();
-            peer.latest_known_content = None;
-            peer.latest_cached_content = None;
-            self.persist_peer_state()?;
-        }
-
-        Ok(())
+        self.update_peers(|peers| {
+            if let Some(peer) = peers
+                .iter_mut()
+                .find(|peer| peer.onion_pubkey == onion_pubkey)
+            {
+                peer.content_id.clear();
+                peer.latest_known_content = None;
+                peer.latest_cached_content = None;
+                return Ok(true);
+            }
+            Ok(false)
+        })
     }
 
     /// Remove a peer entry if it exists.
     pub fn remove_peer(&mut self, onion_pubkey: &[u8]) -> Result<(), StorageError> {
-        let before = self.peers.len();
-        self.peers
-            .retain(|peer| peer.onion_pubkey.as_slice() != onion_pubkey);
-        if self.peers.len() != before {
-            self.persist_peer_state()?;
-        }
-        Ok(())
+        self.update_peers(|peers| {
+            let before = peers.len();
+            peers.retain(|peer| peer.onion_pubkey.as_slice() != onion_pubkey);
+            Ok(peers.len() != before)
+        })
     }
 
     /// Replace the persisted peer metadata set without touching current content.
     pub fn replace_peers(&mut self, peers: Vec<storedpb::Peer>) -> Result<(), StorageError> {
-        self.peers = peers
+        let mut migrated = peers
             .into_iter()
             .map(|mut peer| {
                 migrate_peer(&mut peer);
                 peer
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let files = self.current_plain_files();
+        self.enforce_shared_blob_limit_for_state(&files, &migrated)?;
+        self.peers = std::mem::take(&mut migrated);
         self.persist_peer_state()
     }
 
@@ -875,6 +940,14 @@ impl Store {
     /// Restore an encrypted blob as the active local content revision.
     pub fn restore_current_content_blob(&mut self, blob: &[u8]) -> Result<(), StorageError> {
         let decoded = self.codec.decode(blob)?;
+        let current_len = self.current.as_ref().map(|current| current.blob_len);
+        if blob.len() > MAX_SHARED_CONTENT_BLOB_BYTES
+            && !current_len.is_some_and(|current_len| {
+                current_len > MAX_SHARED_CONTENT_BLOB_BYTES && blob.len() < current_len
+            })
+        {
+            return Err(StorageError::LocalContentTooLarge);
+        }
         let file_name = content_file_name(&decoded.content_id);
         self.fs.write_atomic(&file_name, blob)?;
 
@@ -1092,6 +1165,63 @@ impl Store {
         }
 
         Ok(())
+    }
+
+    /// Reject one projected shared blob that would exceed the fixed local
+    /// ceiling unless the change is reducing an already oversized state.
+    fn enforce_shared_blob_limit_for_state(
+        &self,
+        files: &[PlainFile],
+        peers: &[storedpb::Peer],
+    ) -> Result<(), StorageError> {
+        if files.is_empty() {
+            return Ok(());
+        }
+        let projected_len = self.codec.encoded_len(files, peers)?;
+        if projected_len <= MAX_SHARED_CONTENT_BLOB_BYTES {
+            return Ok(());
+        }
+        if let Some(current_len) = self.current_projected_blob_len()? {
+            if current_len > MAX_SHARED_CONTENT_BLOB_BYTES && projected_len < current_len {
+                return Ok(());
+            }
+        }
+        Err(StorageError::LocalContentTooLarge)
+    }
+
+    /// Return the current projected shared blob length from in-memory state.
+    fn current_projected_blob_len(&self) -> Result<Option<usize>, StorageError> {
+        let files = self.current_plain_files();
+        if files.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(self.codec.encoded_len(&files, &self.peers)?))
+    }
+
+    /// Return the current plaintext file set in deterministic order.
+    fn current_plain_files(&self) -> Vec<PlainFile> {
+        self.files
+            .iter()
+            .map(|(name, data)| PlainFile {
+                name: name.clone(),
+                data: data.clone(),
+            })
+            .collect()
+    }
+
+    /// Apply one peer metadata mutation transactionally against the size limit.
+    fn update_peers(
+        &mut self,
+        update: impl FnOnce(&mut Vec<storedpb::Peer>) -> Result<bool, StorageError>,
+    ) -> Result<(), StorageError> {
+        let mut next_peers = self.peers.clone();
+        if !update(&mut next_peers)? {
+            return Ok(());
+        }
+        let files = self.current_plain_files();
+        self.enforce_shared_blob_limit_for_state(&files, &next_peers)?;
+        self.peers = next_peers;
+        self.persist_peer_state()
     }
 
     /// Persist the encrypted peer sidecar without touching the content blob.
@@ -1886,5 +2016,143 @@ mod tests {
         assert!(peer.pins_us);
         assert_eq!(peer.our_content_last_verified_content_id, content_id);
         assert_eq!(peer.our_content_last_verified_at, 456);
+    }
+
+    fn max_payload_len_for_peer_count(peer_count: usize) -> usize {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let store = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        let peers = (0..peer_count)
+            .map(|index| storedpb::Peer {
+                onion_pubkey: format!("peer-{index:08}").into_bytes(),
+                score_seconds: 0,
+                score_measured_at: 0,
+                content_id: Vec::new(),
+                latest_known_content: None,
+                latest_cached_content: None,
+                origin: storedpb::PeerOrigin::Manual as i32,
+                first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
+                reachability: storedpb::PeerReachability::Unknown as i32,
+                last_live_at: 0,
+                pinned_by_us: false,
+                pins_us: false,
+                our_content_last_verified_content_id: Vec::new(),
+                our_content_last_verified_at: 0,
+            })
+            .collect::<Vec<_>>();
+
+        let mut low = 1usize;
+        let mut high = MAX_SHARED_CONTENT_BLOB_BYTES;
+        while low < high {
+            let mid = low + (high - low).div_ceil(2);
+            let files = vec![PlainFile {
+                name: "payload.bin".to_string(),
+                data: vec![0u8; mid],
+            }];
+            let encoded_len = store.codec.encoded_len(&files, &peers).unwrap();
+            if encoded_len <= MAX_SHARED_CONTENT_BLOB_BYTES {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        low
+    }
+
+    #[test]
+    fn set_file_rejects_resulting_shared_blob_over_limit() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut store = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        let max_len = max_payload_len_for_peer_count(0);
+
+        store.set_file("payload.bin", vec![0u8; max_len]).unwrap();
+        let current = store.current_content().unwrap().clone();
+        assert_eq!(store.get_file("payload.bin").unwrap().len(), max_len);
+
+        assert!(matches!(
+            store.set_file("payload.bin", vec![0u8; max_len + 1]),
+            Err(StorageError::LocalContentTooLarge)
+        ));
+        assert_eq!(store.get_file("payload.bin").unwrap().len(), max_len);
+        assert_eq!(store.current_content().unwrap(), &current);
+    }
+
+    #[test]
+    fn metadata_update_rejects_resulting_shared_blob_over_limit() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut store = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        let max_len = max_payload_len_for_peer_count(1);
+
+        store.set_file("payload.bin", vec![0u8; max_len]).unwrap();
+        store.ensure_peer(b"peer-0").unwrap();
+        assert_eq!(store.peers().len(), 1);
+
+        assert!(matches!(
+            store.ensure_peer(b"peer-1"),
+            Err(StorageError::LocalContentTooLarge)
+        ));
+        assert_eq!(store.peers().len(), 1);
+    }
+
+    #[test]
+    fn oversized_metadata_state_still_allows_get_and_size_reducing_delete() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut store = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+
+        store.set_file("alpha.txt", vec![0u8; 512 * 1024]).unwrap();
+        store.set_file("beta.txt", vec![0u8; 512 * 1024]).unwrap();
+        let before = store
+            .current_projected_blob_len()
+            .unwrap()
+            .expect("current blob length");
+        let files = store.current_plain_files();
+        let make_peers = |count: usize| {
+            (0..count)
+                .map(|index| storedpb::Peer {
+                    onion_pubkey: format!("peer-{index:08}").into_bytes(),
+                    score_seconds: 0,
+                    score_measured_at: 0,
+                    content_id: Vec::new(),
+                    latest_known_content: None,
+                    latest_cached_content: None,
+                    origin: storedpb::PeerOrigin::Discovered as i32,
+                    first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
+                    reachability: storedpb::PeerReachability::Unknown as i32,
+                    last_live_at: 0,
+                    pinned_by_us: false,
+                    pins_us: false,
+                    our_content_last_verified_content_id: Vec::new(),
+                    our_content_last_verified_at: 0,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut high = 1usize;
+        while store.codec.encoded_len(&files, &make_peers(high)).unwrap()
+            <= MAX_SHARED_CONTENT_BLOB_BYTES
+        {
+            high *= 2;
+        }
+        let mut low = 1usize;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if store.codec.encoded_len(&files, &make_peers(mid)).unwrap()
+                <= MAX_SHARED_CONTENT_BLOB_BYTES
+            {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        let oversized_peers = make_peers(high);
+        let projected = store.codec.encoded_len(&files, &oversized_peers).unwrap();
+        store.peers = oversized_peers;
+        assert!(projected > before);
+
+        assert!(
+            store.current_projected_blob_len().unwrap().unwrap() > MAX_SHARED_CONTENT_BLOB_BYTES
+        );
+        assert_eq!(store.get_file("alpha.txt").unwrap().len(), 512 * 1024);
+        store.delete_file("beta.txt").unwrap();
+        assert_eq!(store.list_files(), vec!["alpha.txt".to_string()]);
     }
 }

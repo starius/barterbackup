@@ -885,6 +885,38 @@ func TestDockerOperatorErrorsAreHuman(t *testing.T) {
 	}
 }
 
+func TestDockerLocalSharedBlobLimitRejectsOversizedMutation(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	node := addNode(t, scenario, "node", "correct horse battery staple")
+
+	startInitializedReadyNode(t, node)
+
+	alpha := randomPayload(2 * 1024 * 1024)
+	beta := randomPayload(512 * 1024)
+	setFile(t, node, "alpha.bin", alpha)
+	setFile(t, node, "beta.bin", beta)
+	assertFileContentEquals(t, node, "alpha.bin", alpha)
+
+	client, conn := dialNodeClient(t, node)
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	_, err := client.SetFile(ctx, &clirpc.SetFileRequest{
+		File: &clirpc.File{
+			Name: "beta.bin",
+			Data: randomPayload(3 * 1024 * 1024),
+		},
+	})
+	cancel()
+	_ = conn.Close()
+	assertStatusMessage(t, err, codes.ResourceExhausted, "current shared content exceeds the fixed 4 MiB limit")
+
+	assertFileContentEquals(t, node, "alpha.bin", alpha)
+	deleteFile(t, node, "beta.bin")
+	setFile(t, node, "beta.bin", []byte("small-again"))
+	assertFileContentEquals(t, node, "beta.bin", []byte("small-again"))
+}
+
 func TestDockerLargePayloadRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -1622,6 +1654,15 @@ func setFile(t *testing.T, node *harness.Node, name string, payload []byte) {
 	}
 }
 
+func deleteFile(t *testing.T, node *harness.Node, name string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	if err := node.DeleteFile(ctx, name); err != nil {
+		t.Fatalf("delete file %s on %s: %v", name, node.Name(), err)
+	}
+}
+
 func proposeContract(t *testing.T, node *harness.Node, peerOnion string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
@@ -2270,6 +2311,19 @@ func assertFileEquals(t *testing.T, node *harness.Node, name string, expected []
 	}
 	if len(response.GetName()) != 1 || response.GetName()[0] != name {
 		t.Fatalf("unexpected recovered file list on %s: %v", node.Name(), response.GetName())
+	}
+}
+
+func assertFileContentEquals(t *testing.T, node *harness.Node, name string, expected []byte) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	file, err := node.GetFile(ctx, name)
+	if err != nil {
+		t.Fatalf("get file %s from %s: %v", name, node.Name(), err)
+	}
+	if !bytes.Equal(file.GetData(), expected) {
+		t.Fatalf("recovered file %s from %s does not match original bytes", name, node.Name())
 	}
 }
 
