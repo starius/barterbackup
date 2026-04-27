@@ -254,19 +254,41 @@ func findRepoRoot() (string, error) {
 }
 
 func findStaticBBDBinary(repoRoot string) (string, error) {
+	return findStaticBBDBinaryForGOARCH(repoRoot, runtime.GOARCH)
+}
+
+func findStaticBBDBinaryForGOARCH(repoRoot string, goarch string) (string, error) {
 	if override := os.Getenv("BB_DOCKER_BBD_BIN"); override != "" {
 		return override, nil
 	}
-	candidates := []string{
-		filepath.Join(repoRoot, "target-static", "x86_64-unknown-linux-musl", "x86_64-unknown-linux-musl", "release", "bbd"),
-		filepath.Join(repoRoot, "target-static", "aarch64-unknown-linux-musl", "aarch64-unknown-linux-musl", "release", "bbd"),
+	candidates, err := staticBBDBinaryCandidates(repoRoot, goarch)
+	if err != nil {
+		return "", err
 	}
 	for _, candidate := range candidates {
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("could not find a static bbd binary; run make build-static first")
+	return "", fmt.Errorf(
+		"could not find a static bbd binary for %s; run make build-static first",
+		goarch,
+	)
+}
+
+func staticBBDBinaryCandidates(repoRoot string, goarch string) ([]string, error) {
+	switch goarch {
+	case "amd64":
+		return []string{
+			filepath.Join(repoRoot, "target-static", "x86_64-unknown-linux-musl", "x86_64-unknown-linux-musl", "release", "bbd"),
+		}, nil
+	case "arm64":
+		return []string{
+			filepath.Join(repoRoot, "target-static", "aarch64-unknown-linux-musl", "aarch64-unknown-linux-musl", "release", "bbd"),
+		}, nil
+	default:
+		return nil, fmt.Errorf("Docker integration tests do not support GOARCH=%s", goarch)
+	}
 }
 
 func configuredParallelism() int {
