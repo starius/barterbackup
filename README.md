@@ -76,6 +76,7 @@ make install
 Build distributable variants:
 
 ```bash
+nix build .
 make build-static
 make build-static-linux-amd64
 make build-static-linux-arm64
@@ -89,8 +90,10 @@ make docker-dev-env-build
 make docker-dev-env ARGS='--name lab up --nodes 3'
 ```
 
-`make build-static` produces musl-linked Linux binaries for the current Linux
-host architecture. `make build-static-linux-amd64` and
+`nix build .` produces a packaged install tree under `result/` with the
+musl-linked `bbd` and `bbcli` binaries plus the generated man pages and shell
+completions. `make build-static` produces musl-linked Linux binaries for the
+current Linux host architecture. `make build-static-linux-amd64` and
 `make build-static-linux-arm64` always build release musl-linked Linux
 binaries for those targets and are intended to work from any supported
 `nix develop` host by using the cross toolchains from the dev shell.
