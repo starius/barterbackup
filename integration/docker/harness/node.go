@@ -206,6 +206,38 @@ func (n *Node) ConnectPeer(ctx context.Context, onion string) error {
 	return nil
 }
 
+// PinPeer marks one tracked peer as operator-pinned on the daemon.
+func (n *Node) PinPeer(ctx context.Context, onion string) error {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_, err = client.PinPeer(ctx, &clirpc.PinPeerRequest{
+		Peer: &clirpc.Peer{OnionServiceId: onion},
+	})
+	if err != nil {
+		return fmt.Errorf("pin peer %s from %s: %w", onion, n.name, err)
+	}
+	return nil
+}
+
+// UnpinPeer removes one operator pin from a tracked peer on the daemon.
+func (n *Node) UnpinPeer(ctx context.Context, onion string) error {
+	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_, err = client.UnpinPeer(ctx, &clirpc.UnpinPeerRequest{
+		Peer: &clirpc.Peer{OnionServiceId: onion},
+	})
+	if err != nil {
+		return fmt.Errorf("unpin peer %s from %s: %w", onion, n.name, err)
+	}
+	return nil
+}
+
 // SetFile uploads one plaintext file into the daemon.
 func (n *Node) SetFile(ctx context.Context, name string, data []byte) error {
 	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
