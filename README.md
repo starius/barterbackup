@@ -271,6 +271,13 @@ native client config format. If the file omits `storage.state_dir`, `bbd`
 injects its usual `<data-dir>/tor` state path before bootstrap. If the file
 already sets `storage.state_dir`, `bbd` uses that path as-is.
 
+`bbcli init` checks the main password locally before it sends the seed to the
+daemon. It prints the estimated `zxcvbn` score, `guesses_log10`, and any
+available feedback, then rejects weak passwords unless you explicitly pass
+`--allow-weak-password`. The intended baseline is a password-manager secret or
+at least `7+` truly random Diceware-style words; non-English words are fine
+too if they are chosen randomly rather than composed by hand.
+
 Add a peer:
 
 ```bash

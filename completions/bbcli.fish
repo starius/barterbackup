@@ -40,6 +40,7 @@ complete -c bbcli -n "__fish_bbcli_needs_command" -f -a "help" -d 'Print this me
 complete -c bbcli -n "__fish_bbcli_using_subcommand state" -s h -l help -d 'Print help'
 complete -c bbcli -n "__fish_bbcli_using_subcommand init" -l wait-seconds -d 'wait_seconds is how long to wait for daemon startup readiness' -r
 complete -c bbcli -n "__fish_bbcli_using_subcommand init" -l password-stdin -d 'password_stdin reads the main password from standard input'
+complete -c bbcli -n "__fish_bbcli_using_subcommand init" -l allow-weak-password -d 'allow_weak_password bypasses the local password-strength gate'
 complete -c bbcli -n "__fish_bbcli_using_subcommand init" -s h -l help -d 'Print help'
 complete -c bbcli -n "__fish_bbcli_using_subcommand unlock" -l wait-seconds -d 'wait_seconds is how long to wait for daemon startup readiness' -r
 complete -c bbcli -n "__fish_bbcli_using_subcommand unlock" -l password-stdin -d 'password_stdin reads the main password from standard input'

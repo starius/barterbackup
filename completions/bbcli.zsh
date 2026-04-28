@@ -38,6 +38,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--wait-seconds=[wait_seconds is how long to wait for daemon startup readiness]:WAIT_SECONDS:_default' \
 '--password-stdin[password_stdin reads the main password from standard input]' \
+'--allow-weak-password[allow_weak_password bypasses the local password-strength gate]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '::password -- password is the inline main password or seed string:_default' \

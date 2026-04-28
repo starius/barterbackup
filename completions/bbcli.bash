@@ -1066,7 +1066,7 @@ _bbcli() {
             return 0
             ;;
         bbcli__subcmd__init)
-            opts="-h --password-stdin --wait-seconds --help [PASSWORD]"
+            opts="-h --password-stdin --allow-weak-password --wait-seconds --help [PASSWORD]"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

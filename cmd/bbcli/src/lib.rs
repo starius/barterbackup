@@ -26,6 +26,7 @@ use tlsutil::{connect_pinned_channel, read_keys};
 use tokio::time::sleep;
 use tonic::transport::Channel;
 use tonic::Code;
+use zxcvbn::{zxcvbn, Entropy, Score};
 
 /// DEFAULT_LOCAL_ADDR is the default local daemon address.
 pub const DEFAULT_LOCAL_ADDR: &str = "https://127.0.0.1:9911";
@@ -35,6 +36,9 @@ const DEFAULT_UNLOCK_WAIT_SECS: u64 = 30;
 
 /// DEFAULT_KEYS_WAIT_SECS is the default wait for daemon-created session keys.
 const DEFAULT_KEYS_WAIT_SECS: u64 = 5;
+
+/// MIN_MAIN_PASSWORD_GUESSES_LOG10 is the minimum accepted zxcvbn guess count.
+const MIN_MAIN_PASSWORD_GUESSES_LOG10: f64 = 25.0;
 
 /// UNLOCK_RETRY_INTERVAL is the delay between unlock readiness probes.
 const UNLOCK_RETRY_INTERVAL: Duration = Duration::from_millis(250);
@@ -110,6 +114,10 @@ enum Command {
         /// password_stdin reads the main password from standard input.
         #[arg(long)]
         password_stdin: bool,
+
+        /// allow_weak_password bypasses the local password-strength gate.
+        #[arg(long)]
+        allow_weak_password: bool,
 
         /// wait_seconds is how long to wait for daemon startup readiness.
         #[arg(long, default_value_t = DEFAULT_UNLOCK_WAIT_SECS)]
@@ -435,12 +443,16 @@ async fn run_parsed(args: Args) -> Result<()> {
         Command::State => state(&target).await,
         Command::Init {
             password_stdin,
+            allow_weak_password,
             wait_seconds,
             password,
         } => {
-            run_init_command(&target, Duration::from_secs(wait_seconds), || {
-                resolve_init_password(password, password_stdin)
-            })
+            run_init_command(
+                &target,
+                Duration::from_secs(wait_seconds),
+                || resolve_init_password(password, password_stdin),
+                allow_weak_password,
+            )
             .await
         }
         Command::Unlock {
@@ -694,12 +706,20 @@ async fn run_init_command<F>(
     target: &LocalCliTarget,
     wait_timeout: Duration,
     read_password: F,
+    allow_weak_password: bool,
 ) -> Result<()>
 where
     F: FnOnce() -> Result<String>,
 {
     let state = state_response(target, wait_timeout).await?;
-    continue_init_command(target, wait_timeout, state, read_password).await
+    continue_init_command(
+        target,
+        wait_timeout,
+        state,
+        read_password,
+        allow_weak_password,
+    )
+    .await
 }
 
 /// Continue `bbcli init` after the daemon state preflight has completed.
@@ -708,13 +728,123 @@ async fn continue_init_command<F>(
     wait_timeout: Duration,
     state: StateResponse,
     read_password: F,
+    allow_weak_password: bool,
 ) -> Result<()>
 where
     F: FnOnce() -> Result<String>,
 {
-    ensure_daemon_can_initialize(&state)?;
-    let password = read_password()?;
+    let password = prepare_init_password(
+        &state,
+        read_password,
+        allow_weak_password,
+        &mut io::stderr().lock(),
+    )?;
     init(target, &password, wait_timeout).await
+}
+
+/// Prepare and validate one init password before the daemon RPC request.
+fn prepare_init_password<F>(
+    state: &StateResponse,
+    read_password: F,
+    allow_weak_password: bool,
+    writer: &mut impl Write,
+) -> Result<String>
+where
+    F: FnOnce() -> Result<String>,
+{
+    ensure_daemon_can_initialize(state)?;
+    let password = read_password()?;
+    enforce_init_password_policy(&password, allow_weak_password, writer)?;
+    Ok(password)
+}
+
+/// Enforce the local init-password quality policy.
+fn enforce_init_password_policy(
+    password: &str,
+    allow_weak_password: bool,
+    writer: &mut impl Write,
+) -> Result<()> {
+    let entropy = zxcvbn(password, &[]);
+    let meets_threshold = entropy.guesses_log10() >= MIN_MAIN_PASSWORD_GUESSES_LOG10;
+    let override_used = allow_weak_password && !meets_threshold;
+    write_password_quality_message(
+        writer,
+        &entropy,
+        meets_threshold || override_used,
+        override_used,
+    )?;
+
+    if meets_threshold || override_used {
+        return Ok(());
+    }
+
+    bail!(
+        "main password is too weak for offline attack resistance: guesses_log10 {:.2} is below the required {:.1}; rerun with --allow-weak-password to override",
+        entropy.guesses_log10(),
+        MIN_MAIN_PASSWORD_GUESSES_LOG10
+    );
+}
+
+/// Print the zxcvbn password-strength assessment for one init password.
+fn write_password_quality_message(
+    writer: &mut impl Write,
+    entropy: &Entropy,
+    accepted: bool,
+    override_used: bool,
+) -> Result<()> {
+    let status = if accepted {
+        if override_used {
+            "accepted with override"
+        } else {
+            "accepted"
+        }
+    } else {
+        "rejected"
+    };
+    writeln!(writer, "password quality: {status}").context("write password quality status")?;
+    writeln!(
+        writer,
+        "score: {}/4",
+        password_score_number(entropy.score())
+    )
+    .context("write password quality score")?;
+    writeln!(writer, "guesses_log10: {:.2}", entropy.guesses_log10())
+        .context("write password quality guesses")?;
+
+    match entropy.feedback() {
+        Some(feedback) => {
+            if let Some(warning) = feedback.warning() {
+                writeln!(writer, "warning: {warning}").context("write password quality warning")?;
+            }
+            if feedback.suggestions().is_empty() {
+                writeln!(writer, "feedback: no additional suggestions from zxcvbn")
+                    .context("write password quality feedback")?;
+            } else {
+                for suggestion in feedback.suggestions() {
+                    writeln!(writer, "suggestion: {suggestion}")
+                        .context("write password quality suggestion")?;
+                }
+            }
+        }
+        None => {
+            writeln!(writer, "feedback: no additional suggestions from zxcvbn")
+                .context("write password quality feedback")?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Convert the zxcvbn score enum into the conventional 0-4 numeric value.
+fn password_score_number(score: Score) -> u8 {
+    match score {
+        Score::Zero => 0,
+        Score::One => 1,
+        Score::Two => 2,
+        Score::Three => 3,
+        Score::Four => 4,
+        _ => 4,
+    }
 }
 
 /// Initialize daemon storage, waiting briefly if it is still starting up.
@@ -1944,6 +2074,10 @@ mod tests {
     use storage::{Filesystem, MemoryFilesystem};
     use tempfile::tempdir;
 
+    /// STRONG_TEST_PASSWORD is a high-entropy fixture for password-policy tests.
+    const STRONG_TEST_PASSWORD: &str =
+        "asteroid zephyr lantern marzipan cobalt rivulet juniper saffron fjord tumbler";
+
     /// Spawn a local plaintext clirpc server for helper tests.
     async fn spawn_cli_server_for_node(
         node: Arc<Node>,
@@ -1968,6 +2102,19 @@ mod tests {
         let filesystem: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
         let node = Arc::new(Node::with_local_storage("password", filesystem)?);
         spawn_cli_server_for_node(node).await
+    }
+
+    /// Build one uninitialized daemon state response for init preflight tests.
+    fn uninitialized_state() -> StateResponse {
+        StateResponse {
+            storage_initialized: false,
+            server_onion: String::new(),
+            uptime_seconds: 0,
+            peer_runtime_state: protos::clirpc::PeerRuntimeState::Unknown as i32,
+            peer_runtime_error: String::new(),
+            self_peer_check_state: protos::clirpc::SelfPeerCheckState::Unknown as i32,
+            self_peer_check_error: String::new(),
+        }
     }
 
     /// Spawn and register one mock p2p server for helper tests.
@@ -2029,6 +2176,85 @@ mod tests {
         finish_password_prompt_line(&mut output).unwrap();
 
         assert_eq!(output, b"\r\n");
+    }
+
+    #[test]
+    fn init_password_policy_rejects_weak_password_without_override() {
+        let mut output = Vec::new();
+        let error = enforce_init_password_policy("password", false, &mut output).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("main password is too weak for offline attack resistance"));
+
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("password quality: rejected"));
+        assert!(rendered.contains("score: 0/4"));
+        assert!(rendered.contains("guesses_log10:"));
+        assert!(rendered.contains("warning:"));
+        assert!(rendered.contains("suggestion:"));
+    }
+
+    #[test]
+    fn init_password_policy_accepts_weak_password_with_override() {
+        let mut output = Vec::new();
+
+        enforce_init_password_policy("password", true, &mut output).unwrap();
+
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("password quality: accepted with override"));
+        assert!(rendered.contains("score: 0/4"));
+        assert!(rendered.contains("guesses_log10:"));
+        assert!(rendered.contains("warning:"));
+    }
+
+    #[test]
+    fn init_password_policy_accepts_strong_password_without_override() {
+        let mut output = Vec::new();
+
+        enforce_init_password_policy(STRONG_TEST_PASSWORD, false, &mut output).unwrap();
+
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("password quality: accepted"));
+        assert!(rendered.contains("score: 4/4"));
+        assert!(rendered.contains("guesses_log10:"));
+        assert!(rendered.contains("feedback: no additional suggestions from zxcvbn"));
+    }
+
+    #[test]
+    fn prepare_init_password_rejects_weak_password_before_rpc() {
+        let mut output = Vec::new();
+        let error = prepare_init_password(
+            &uninitialized_state(),
+            || Ok("password".to_string()),
+            false,
+            &mut output,
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("main password is too weak for offline attack resistance"));
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("password quality: rejected"));
+    }
+
+    #[test]
+    fn prepare_init_password_accepts_strong_password_and_returns_it() {
+        let mut output = Vec::new();
+        let password = prepare_init_password(
+            &uninitialized_state(),
+            || Ok(STRONG_TEST_PASSWORD.to_string()),
+            false,
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(password, STRONG_TEST_PASSWORD);
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("password quality: accepted"));
     }
 
     #[test]
@@ -2246,6 +2472,7 @@ mod tests {
                 called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok("password".to_string())
             },
+            false,
         )
         .await
         .unwrap_err();

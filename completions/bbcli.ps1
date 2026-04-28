@@ -45,6 +45,7 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
         'bbcli;init' {
             [CompletionResult]::new('--wait-seconds', '--wait-seconds', [CompletionResultType]::ParameterName, 'wait_seconds is how long to wait for daemon startup readiness')
             [CompletionResult]::new('--password-stdin', '--password-stdin', [CompletionResultType]::ParameterName, 'password_stdin reads the main password from standard input')
+            [CompletionResult]::new('--allow-weak-password', '--allow-weak-password', [CompletionResultType]::ParameterName, 'allow_weak_password bypasses the local password-strength gate')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

@@ -40,6 +40,7 @@ set edit:completion:arg-completer[bbcli] = {|@words|
         &'bbcli;init'= {
             cand --wait-seconds 'wait_seconds is how long to wait for daemon startup readiness'
             cand --password-stdin 'password_stdin reads the main password from standard input'
+            cand --allow-weak-password 'allow_weak_password bypasses the local password-strength gate'
             cand -h 'Print help'
             cand --help 'Print help'
         }

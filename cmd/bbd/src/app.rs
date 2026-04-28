@@ -3717,6 +3717,8 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn grouped_bbcli_commands_round_trip_over_local_mtls() -> Result<()> {
+        const MAIN_PASSWORD: &str =
+            "asteroid zephyr lantern marzipan cobalt rivulet juniper saffron fjord tumbler";
         let temp_dir = TempDir::new()?;
         let cli_addr = reserve_loopback_addr()?;
         let daemon_addr = format!("https://{cli_addr}");
@@ -3750,7 +3752,7 @@ mod tests {
             "--data-dir",
             data_dir.as_str(),
             "init",
-            "correct horse battery staple",
+            MAIN_PASSWORD,
         ])
         .await?;
         run_with_args([
@@ -3760,7 +3762,7 @@ mod tests {
             "--data-dir",
             data_dir.as_str(),
             "unlock",
-            "correct horse battery staple",
+            MAIN_PASSWORD,
         ])
         .await?;
         run_with_args([
