@@ -203,6 +203,47 @@ func TestDockerNodeLifecycle(t *testing.T) {
 	assertCLIKeysRemoved(t, node)
 }
 
+func TestDockerArtiConfigHonorsExplicitStateDir(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	node := addNode(t, scenario, "node-a", "correct horse battery staple")
+	node.SetArtiStateDir("/data/custom-tor-state")
+
+	startLockedNode(t, node)
+	waitForReadyNode(t, node)
+	assertFileContainsKeyValue(
+		t,
+		filepath.Join(node.DataDir(), "arti.toml"),
+		"state_dir",
+		"/data/custom-tor-state",
+	)
+
+	initNode(t, node)
+	unlockAndWaitReady(t, node)
+
+	customStateDir := filepath.Join(node.DataDir(), "custom-tor-state")
+	waitForDirectoryToContainFiles(t, customStateDir)
+	assertPathMissing(t, filepath.Join(node.DataDir(), "tor"))
+}
+
+func TestDockerArtiConfigWithoutStateDirUsesDefaultDataDir(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	node := addNode(t, scenario, "node-a", "correct horse battery staple")
+	node.OmitArtiStateDir()
+
+	startLockedNode(t, node)
+	waitForReadyNode(t, node)
+	assertFileDoesNotContainLine(t, filepath.Join(node.DataDir(), "arti.toml"), "state_dir")
+
+	initNode(t, node)
+	unlockAndWaitReady(t, node)
+
+	waitForDirectoryToContainFiles(t, filepath.Join(node.DataDir(), "tor"))
+}
+
 func TestDockerBackupAndRecoveryOverChutney(t *testing.T) {
 	t.Parallel()
 
@@ -1924,6 +1965,77 @@ func assertCLIKeysRemoved(t *testing.T, node *harness.Node) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("expected %s to be removed after stop, got %v", path, err)
 		}
+	}
+}
+
+func assertFileContains(t *testing.T, path string, snippet string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if !strings.Contains(string(data), snippet) {
+		t.Fatalf("expected %s to contain %q, got:\n%s", path, snippet, string(data))
+	}
+}
+
+func assertFileContainsKeyValue(t *testing.T, path string, key string, expected string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, key+" =") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(line, key+" ="))
+		value = strings.Trim(value, `"'`)
+		if value != expected {
+			t.Fatalf("expected %s %q to equal %q, got %q", path, key, expected, value)
+		}
+		return
+	}
+	t.Fatalf("expected %s to contain %q", path, key)
+}
+
+func assertFileDoesNotContainLine(t *testing.T, path string, key string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, key) {
+			t.Fatalf("expected %s to omit %q, got line %q", path, key, line)
+		}
+	}
+}
+
+func assertPathMissing(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected %s to be absent, got %v", path, err)
+	}
+}
+
+func waitForDirectoryToContainFiles(t *testing.T, dir string) {
+	t.Helper()
+	deadline := time.Now().Add(harnessDefaultTimeout())
+	for {
+		entries, err := os.ReadDir(dir)
+		if err == nil {
+			if len(entries) > 0 {
+				return
+			}
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("read %s: %v", dir, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s to contain Arti files", dir)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 

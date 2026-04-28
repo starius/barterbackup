@@ -23,9 +23,12 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_stream::wrappers::ReceiverStream;
+use toml::Value as TomlValue;
 use tonic::transport::server::Connected;
 use tonic::transport::Endpoint;
+use tor_config::sources::MustRead;
 use tor_config::{resolve as resolve_config, ConfigurationSource, ConfigurationSources};
+use tor_config_path::arti_client_base_resolver;
 use tower::service_fn;
 use tracing::{info, warn};
 use transport::{PeerClient, PeerConnector};
@@ -49,13 +52,21 @@ pub struct TorTransport {
     client: TorClient<PreferredRuntime>,
 }
 
+/// LoadedArtiConfig is one resolved Arti client config plus its effective state dir.
+struct LoadedArtiConfig {
+    /// config is the resolved Arti client configuration.
+    config: TorClientConfig,
+    /// prepared_state_dir is the directory BarterBackup must prepare before bootstrap.
+    prepared_state_dir: PathBuf,
+}
+
 impl TorTransport {
     /// Bootstrap a Tor client rooted at `state_dir`.
     pub async fn new(state_dir: impl AsRef<Path>, arti_config: Option<&Path>) -> Result<Self> {
-        prepare_tor_state_dir(state_dir.as_ref())?;
+        let loaded = load_arti_config(state_dir.as_ref(), arti_config)?;
+        prepare_tor_state_dir(&loaded.prepared_state_dir)?;
 
-        let cfg = load_arti_config(state_dir.as_ref(), arti_config)?;
-        let client = TorClient::create_bootstrapped(cfg)
+        let client = TorClient::create_bootstrapped(loaded.config)
             .await
             .context("bootstrap arti")?;
 
@@ -121,7 +132,7 @@ impl TorTransport {
 }
 
 /// Load one Arti client config, optionally from one external TOML file.
-fn load_arti_config(state_dir: &Path, arti_config: Option<&Path>) -> Result<TorClientConfig> {
+fn load_arti_config(state_dir: &Path, arti_config: Option<&Path>) -> Result<LoadedArtiConfig> {
     let Some(path) = arti_config else {
         let mut cfg_builder = TorClientConfig::builder();
         cfg_builder
@@ -132,18 +143,79 @@ fn load_arti_config(state_dir: &Path, arti_config: Option<&Path>) -> Result<TorC
             .keystore()
             .primary()
             .kind(ExplicitOrAuto::Explicit(ArtiKeystoreKind::Ephemeral));
-        return cfg_builder.build().context("build default arti config");
+        return Ok(LoadedArtiConfig {
+            config: cfg_builder.build().context("build default arti config")?,
+            prepared_state_dir: state_dir.to_path_buf(),
+        });
     };
 
-    let cfg_sources = ConfigurationSources::from_cmdline(
-        std::iter::empty::<ConfigurationSource>(),
-        [path.to_path_buf()],
-        std::iter::empty::<String>(),
+    let raw_config =
+        fs::read_to_string(path).with_context(|| format!("read arti config {}", path.display()))?;
+    let mut parsed_config: TomlValue = toml::from_str(&raw_config)
+        .with_context(|| format!("parse arti config {}", path.display()))?;
+    let prepared_state_dir = match configured_state_dir(&parsed_config)? {
+        Some(configured_state_dir) => configured_state_dir,
+        None => {
+            inject_default_state_dir(&mut parsed_config, state_dir)?;
+            state_dir.to_path_buf()
+        }
+    };
+    let rendered_config = toml::to_string(&parsed_config)
+        .with_context(|| format!("render arti config {}", path.display()))?;
+
+    let mut cfg_sources = ConfigurationSources::new_empty();
+    cfg_sources.push_source(
+        ConfigurationSource::from_verbatim(rendered_config),
+        MustRead::MustRead,
     );
     let cfg_tree = cfg_sources
         .load()
         .with_context(|| format!("load arti config {}", path.display()))?;
-    resolve_config(cfg_tree).with_context(|| format!("decode arti config {}", path.display()))
+    let config = resolve_config(cfg_tree)
+        .with_context(|| format!("decode arti config {}", path.display()))?;
+
+    Ok(LoadedArtiConfig {
+        config,
+        prepared_state_dir,
+    })
+}
+
+/// Return the configured Arti state dir if the TOML file already specifies one.
+fn configured_state_dir(config: &TomlValue) -> Result<Option<PathBuf>> {
+    let Some(storage) = config.get("storage") else {
+        return Ok(None);
+    };
+    let Some(storage_table) = storage.as_table() else {
+        return Err(anyhow!("arti config [storage] section must be a table"));
+    };
+    let Some(state_dir) = storage_table.get("state_dir") else {
+        return Ok(None);
+    };
+    let Some(state_dir_str) = state_dir.as_str() else {
+        return Err(anyhow!("arti config storage.state_dir must be a string"));
+    };
+    let state_dir = CfgPath::new(state_dir_str.to_owned())
+        .path(&arti_client_base_resolver())
+        .map_err(|error| anyhow!("expand arti config storage.state_dir: {error}"))?;
+    Ok(Some(state_dir))
+}
+
+/// Inject the daemon's default state dir into one parsed Arti TOML document.
+fn inject_default_state_dir(config: &mut TomlValue, state_dir: &Path) -> Result<()> {
+    let Some(root_table) = config.as_table_mut() else {
+        return Err(anyhow!("arti config root must be a table"));
+    };
+    let storage_entry = root_table
+        .entry("storage")
+        .or_insert_with(|| TomlValue::Table(toml::map::Map::new()));
+    let Some(storage_table) = storage_entry.as_table_mut() else {
+        return Err(anyhow!("arti config [storage] section must be a table"));
+    };
+    storage_table.insert(
+        "state_dir".to_owned(),
+        TomlValue::String(state_dir.to_string_lossy().into_owned()),
+    );
+    Ok(())
 }
 
 /// Create the Tor state root and prune stale per-service hidden-service state.
@@ -485,12 +557,14 @@ mod tests {
     fn load_arti_config_from_toml_file() {
         let config_path = build_ephemeral_state_dir().join("arti.toml");
         fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let explicit_state_dir = build_ephemeral_state_dir().join("explicit-state");
         fs::write(
             &config_path,
-            r#"
+            format!(
+                r#"
                 [storage]
                 cache_dir = "/tmp/arti-cache"
-                state_dir = "/tmp/arti-state"
+                state_dir = "{}"
 
                 [address_filter]
                 allow_local_addrs = true
@@ -513,11 +587,44 @@ mod tests {
                 [storage.keystore.primary]
                 kind = "ephemeral"
             "#,
+                explicit_state_dir.display()
+            ),
         )
         .unwrap();
 
-        load_arti_config(Path::new("/tmp/ignored-state-dir"), Some(&config_path)).unwrap();
+        let loaded =
+            load_arti_config(Path::new("/tmp/ignored-state-dir"), Some(&config_path)).unwrap();
+        assert_eq!(loaded.prepared_state_dir, explicit_state_dir);
 
         fs::remove_dir_all(config_path.parent().unwrap()).unwrap();
+    }
+
+    /// External Arti configs without storage.state_dir inherit the daemon default path.
+    #[test]
+    fn load_arti_config_injects_default_state_dir_when_missing() {
+        let config_root = build_ephemeral_state_dir();
+        let config_path = config_root.join("arti.toml");
+        let default_state_dir = config_root.join("default-state");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &config_path,
+            r#"
+                [storage]
+                cache_dir = "/tmp/arti-cache"
+
+                [address_filter]
+                allow_local_addrs = true
+
+                [bridges]
+                enabled = false
+                bridges = []
+            "#,
+        )
+        .unwrap();
+
+        let loaded = load_arti_config(&default_state_dir, Some(&config_path)).unwrap();
+        assert_eq!(loaded.prepared_state_dir, default_state_dir);
+
+        fs::remove_dir_all(config_root).unwrap();
     }
 }

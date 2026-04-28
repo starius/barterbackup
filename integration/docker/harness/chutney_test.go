@@ -44,6 +44,54 @@ func TestTranslateChutneyConfig(t *testing.T) {
 	}
 }
 
+func TestWriteNodeConfigUsesExplicitStateDirOverride(t *testing.T) {
+	network := &ChutneyNetwork{
+		baseConfig: translateChutneyConfig(rawChutneyConfig{}),
+	}
+	nodeDataDir := t.TempDir()
+
+	configPath, err := network.WriteNodeConfig(nodeDataDir, ArtiConfigOptions{
+		ExplicitStateDir: "/data/custom-tor-state",
+	})
+	if err != nil {
+		t.Fatalf("write node config: %v", err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read node config: %v", err)
+	}
+	var rendered translatedArtiConfig
+	if err := toml.Unmarshal(configBytes, &rendered); err != nil {
+		t.Fatalf("decode node config: %v", err)
+	}
+	if rendered.Storage.StateDir != "/data/custom-tor-state" {
+		t.Fatalf("unexpected state_dir: got %q", rendered.Storage.StateDir)
+	}
+}
+
+func TestWriteNodeConfigCanOmitStateDir(t *testing.T) {
+	network := &ChutneyNetwork{
+		baseConfig: translateChutneyConfig(rawChutneyConfig{}),
+	}
+	nodeDataDir := t.TempDir()
+
+	configPath, err := network.WriteNodeConfig(nodeDataDir, ArtiConfigOptions{
+		OmitStateDir: true,
+	})
+	if err != nil {
+		t.Fatalf("write node config: %v", err)
+	}
+
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read node config: %v", err)
+	}
+	if regexp.MustCompile(`(?m)^\s*state_dir\s*=`).Match(configBytes) {
+		t.Fatalf("rendered config unexpectedly contains state_dir:\n%s", string(configBytes))
+	}
+}
+
 func TestWaitForHealthyStatusRetriesUntilSuccess(t *testing.T) {
 	var attempts int
 	network := &ChutneyNetwork{

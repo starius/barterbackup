@@ -23,8 +23,14 @@ const (
 // artiConfigProvider writes one per-node Arti config when a suite needs a
 // private network.
 type artiConfigProvider interface {
-	WriteNodeConfig(nodeDataDir string) (string, error)
+	WriteNodeConfig(nodeDataDir string, options ArtiConfigOptions) (string, error)
 	Close() error
+}
+
+// ArtiConfigOptions customizes one per-node rendered Arti client config.
+type ArtiConfigOptions struct {
+	ExplicitStateDir string
+	OmitStateDir     bool
 }
 
 // Suite owns the shared Docker image and optional Arti config source for one

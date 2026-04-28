@@ -23,6 +23,7 @@ type Node struct {
 	testClock                     bool
 	disableMaintenance            bool
 	peerMetadataFlushDelaySeconds uint64
+	artiConfigOptions             ArtiConfigOptions
 }
 
 // Name returns the logical test node name.
@@ -61,11 +62,21 @@ func (n *Node) SetPeerMetadataFlushDelaySeconds(seconds uint64) {
 	n.peerMetadataFlushDelaySeconds = seconds
 }
 
+// SetArtiStateDir renders this node's Arti config with an explicit state dir.
+func (n *Node) SetArtiStateDir(path string) {
+	n.artiConfigOptions = ArtiConfigOptions{ExplicitStateDir: path}
+}
+
+// OmitArtiStateDir omits storage.state_dir from this node's rendered Arti config.
+func (n *Node) OmitArtiStateDir() {
+	n.artiConfigOptions = ArtiConfigOptions{OmitStateDir: true}
+}
+
 // StartLocked starts the daemon container without initializing or unlocking it.
 func (n *Node) StartLocked(ctx context.Context) error {
 	n.ForceRemove(ctx)
 	if n.suite.artiConfig != nil {
-		if _, err := n.suite.artiConfig.WriteNodeConfig(n.dataDir); err != nil {
+		if _, err := n.suite.artiConfig.WriteNodeConfig(n.dataDir, n.artiConfigOptions); err != nil {
 			return err
 		}
 	}

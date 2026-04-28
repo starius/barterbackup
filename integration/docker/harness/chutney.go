@@ -48,7 +48,7 @@ type rawChutneyConfig struct {
 type translatedArtiConfig struct {
 	Storage struct {
 		CacheDir string `toml:"cache_dir"`
-		StateDir string `toml:"state_dir"`
+		StateDir string `toml:"state_dir,omitempty"`
 		Keystore struct {
 			Primary struct {
 				Kind string `toml:"kind"`
@@ -165,10 +165,20 @@ func (n *ChutneyNetwork) Healthy(ctx context.Context) error {
 }
 
 // WriteNodeConfig renders one translated Arti client config into nodeDataDir.
-func (n *ChutneyNetwork) WriteNodeConfig(nodeDataDir string) (string, error) {
+func (n *ChutneyNetwork) WriteNodeConfig(
+	nodeDataDir string,
+	options ArtiConfigOptions,
+) (string, error) {
 	config := n.baseConfig
 	config.Storage.CacheDir = "/data/arti-cache"
-	config.Storage.StateDir = "/data/tor"
+	switch {
+	case options.OmitStateDir:
+		config.Storage.StateDir = ""
+	case options.ExplicitStateDir != "":
+		config.Storage.StateDir = options.ExplicitStateDir
+	default:
+		config.Storage.StateDir = "/data/tor"
+	}
 
 	encoded, err := toml.Marshal(config)
 	if err != nil {
