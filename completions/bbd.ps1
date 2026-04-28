@@ -23,7 +23,7 @@ Register-ArgumentCompleter -Native -CommandName 'bbd' -ScriptBlock {
         'bbd' {
             [CompletionResult]::new('--local-addr', '--local-addr', [CompletionResultType]::ParameterName, 'local_addr is the local loopback address for the CLI gRPC service')
             [CompletionResult]::new('--data-dir', '--data-dir', [CompletionResultType]::ParameterName, 'data_dir is the base directory for all daemon state')
-            [CompletionResult]::new('--arti-config', '--arti-config', [CompletionResultType]::ParameterName, 'arti_config is one optional Arti TOML file for custom test networks')
+            [CompletionResult]::new('--arti-config', '--arti-config', [CompletionResultType]::ParameterName, 'arti_config is one optional Arti client TOML file passed directly to embedded Arti')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

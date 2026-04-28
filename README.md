@@ -258,15 +258,18 @@ echo 'correct horse battery staple' | \
 ```
 
 If Tor access needs a custom Arti client configuration, point the daemon at
-one TOML file with `--arti-config`. This is the path for bridges and
-pluggable transports such as `obfs4` or `snowflake`:
+one Arti client TOML file with `--arti-config`. This is the path for bridges,
+pluggable transports such as `obfs4` or `snowflake`, and other advanced Arti
+client settings:
 
 ```bash
 bbd --data-dir /tmp/barterbackup --arti-config /path/to/arti.toml
 ```
 
-Bridge and pluggable-transport settings live in that Arti config file; they
-are passed through directly to embedded Arti.
+The daemon passes that file through directly to embedded Arti using Arti's
+native client config format. If the file omits `storage.state_dir`, `bbd`
+injects its usual `<data-dir>/tor` state path before bootstrap. If the file
+already sets `storage.state_dir`, `bbd` uses that path as-is.
 
 Add a peer:
 

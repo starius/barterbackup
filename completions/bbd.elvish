@@ -20,7 +20,7 @@ set edit:completion:arg-completer[bbd] = {|@words|
         &'bbd'= {
             cand --local-addr 'local_addr is the local loopback address for the CLI gRPC service'
             cand --data-dir 'data_dir is the base directory for all daemon state'
-            cand --arti-config 'arti_config is one optional Arti TOML file for custom test networks'
+            cand --arti-config 'arti_config is one optional Arti client TOML file passed directly to embedded Arti'
             cand -h 'Print help'
             cand --help 'Print help'
         }

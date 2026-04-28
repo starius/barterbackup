@@ -53,7 +53,7 @@ pub struct Config {
     #[arg(long, env = "BBD_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
 
-    /// arti_config is one optional Arti TOML file for custom test networks.
+    /// arti_config is one optional Arti client TOML file passed directly to embedded Arti.
     #[arg(long, env = "BBD_ARTI_CONFIG")]
     pub arti_config: Option<PathBuf>,
 
@@ -467,7 +467,7 @@ impl MaintenanceSchedule {
 pub struct TorPeerRuntimeFactory {
     /// tor_state_dir is the filesystem location used by Arti for cached state.
     tor_state_dir: PathBuf,
-    /// arti_config is one optional Arti TOML file to merge before bootstrap.
+    /// arti_config is one optional Arti client TOML file to pass through before bootstrap.
     arti_config: Option<PathBuf>,
 }
 
@@ -2965,6 +2965,7 @@ mod tests {
         let rendered = command.render_long_help().to_string();
 
         assert!(rendered.contains("--arti-config"));
+        assert!(rendered.contains("embedded Arti"));
         assert!(!rendered.contains("--test-clock"));
         assert!(!rendered.contains("--disable-maintenance"));
         assert!(!rendered.contains("--peer-metadata-flush-delay-secs"));
