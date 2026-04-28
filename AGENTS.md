@@ -88,12 +88,14 @@ Transport and security
 - Peer traffic runs over Arti onion services plus mutual TLS.
 - TLS policy is TLS 1.3 only with `X25519MLKEM768` enforced.
 - Node identity is the deterministic Ed25519 key derived from the main seed.
-- `<data-dir>/tor` keeps Arti's public network cache state, while the hidden
-  service identity key is inserted into Arti's ephemeral keystore at unlock
-  time and is not persisted to disk.
+- Arti client state lives under the configured Arti `storage.state_dir`. When
+  no external Arti config overrides it, `bbd` injects the default
+  `<data-dir>/tor` path into the Arti client config.
+- The hidden service identity key is inserted into Arti's ephemeral keystore at
+  unlock time and is not persisted to disk.
 - Startup prunes only the hidden-service-specific replay and introduction-point
-  state under `<data-dir>/tor` so restart warnings do not conflict with that
-  ephemeral-key model.
+  state under the active Arti state directory so restart warnings do not
+  conflict with that ephemeral-key model.
 - Local content and mirrored peer content must remain encrypted at rest.
 - A peer sidecar is the encrypted local metadata record stored alongside one
   mirrored peer blob.
@@ -132,8 +134,6 @@ Testing
 
 Open product gaps
 
-- fresh-node bootstrap still needs a product decision when only the seed is
-  available and no peer addresses survive locally;
-- divergent recovery branches still need operator-facing UX and RPC support;
-- Tor bridges and pluggable transports are configured through `bbd
-  --arti-config`; a separate non-Tor peer transport is still undecided.
+- Fresh-node seed-only recovery still needs a product decision when no tracked
+  peer addresses survive locally and no bootstrap peer can lead us to the
+  replicas that hold our data.
