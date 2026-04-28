@@ -1897,25 +1897,58 @@ fn apply_background_peer_failures(
 async fn run_background_peer_maintenance(
     node: Arc<Node>,
     clock: Arc<dyn Clock>,
-    peer_onion: String,
+    action: node::BackgroundMaintenancePeerAction,
     peer_failures: BackgroundPeerFailures,
     maintenance_interval: Duration,
     self_check: Arc<StdMutex<SelfCheckHealth>>,
     shutdown: CancellationToken,
 ) {
+    let peer_onion = action.peer_onion;
     let started_at = clock.now();
     if !peer_failures.should_attempt(&peer_onion, started_at) {
         return;
     }
 
-    let Some(proposal_result) =
-        wait_for_maintenance_step(&shutdown, node.propose_contract_updates(&peer_onion)).await
-    else {
-        return;
-    };
-    match proposal_result {
-        Ok(_) => {}
-        Err(error) => {
+    if action.propose {
+        let Some(proposal_result) =
+            wait_for_maintenance_step(&shutdown, node.propose_contract_updates(&peer_onion)).await
+        else {
+            return;
+        };
+        match proposal_result {
+            Ok(_) => {}
+            Err(error) => {
+                let failure = peer_failures.record_failure(
+                    &peer_onion,
+                    started_at,
+                    &error,
+                    maintenance_interval,
+                );
+                let (self_check_state, self_check_error) =
+                    self_check_log_fields(self_check.as_ref());
+                warn!(
+                    peer = %peer_onion,
+                    %error,
+                    failure_code = ?error.code(),
+                    consecutive_failures = failure.consecutive_failures,
+                    retry_after_ms = failure.retry_after.as_millis(),
+                    last_success_ago_ms = failure.last_success_ago.map(|elapsed| elapsed.as_millis()),
+                    self_peer_check_state = self_check_state,
+                    self_peer_check_error = %self_check_error,
+                    "background contract proposal failed"
+                );
+                return;
+            }
+        }
+    }
+
+    if action.check {
+        let Some(check_result) =
+            wait_for_maintenance_step(&shutdown, node.check_contract_updates(&peer_onion)).await
+        else {
+            return;
+        };
+        if let Err(error) = check_result {
             let failure =
                 peer_failures.record_failure(&peer_onion, started_at, &error, maintenance_interval);
             let (self_check_state, self_check_error) = self_check_log_fields(self_check.as_ref());
@@ -1928,33 +1961,10 @@ async fn run_background_peer_maintenance(
                 last_success_ago_ms = failure.last_success_ago.map(|elapsed| elapsed.as_millis()),
                 self_peer_check_state = self_check_state,
                 self_peer_check_error = %self_check_error,
-                "background contract proposal failed"
+                "background contract check failed"
             );
             return;
         }
-    }
-
-    let Some(check_result) =
-        wait_for_maintenance_step(&shutdown, node.check_contract_updates(&peer_onion)).await
-    else {
-        return;
-    };
-    if let Err(error) = check_result {
-        let failure =
-            peer_failures.record_failure(&peer_onion, started_at, &error, maintenance_interval);
-        let (self_check_state, self_check_error) = self_check_log_fields(self_check.as_ref());
-        warn!(
-            peer = %peer_onion,
-            %error,
-            failure_code = ?error.code(),
-            consecutive_failures = failure.consecutive_failures,
-            retry_after_ms = failure.retry_after.as_millis(),
-            last_success_ago_ms = failure.last_success_ago.map(|elapsed| elapsed.as_millis()),
-            self_peer_check_state = self_check_state,
-            self_peer_check_error = %self_check_error,
-            "background contract check failed"
-        );
-        return;
     }
 
     if let Some(cleared_failures) = peer_failures.record_success(&peer_onion, clock.now()) {
@@ -1986,20 +1996,28 @@ async fn run_maintenance_pass(
         warn!(%error, "background recovery pass failed");
     }
 
-    // Then refresh, propose, and check contracts for known peers with bounded
-    // fan-out so one flaky peer cannot stall the whole pass.
-    let mut peer_onions = node.known_peers().into_iter();
+    // Then refresh and run contract maintenance for the peers currently
+    // selected by the background plan with bounded fan-out so one flaky peer
+    // cannot stall the whole pass.
+    let plan = match node.background_maintenance_plan().await {
+        Ok(plan) => plan,
+        Err(error) => {
+            warn!(%error, "background maintenance planning failed");
+            return;
+        }
+    };
+    let mut peer_actions = plan.peer_actions.into_iter();
     let mut in_flight = tokio::task::JoinSet::new();
 
     loop {
         while in_flight.len() < BACKGROUND_PEER_MAINTENANCE_CONCURRENCY {
-            let Some(peer_onion) = peer_onions.next() else {
+            let Some(action) = peer_actions.next() else {
                 break;
             };
             in_flight.spawn(run_background_peer_maintenance(
                 node.clone(),
                 clock.clone(),
-                peer_onion,
+                action,
                 peer_failures.clone(),
                 maintenance_interval,
                 self_check.clone(),
@@ -2819,6 +2837,23 @@ mod tests {
     async fn init_and_unlock_service(service: &DaemonService, password: &str) -> Result<()> {
         init_service(service, password).await?;
         unlock_service(service, password).await
+    }
+
+    /// Update the daemon storage config through the public RPC.
+    async fn set_storage_config(
+        service: &DaemonService,
+        allocated_storage_for_peers: i64,
+        min_replicas: i64,
+    ) -> Result<()> {
+        service
+            .set_storage_config(tonic::Request::new(clirpc::SetStorageConfigRequest {
+                config: Some(clirpc::StorageConfig {
+                    allocated_storage_for_peers,
+                    min_replicas,
+                }),
+            }))
+            .await?;
+        Ok(())
     }
 
     /// Wait until the public peer runtime is both bootstrapped and reachable.
@@ -4539,6 +4574,7 @@ mod tests {
 
         init_and_unlock_service(&local_service, "local-password").await?;
         init_and_unlock_service(&remote_service, "remote-password").await?;
+        set_storage_config(&local_service, 4 * 1024 * 1024, 1).await?;
 
         let remote_onion = unlocked_node(&remote_service).await.address().to_string();
         local_service
@@ -4734,6 +4770,7 @@ mod tests {
 
         init_and_unlock_service(&local_service, "local-score").await?;
         init_and_unlock_service(&remote_service, "remote-score").await?;
+        set_storage_config(&local_service, 4 * 1024 * 1024, 1).await?;
 
         let remote_onion = unlocked_node(&remote_service).await.address().to_string();
         local_service
@@ -4774,6 +4811,122 @@ mod tests {
 
         local_service.shutdown().await?;
         remote_service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_maintenance_refills_replica_target_from_known_peer() -> Result<()> {
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        let maintenance_config = MaintenanceConfig::with_interval(Duration::from_millis(100));
+        let owner_dir = TempDir::new()?;
+        let first_peer_dir = TempDir::new()?;
+        let refill_peer_dir = TempDir::new()?;
+        let owner_service = DaemonService::with_maintenance_config(
+            owner_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            maintenance_config.clone(),
+        );
+        let first_peer_service = DaemonService::with_maintenance_config(
+            first_peer_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            maintenance_config.clone(),
+        );
+        let refill_peer_service = DaemonService::with_maintenance_config(
+            refill_peer_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            maintenance_config,
+        );
+
+        init_and_unlock_service(&owner_service, "refill-owner").await?;
+        init_and_unlock_service(&first_peer_service, "refill-first").await?;
+        init_and_unlock_service(&refill_peer_service, "refill-second").await?;
+        set_storage_config(&owner_service, 4 * 1024 * 1024, 1).await?;
+
+        let first_peer_onion = unlocked_node(&first_peer_service)
+            .await
+            .address()
+            .to_string();
+        let refill_peer_onion = unlocked_node(&refill_peer_service)
+            .await
+            .address()
+            .to_string();
+
+        owner_service
+            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: first_peer_onion.clone(),
+                }),
+            }))
+            .await?;
+        owner_service
+            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: refill_peer_onion.clone(),
+                }),
+            }))
+            .await?;
+
+        owner_service
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        owner_service
+            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: first_peer_onion.clone(),
+                }),
+            }))
+            .await?
+            .into_inner()
+            .for_each(|_| async {})
+            .await;
+        owner_service
+            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: first_peer_onion.clone(),
+                }),
+            }))
+            .await?
+            .into_inner()
+            .for_each(|_| async {})
+            .await;
+
+        first_peer_service.shutdown().await?;
+
+        wait_for_async(Duration::from_secs(5), || {
+            let owner_service = &owner_service;
+            let refill_peer_onion = refill_peer_onion.clone();
+            async move {
+                let contracts = owner_service
+                    .get_contracts(tonic::Request::new(clirpc::GetContractsRequest {}))
+                    .await?
+                    .into_inner()
+                    .contracts;
+                Ok(contracts.into_iter().any(|contract| {
+                    contract
+                        .peer
+                        .as_ref()
+                        .is_some_and(|peer| peer.onion_service_id == refill_peer_onion)
+                        && contract.online
+                        && contract.our_content_synced
+                }))
+            }
+        })
+        .await?;
+
+        owner_service.shutdown().await?;
+        refill_peer_service.shutdown().await?;
         Ok(())
     }
 

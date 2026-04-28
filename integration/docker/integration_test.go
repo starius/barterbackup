@@ -345,6 +345,7 @@ func TestDockerLogicalClockDrivesMaintenance(t *testing.T) {
 
 	connectPeer(t, owner, peerOnion)
 	connectPeer(t, peer, ownerOnion)
+	setMinReplicas(t, owner, 1)
 
 	payloadV1 := randomPayload(128 * 1024)
 	setFile(t, owner, "payload.bin", payloadV1)
@@ -395,6 +396,37 @@ func TestDockerLogicalClockDrivesMaintenance(t *testing.T) {
 		t.Fatalf("unexpected timer label after advance: %s", next.GetLabel())
 	}
 	waitForPeerStorage(t, peer, ownerOnion, int64(len(payloadV2)))
+}
+
+func TestDockerMaintenanceRefillsReplicaTargetFromKnownPeer(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	owner := addNode(t, scenario, "owner", "correct horse battery staple")
+	peerA := addNode(t, scenario, "peer-a", "peer-a password")
+	peerB := addNode(t, scenario, "peer-b", "peer-b password")
+
+	ownerOnion := startInitializedReadyNode(t, owner)
+	peerAOnion := startInitializedReadyNode(t, peerA)
+	peerBOnion := startInitializedReadyNode(t, peerB)
+
+	connectPeer(t, owner, peerAOnion)
+	connectPeer(t, owner, peerBOnion)
+	connectPeer(t, peerA, ownerOnion)
+	connectPeer(t, peerB, ownerOnion)
+
+	payload := randomPayload(160 * 1024)
+	setFile(t, owner, "payload.bin", payload)
+	proposeContract(t, owner, peerAOnion)
+	waitForPeerStorage(t, peerA, ownerOnion, int64(len(payload)))
+	checkContract(t, owner, peerAOnion)
+	setMinReplicas(t, owner, 1)
+
+	stopNode(t, peerA)
+	assertCLIKeysRemoved(t, peerA)
+
+	waitForPeerStorage(t, peerB, ownerOnion, int64(len(payload)))
+	waitForContractSynced(t, owner, peerBOnion)
 }
 
 func TestDockerDelayedPeerMetadataFlushPersistsAfterConfiguredDelay(t *testing.T) {
@@ -693,6 +725,44 @@ func TestDockerPeerExchangeGossip(t *testing.T) {
 	peers := getPeers(t, nodeA)
 	assertPeerInventoryContainsOnce(t, peers, nodeBOnion, nodeCOnion)
 	assertPeerAbsentFromInventory(t, peers, nodeAOnion)
+}
+
+func TestDockerRecoveryFindsReplicaThroughPeerExchange(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	owner := addNode(t, scenario, "owner", "correct horse battery staple")
+	broker := addNode(t, scenario, "broker", "broker password")
+	replica := addNode(t, scenario, "replica", "replica password")
+	recovered := addNode(t, scenario, "recovered", "correct horse battery staple")
+	owner.DisableMaintenance()
+	broker.DisableMaintenance()
+	replica.DisableMaintenance()
+	recovered.DisableMaintenance()
+
+	ownerOnion := startInitializedReadyNode(t, owner)
+	brokerOnion := startInitializedReadyNode(t, broker)
+	replicaOnion := startInitializedReadyNode(t, replica)
+
+	connectPeer(t, owner, replicaOnion)
+	connectPeer(t, replica, ownerOnion)
+	connectPeer(t, broker, replicaOnion)
+
+	payload := randomPayload(192 * 1024)
+	setFile(t, owner, "payload.bin", payload)
+	proposeContract(t, owner, replicaOnion)
+	waitForPeerStorage(t, replica, ownerOnion, int64(len(payload)))
+
+	startLockedNode(t, recovered)
+	waitForReadyNode(t, recovered)
+	initNode(t, recovered)
+	unlockAndWaitReady(t, recovered)
+	assertNoFiles(t, recovered)
+
+	connectPeer(t, recovered, brokerOnion)
+	recoverContent(t, recovered)
+	assertFileEquals(t, recovered, "payload.bin", payload)
+	assertPeerVisible(t, recovered, replicaOnion)
 }
 
 func TestDockerOfflinePeerPenalizedOnCheck(t *testing.T) {
@@ -2473,6 +2543,24 @@ func setStorageBudget(t *testing.T, node *harness.Node, allocatedBytes int64) {
 	}
 }
 
+func setMinReplicas(t *testing.T, node *harness.Node, minReplicas int64) {
+	t.Helper()
+	current := getStorageConfig(t, node)
+	config := current.GetConfig()
+	if config == nil {
+		t.Fatalf("expected current storage config for %s", node.Name())
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	if err := node.SetStorageConfig(ctx, &clirpc.StorageConfig{
+		AllocatedStorageForPeers: config.GetAllocatedStorageForPeers(),
+		MinReplicas:              minReplicas,
+	}); err != nil {
+		t.Fatalf("set min replicas on %s: %v", node.Name(), err)
+	}
+}
+
 func getStorageConfig(t *testing.T, node *harness.Node) *clirpc.GetStorageConfigResponse {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
@@ -2493,6 +2581,23 @@ func getContracts(t *testing.T, node *harness.Node) *clirpc.GetContractsResponse
 		t.Fatalf("get contracts from %s: %v", node.Name(), err)
 	}
 	return response
+}
+
+func waitForContractSynced(t *testing.T, node *harness.Node, peerOnion string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		response := getContracts(t, node)
+		for _, contract := range response.GetContracts() {
+			if contract.GetPeer().GetOnionServiceId() == peerOnion && contract.GetOurContentSynced() {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for synced contract from %s to %s", node.Name(), peerOnion)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 func assertContractOnlineState(t *testing.T, node *harness.Node, peerOnion string, expected bool) {

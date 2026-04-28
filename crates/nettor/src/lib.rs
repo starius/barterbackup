@@ -627,4 +627,75 @@ mod tests {
 
         fs::remove_dir_all(config_root).unwrap();
     }
+
+    /// Chutney-derived private-network Arti configs still decode after translation.
+    #[test]
+    fn load_arti_config_accepts_chutney_private_network_config() {
+        let config_root = build_ephemeral_state_dir();
+        let config_path = config_root.join("arti.toml");
+        let state_dir = config_root.join("tor-state");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &config_path,
+            format!(
+                r#"
+                [storage]
+                cache_dir = "/tmp/chutney/cache"
+                state_dir = "{}"
+
+                [storage.keystore.primary]
+                kind = "ephemeral"
+
+                [path_rules]
+                ipv4_subnet_family_prefix = 33
+                ipv6_subnet_family_prefix = 129
+
+                [address_filter]
+                allow_local_addrs = true
+
+                [override_net_params]
+                hsdir_interval = 8
+
+                [bridges]
+                bridges = []
+
+                [tor_network.authorities]
+                v3idents = [
+                  "30A3F82DE0485F8666C05CC807FD7EDE832ABD8A",
+                  "529E1B0482639424B33F9932CD204EA6E85B5BAF",
+                ]
+                uploads = [
+                  ["127.0.0.1:7100"],
+                  ["127.0.0.1:7101"],
+                ]
+                downloads = [
+                  ["127.0.0.1:7100"],
+                  ["127.0.0.1:7101"],
+                ]
+                votes = [
+                  ["127.0.0.1:7100"],
+                  ["127.0.0.1:7101"],
+                ]
+
+                [[tor_network.fallback_caches]]
+                rsa_identity = "CC168F8977B1ACC98D4028DF1FE2E742421A04E1"
+                ed_identity = "kVbEsThFnAldEsWG6tb6WRhzQpUugyeWZFqRE38FCrg"
+                orports = ["127.0.0.1:5100"]
+
+                [[tor_network.fallback_caches]]
+                rsa_identity = "AC78CFF76E680EAB377BBDCC2C8778AB26805F04"
+                ed_identity = "T55kKU71jQPZhArgkQ8CLTzmK0WR8r4EL7tWuBOXUyw"
+                orports = ["127.0.0.1:5101"]
+            "#,
+                state_dir.display()
+            ),
+        )
+        .unwrap();
+
+        let loaded = load_arti_config(Path::new("/tmp/ignored-state-dir"), Some(&config_path))
+            .unwrap_or_else(|error| panic!("load chutney-style arti config: {error:#}"));
+        assert_eq!(loaded.prepared_state_dir, state_dir);
+
+        fs::remove_dir_all(config_root).unwrap();
+    }
 }

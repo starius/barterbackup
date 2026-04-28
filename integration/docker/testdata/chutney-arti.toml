@@ -25,6 +25,18 @@ v3idents = [
   "529E1B0482639424B33F9932CD204EA6E85B5BAF",
   "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 ]
+uploads = [
+  ["127.0.0.1:7100"],
+  ["127.0.0.1:7101"],
+]
+downloads = [
+  ["127.0.0.1:7100"],
+  ["127.0.0.1:7101"],
+]
+votes = [
+  ["127.0.0.1:7100"],
+  ["127.0.0.1:7101"],
+]
 
 [bridges]
 bridges = []

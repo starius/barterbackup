@@ -345,6 +345,10 @@ Recovery and conflicts:
   storage information, including pinned/protected/disposable byte totals,
   tracked-only peer count, offline-blocking bytes, reclaimable bytes, and the
   current fresh-replica horizon for our own content
+- `bbd` maintains the configured `min_replicas` target in the background; when
+  verified fresh replicas drop below that target, it automatically proposes
+  and checks additional known peers without a manual `bbcli contract propose`
+  round
 - `bbcli config get --resource-policy` reports the current fixed peer-content
   ceiling, peer transport message limit, retry timing policy, and related
   runtime resource bounds

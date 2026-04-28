@@ -1,8 +1,8 @@
 //! Node orchestration for a single BarterBackup instance.
 //!
-//! The current implementation focuses on the local encrypted store and the RPC
-//! surface that depends on it. Peer-to-peer contract management and Tor-backed
-//! transport still need further work.
+//! The node owns the local encrypted store, the local and peer RPC surfaces,
+//! peer inventory and contract bookkeeping, and recovery and maintenance
+//! helpers used by the daemon.
 
 mod builtin_peers;
 
@@ -287,6 +287,31 @@ enum PeerAdmissionPlan {
     Admit { evicted_public_key: Option<Vec<u8>> },
     /// Reject leaves the current peer set unchanged.
     Reject,
+}
+
+/// BackgroundMaintenancePeerAction describes what one maintenance pass should
+/// do with one known peer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackgroundMaintenancePeerAction {
+    /// peer_onion is the peer onion hostname to contact.
+    pub peer_onion: String,
+    /// propose reports whether the pass should run contract proposal first.
+    pub propose: bool,
+    /// check reports whether the pass should run contract verification.
+    pub check: bool,
+}
+
+/// BackgroundMaintenancePlan is one snapshot of automatic peer-maintenance
+/// work derived from the current local state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackgroundMaintenancePlan {
+    /// peer_actions lists the per-peer work in priority order.
+    pub peer_actions: Vec<BackgroundMaintenancePeerAction>,
+    /// fresh_replica_count is the number of currently verified fresh replicas
+    /// for our active content revision.
+    pub fresh_replica_count: i64,
+    /// min_replicas_target is the configured minimum fresh replica target.
+    pub min_replicas_target: i64,
 }
 
 /// Build the default local storage policy.
@@ -3252,6 +3277,119 @@ impl Node {
             offline_blocking_storage_bytes: storage_accounting.offline_blocking_bytes,
             reclaimable_peer_storage_bytes: storage_accounting.reclaimable_bytes,
             replica_horizon: self.replica_horizon(&contracts.contracts, &tracked_by_onion)?,
+        })
+    }
+
+    /// Build the current background peer-maintenance plan.
+    pub async fn background_maintenance_plan(&self) -> Result<BackgroundMaintenancePlan, Status> {
+        let inventory = self.peer_inventory()?;
+        let contracts = self.get_contracts_response().await?;
+        let current_content = self.responder_content()?;
+        let tracked_peers = self.tracked_peers()?;
+        let tracked_by_onion = tracked_peers
+            .into_iter()
+            .filter_map(|peer| {
+                self.onion_from_public_key_bytes(&peer.onion_pubkey)
+                    .ok()
+                    .map(|peer_onion| (peer_onion, peer))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let contract_by_onion = contracts
+            .contracts
+            .into_iter()
+            .filter_map(|contract| {
+                let peer_onion = contract.peer.as_ref()?.onion_service_id.clone();
+                Some((peer_onion, contract))
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let fresh_replica_peers = current_content
+            .as_ref()
+            .map(|current_content| {
+                contract_by_onion
+                    .values()
+                    .filter(|contract| contract.online && contract.our_content_synced)
+                    .filter_map(|contract| {
+                        let peer_onion = contract.peer.as_ref()?.onion_service_id.clone();
+                        let tracked_peer = tracked_by_onion.get(&peer_onion)?;
+                        (tracked_peer.our_content_last_verified_content_id
+                            == current_content.content_id)
+                            .then_some(peer_onion)
+                    })
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let fresh_replica_count = i64::try_from(fresh_replica_peers.len()).unwrap_or(i64::MAX);
+        let min_replicas_target = self.storage_config.lock().unwrap().min_replicas.max(0);
+        let missing_fresh_replicas = (min_replicas_target - fresh_replica_count).max(0);
+        let mut remaining_deficit = usize::try_from(missing_fresh_replicas).unwrap_or(usize::MAX);
+
+        let mut action_by_onion = BTreeMap::<String, BackgroundMaintenancePeerAction>::new();
+
+        for peer in &inventory {
+            let Some(contract) = contract_by_onion.get(&peer.onion_service_id) else {
+                continue;
+            };
+            if current_content.is_none() {
+                break;
+            }
+            if !contract.online || fresh_replica_peers.contains(&peer.onion_service_id) {
+                continue;
+            }
+            if contract.our_content_synced && remaining_deficit > 0 {
+                action_by_onion.insert(
+                    peer.onion_service_id.clone(),
+                    BackgroundMaintenancePeerAction {
+                        peer_onion: peer.onion_service_id.clone(),
+                        propose: false,
+                        check: true,
+                    },
+                );
+                remaining_deficit = remaining_deficit.saturating_sub(1);
+                continue;
+            }
+        }
+
+        for peer in &inventory {
+            let Some(contract) = contract_by_onion.get(&peer.onion_service_id) else {
+                continue;
+            };
+            if !contract.online {
+                continue;
+            }
+
+            let contributes_fresh_replica = fresh_replica_peers.contains(&peer.onion_service_id);
+            let needs_unsynced_fill = current_content.is_some()
+                && !contributes_fresh_replica
+                && !contract.our_content_synced
+                && remaining_deficit > 0;
+
+            if contributes_fresh_replica || needs_unsynced_fill {
+                let action = action_by_onion
+                    .entry(peer.onion_service_id.clone())
+                    .or_insert_with(|| BackgroundMaintenancePeerAction {
+                        peer_onion: peer.onion_service_id.clone(),
+                        propose: false,
+                        check: false,
+                    });
+                action.propose |= needs_unsynced_fill;
+                action.check |= contributes_fresh_replica || needs_unsynced_fill;
+                if needs_unsynced_fill {
+                    remaining_deficit = remaining_deficit.saturating_sub(1);
+                }
+            }
+        }
+
+        let peer_actions = inventory
+            .into_iter()
+            .filter_map(|peer| action_by_onion.remove(&peer.onion_service_id))
+            .filter(|action| action.propose || action.check)
+            .collect();
+
+        Ok(BackgroundMaintenancePlan {
+            peer_actions,
+            fresh_replica_count,
+            min_replicas_target,
         })
     }
 
@@ -6903,7 +7041,24 @@ mod tests {
         node.pin_peer(&peer_onions[0])?;
 
         for peer_onion in &peer_onions {
-            let _client = node.connect_peer_client(peer_onion).await?;
+            let mut last_timeout = None;
+            let mut connected = false;
+            for _attempt in 0..3 {
+                match node.connect_peer_client(peer_onion).await {
+                    Ok(_client) => {
+                        connected = true;
+                        break;
+                    }
+                    Err(status) if status.code() == Code::DeadlineExceeded => {
+                        last_timeout = Some(status);
+                        tokio::task::yield_now().await;
+                    }
+                    Err(status) => return Err(status.into()),
+                }
+            }
+            if !connected {
+                return Err(last_timeout.expect("timeout status is recorded").into());
+            }
             clock.advance(Duration::from_secs(1));
         }
 
@@ -8322,6 +8477,173 @@ mod tests {
         peer_a_server.abort();
         peer_b_server.abort();
         peer_c_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_maintenance_plan_prefers_synced_unverified_replicas() -> anyhow::Result<()>
+    {
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner = Arc::new(Node::with_local_storage(
+            "maintenance-plan-owner",
+            owner_filesystem,
+        )?);
+        let verified_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let verified_peer = Arc::new(Node::with_local_storage(
+            "maintenance-plan-verified",
+            verified_filesystem,
+        )?);
+        let synced_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let synced_unverified_peer = Arc::new(Node::with_local_storage(
+            "maintenance-plan-synced",
+            synced_filesystem,
+        )?);
+        let unsynced_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let unsynced_peer = Arc::new(Node::with_local_storage(
+            "maintenance-plan-unsynced",
+            unsynced_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        owner.set_peer_connector(connector.clone());
+        verified_peer.set_peer_connector(connector.clone());
+        synced_unverified_peer.set_peer_connector(connector.clone());
+        unsynced_peer.set_peer_connector(connector.clone());
+
+        owner.add_known_peer(verified_peer.address())?;
+        owner.add_known_peer(synced_unverified_peer.address())?;
+        owner.add_known_peer(unsynced_peer.address())?;
+        verified_peer.add_known_peer(owner.address())?;
+        synced_unverified_peer.add_known_peer(owner.address())?;
+        unsynced_peer.add_known_peer(owner.address())?;
+        *owner.storage_config.lock().unwrap() = clirpc::StorageConfig {
+            allocated_storage_for_peers: DEFAULT_ALLOCATED_STORAGE_FOR_PEERS,
+            min_replicas: 2,
+        };
+
+        CliService::new(owner.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let owner_server = spawn_registered_p2p_server(owner.clone(), connector.as_ref()).await?;
+        let verified_server =
+            spawn_registered_p2p_server(verified_peer.clone(), connector.as_ref()).await?;
+        let synced_server =
+            spawn_registered_p2p_server(synced_unverified_peer.clone(), connector.as_ref()).await?;
+        let unsynced_server =
+            spawn_registered_p2p_server(unsynced_peer.clone(), connector.as_ref()).await?;
+
+        owner
+            .propose_contract_updates(verified_peer.address())
+            .await?;
+        owner
+            .check_contract_updates(verified_peer.address())
+            .await?;
+        owner
+            .propose_contract_updates(synced_unverified_peer.address())
+            .await?;
+
+        let plan = owner.background_maintenance_plan().await?;
+        assert_eq!(plan.fresh_replica_count, 1);
+        assert_eq!(plan.min_replicas_target, 2);
+
+        let actions = plan
+            .peer_actions
+            .into_iter()
+            .map(|action| (action.peer_onion.clone(), action))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            actions.get(verified_peer.address()),
+            Some(&BackgroundMaintenancePeerAction {
+                peer_onion: verified_peer.address().to_string(),
+                propose: false,
+                check: true,
+            })
+        );
+        assert_eq!(
+            actions.get(synced_unverified_peer.address()),
+            Some(&BackgroundMaintenancePeerAction {
+                peer_onion: synced_unverified_peer.address().to_string(),
+                propose: false,
+                check: true,
+            })
+        );
+        assert!(!actions.contains_key(unsynced_peer.address()));
+
+        unsynced_server.abort();
+        synced_server.abort();
+        verified_server.abort();
+        owner_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_maintenance_plan_skips_unsynced_peers_without_replica_target(
+    ) -> anyhow::Result<()> {
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner = Arc::new(Node::with_local_storage(
+            "maintenance-zero-target-owner",
+            owner_filesystem,
+        )?);
+        let fresh_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let fresh_peer = Arc::new(Node::with_local_storage(
+            "maintenance-zero-target-fresh",
+            fresh_filesystem,
+        )?);
+        let unsynced_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let unsynced_peer = Arc::new(Node::with_local_storage(
+            "maintenance-zero-target-unsynced",
+            unsynced_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        owner.set_peer_connector(connector.clone());
+        fresh_peer.set_peer_connector(connector.clone());
+        unsynced_peer.set_peer_connector(connector.clone());
+        owner.add_known_peer(fresh_peer.address())?;
+        owner.add_known_peer(unsynced_peer.address())?;
+        fresh_peer.add_known_peer(owner.address())?;
+        unsynced_peer.add_known_peer(owner.address())?;
+
+        CliService::new(owner.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                }),
+            }))
+            .await?;
+        *owner.storage_config.lock().unwrap() = clirpc::StorageConfig {
+            allocated_storage_for_peers: DEFAULT_ALLOCATED_STORAGE_FOR_PEERS,
+            min_replicas: 0,
+        };
+
+        let owner_server = spawn_registered_p2p_server(owner.clone(), connector.as_ref()).await?;
+        let fresh_server =
+            spawn_registered_p2p_server(fresh_peer.clone(), connector.as_ref()).await?;
+        let unsynced_server =
+            spawn_registered_p2p_server(unsynced_peer.clone(), connector.as_ref()).await?;
+        owner.propose_contract_updates(fresh_peer.address()).await?;
+        owner.check_contract_updates(fresh_peer.address()).await?;
+
+        let plan = owner.background_maintenance_plan().await?;
+        assert_eq!(plan.fresh_replica_count, 1);
+        assert_eq!(plan.min_replicas_target, 0);
+        assert_eq!(
+            plan.peer_actions,
+            vec![BackgroundMaintenancePeerAction {
+                peer_onion: fresh_peer.address().to_string(),
+                propose: false,
+                check: true,
+            }]
+        );
+
+        unsynced_server.abort();
+        fresh_server.abort();
+        owner_server.abort();
         Ok(())
     }
 

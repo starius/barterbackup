@@ -40,7 +40,10 @@ type rawChutneyConfig struct {
 	TorNetwork        struct {
 		FallbackCaches []fallbackCache `toml:"fallback_caches"`
 		Authorities    struct {
-			V3Idents []string `toml:"v3idents"`
+			V3Idents  []string   `toml:"v3idents"`
+			Uploads   [][]string `toml:"uploads"`
+			Downloads [][]string `toml:"downloads"`
+			Votes     [][]string `toml:"votes"`
 		} `toml:"authorities"`
 	} `toml:"tor_network"`
 }
@@ -61,7 +64,10 @@ type translatedArtiConfig struct {
 	Bridges           map[string]any `toml:"bridges,omitempty"`
 	TorNetwork        struct {
 		Authorities struct {
-			V3Idents []string `toml:"v3idents"`
+			V3Idents  []string   `toml:"v3idents"`
+			Uploads   [][]string `toml:"uploads,omitempty"`
+			Downloads [][]string `toml:"downloads,omitempty"`
+			Votes     [][]string `toml:"votes,omitempty"`
 		} `toml:"authorities"`
 		FallbackCaches []fallbackCache `toml:"fallback_caches"`
 	} `toml:"tor_network"`
@@ -331,6 +337,18 @@ func translateChutneyConfig(raw rawChutneyConfig) translatedArtiConfig {
 			trimmed,
 		)
 	}
+	translated.TorNetwork.Authorities.Uploads = append(
+		translated.TorNetwork.Authorities.Uploads,
+		raw.TorNetwork.Authorities.Uploads...,
+	)
+	translated.TorNetwork.Authorities.Downloads = append(
+		translated.TorNetwork.Authorities.Downloads,
+		raw.TorNetwork.Authorities.Downloads...,
+	)
+	translated.TorNetwork.Authorities.Votes = append(
+		translated.TorNetwork.Authorities.Votes,
+		raw.TorNetwork.Authorities.Votes...,
+	)
 	return translated
 }
 

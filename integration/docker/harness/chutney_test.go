@@ -42,6 +42,22 @@ func TestTranslateChutneyConfig(t *testing.T) {
 	if translated.AddressFilter["allow_local_addrs"] != true {
 		t.Fatalf("allow_local_addrs was not preserved: %#v", translated.AddressFilter)
 	}
+	if translated.PathRules["ipv4_subnet_family_prefix"] != int64(33) {
+		t.Fatalf("unexpected ipv4_subnet_family_prefix: %#v", translated.PathRules)
+	}
+	if len(translated.TorNetwork.Authorities.Uploads) != 2 {
+		t.Fatalf("unexpected authority upload count: %d", len(translated.TorNetwork.Authorities.Uploads))
+	}
+	if translated.TorNetwork.Authorities.Uploads[0][0] != "127.0.0.1:7100" {
+		t.Fatalf("unexpected first authority upload address: %#v", translated.TorNetwork.Authorities.Uploads)
+	}
+	rendered, err := toml.Marshal(translated)
+	if err != nil {
+		t.Fatalf("encode translated config: %v", err)
+	}
+	if !regexp.MustCompile(`(?m)^\s*\[path_rules\]`).Match(rendered) {
+		t.Fatalf("translated config unexpectedly dropped path_rules:\n%s", string(rendered))
+	}
 }
 
 func TestWriteNodeConfigUsesExplicitStateDirOverride(t *testing.T) {
