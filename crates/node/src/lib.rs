@@ -1549,6 +1549,9 @@ impl Node {
 
         let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
             .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+        if !self.is_tracked_peer(&peer_public_key)? {
+            return Ok(());
+        }
         let now_secs = i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX);
         batcher.set_peer_reachability(
             peer_public_key.as_bytes(),
@@ -1568,6 +1571,9 @@ impl Node {
 
         let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
             .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+        if !self.is_tracked_peer(&peer_public_key)? {
+            return Ok(());
+        }
         batcher.set_peer_reachability(
             peer_public_key.as_bytes(),
             storedpb::PeerReachability::Offline as i32,
@@ -1930,8 +1936,31 @@ impl Node {
         peer_onion: &str,
         connect_timeout: Duration,
     ) -> Result<transport::PeerClient, Status> {
-        if let Some(client) = self.cached_peer_client(peer_onion) {
-            return Ok(client);
+        self.connect_peer_client_with_timeout_and_tracking(peer_onion, connect_timeout, true)
+            .await
+    }
+
+    /// Connect to another peer without mutating tracked-peer state.
+    async fn probe_peer_client_with_timeout(
+        &self,
+        peer_onion: &str,
+        connect_timeout: Duration,
+    ) -> Result<transport::PeerClient, Status> {
+        self.connect_peer_client_with_timeout_and_tracking(peer_onion, connect_timeout, false)
+            .await
+    }
+
+    /// Connect to another peer with optional tracked-peer side effects.
+    async fn connect_peer_client_with_timeout_and_tracking(
+        &self,
+        peer_onion: &str,
+        connect_timeout: Duration,
+        track_peer: bool,
+    ) -> Result<transport::PeerClient, Status> {
+        if track_peer {
+            if let Some(client) = self.cached_peer_client(peer_onion) {
+                return Ok(client);
+            }
         }
 
         let connector = self
@@ -1947,7 +1976,7 @@ impl Node {
         .await
         .map_err(|_| Status::deadline_exceeded("connect peer timed out"))?
         .map_err(|error| Status::unavailable(format!("connect peer: {error}")))?;
-        if !self.is_our_onion(peer_onion) {
+        if track_peer && !self.is_our_onion(peer_onion) {
             let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
                 .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
             self.track_peer_identity(
@@ -1959,7 +1988,9 @@ impl Node {
         }
 
         let client = transport::configure_peer_client(client);
-        self.remember_peer_client(peer_onion, &client);
+        if track_peer {
+            self.remember_peer_client(peer_onion, &client);
+        }
         Ok(client)
     }
 
@@ -2583,6 +2614,9 @@ impl Node {
         peer_public_key: &ed25519_dalek::PublicKey,
         pins_us: bool,
     ) -> Result<(), Status> {
+        if !self.is_tracked_peer(peer_public_key)? {
+            return Ok(());
+        }
         let Some(batcher) = &self.peer_metadata_batcher else {
             return Ok(());
         };
@@ -2596,6 +2630,9 @@ impl Node {
         peer_public_key: &ed25519_dalek::PublicKey,
         content_id: Option<&[u8]>,
     ) -> Result<(), Status> {
+        if !self.is_tracked_peer(peer_public_key)? {
+            return Ok(());
+        }
         let Some(batcher) = &self.peer_metadata_batcher else {
             return Ok(());
         };
@@ -3723,6 +3760,7 @@ impl Node {
         }
         let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
             .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+        let peer_was_tracked = self.is_tracked_peer(&peer_public_key)?;
         match self
             .retry_peer_operation(peer_onion, policy, || {
                 self.check_contract_updates_once(peer_onion, policy)
@@ -3735,13 +3773,18 @@ impl Node {
                     .responder_content()?
                     .map(|content| content.content_length)
                     .unwrap_or(0);
-                let _ = self.record_verified_our_content(&peer_public_key, None);
-                let new_score = self.update_peer_score(&peer_public_key, false)?;
+                let new_score = if peer_was_tracked {
+                    let _ = self.record_verified_our_content(&peer_public_key, None);
+                    Some(self.update_peer_score(&peer_public_key, false)?)
+                } else {
+                    None
+                };
                 warn!(
                     peer = %peer_onion,
                     code = ?error.code(),
                     message = %error.message(),
-                    new_score_seconds = new_score,
+                    new_score_seconds = new_score.unwrap_or_default(),
+                    tracked = peer_was_tracked,
                     our_content_length,
                     "peer contract check failed after retries"
                 );
@@ -3778,6 +3821,7 @@ impl Node {
         }
         let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
             .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+        let peer_was_tracked = self.is_tracked_peer(&peer_public_key)?;
         let mut updates = vec![clirpc::CheckContractUpdate {
             state: clirpc::ContractState::ConnectingToPeer as i32,
             success: false,
@@ -3788,9 +3832,13 @@ impl Node {
 
         // Refresh the peer's advertised content before validating their copy of
         // our own revision.
-        let mut client = self
-            .connect_peer_client_with_timeout(peer_onion, policy.connect_timeout)
-            .await?;
+        let mut client = if peer_was_tracked {
+            self.connect_peer_client_with_timeout(peer_onion, policy.connect_timeout)
+                .await?
+        } else {
+            self.probe_peer_client_with_timeout(peer_onion, policy.connect_timeout)
+                .await?
+        };
         let revision = self
             .peer_rpc_with_timeout(
                 peer_onion,
@@ -3799,13 +3847,15 @@ impl Node {
                 client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
             )
             .await?;
-        self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned)?;
-        self.sync_peer_content_info(
-            peer_onion,
-            &peer_public_key,
-            revision.responder_content.as_ref(),
-        )
-        .await?;
+        if peer_was_tracked {
+            self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned)?;
+            self.sync_peer_content_info(
+                peer_onion,
+                &peer_public_key,
+                revision.responder_content.as_ref(),
+            )
+            .await?;
+        }
 
         updates.push(clirpc::CheckContractUpdate {
             state: clirpc::ContractState::CheckingContents as i32,
@@ -3816,10 +3866,15 @@ impl Node {
         });
 
         let Some(our_content) = self.responder_content()? else {
-            self.record_verified_our_content(&peer_public_key, None)?;
-            let new_score = self.update_peer_score(&peer_public_key, true)?;
-            self.maybe_exchange_peers_with_client(peer_onion, &mut client)
-                .await?;
+            let new_score = if peer_was_tracked {
+                self.record_verified_our_content(&peer_public_key, None)?;
+                let new_score = self.update_peer_score(&peer_public_key, true)?;
+                self.maybe_exchange_peers_with_client(peer_onion, &mut client)
+                    .await?;
+                Some(new_score)
+            } else {
+                None
+            };
             updates.push(clirpc::CheckContractUpdate {
                 state: clirpc::ContractState::Completed as i32,
                 success: true,
@@ -3830,7 +3885,8 @@ impl Node {
             debug!(
                 peer = %peer_onion,
                 success = true,
-                new_score_seconds = new_score,
+                new_score_seconds = new_score.unwrap_or_default(),
+                tracked = peer_was_tracked,
                 "peer contract check completed without local content"
             );
             return Ok(updates);
@@ -3842,10 +3898,15 @@ impl Node {
             .map(|content_info| content_info.content_id.as_slice())
             != Some(our_content.content_id.as_slice())
         {
-            self.record_verified_our_content(&peer_public_key, None)?;
-            let new_score = self.update_peer_score(&peer_public_key, false)?;
-            self.maybe_exchange_peers_with_client(peer_onion, &mut client)
-                .await?;
+            let new_score = if peer_was_tracked {
+                self.record_verified_our_content(&peer_public_key, None)?;
+                let new_score = self.update_peer_score(&peer_public_key, false)?;
+                self.maybe_exchange_peers_with_client(peer_onion, &mut client)
+                    .await?;
+                Some(new_score)
+            } else {
+                None
+            };
             updates.push(clirpc::CheckContractUpdate {
                 state: clirpc::ContractState::OurContentRevisionMissing as i32,
                 success: false,
@@ -3856,8 +3917,9 @@ impl Node {
             warn!(
                 peer = %peer_onion,
                 success = false,
-                new_score_seconds = new_score,
+                new_score_seconds = new_score.unwrap_or_default(),
                 our_content_length = our_content.content_length,
+                tracked = peer_was_tracked,
                 "peer contract check found our revision missing"
             );
             return Ok(updates);
@@ -3891,14 +3953,19 @@ impl Node {
                     if raw_bytes.value
                         == local_blob[section_offset..section_offset + section_length]
             );
-        if passed {
-            self.record_verified_our_content(&peer_public_key, Some(&our_content.content_id))?;
+        let new_score = if peer_was_tracked {
+            if passed {
+                self.record_verified_our_content(&peer_public_key, Some(&our_content.content_id))?;
+            } else {
+                self.record_verified_our_content(&peer_public_key, None)?;
+            }
+            let new_score = self.update_peer_score(&peer_public_key, passed)?;
+            self.maybe_exchange_peers_with_client(peer_onion, &mut client)
+                .await?;
+            Some(new_score)
         } else {
-            self.record_verified_our_content(&peer_public_key, None)?;
-        }
-        let new_score = self.update_peer_score(&peer_public_key, passed)?;
-        self.maybe_exchange_peers_with_client(peer_onion, &mut client)
-            .await?;
+            None
+        };
         updates.push(clirpc::CheckContractUpdate {
             state: if passed {
                 clirpc::ContractState::Completed as i32
@@ -3915,20 +3982,22 @@ impl Node {
             info!(
                 peer = %peer_onion,
                 success = true,
-                new_score_seconds = new_score,
+                new_score_seconds = new_score.unwrap_or_default(),
                 our_content_length = our_content.content_length,
                 section_offset,
                 section_length,
+                tracked = peer_was_tracked,
                 "peer contract check completed"
             );
         } else {
             warn!(
                 peer = %peer_onion,
                 success = false,
-                new_score_seconds = new_score,
+                new_score_seconds = new_score.unwrap_or_default(),
                 our_content_length = our_content.content_length,
                 section_offset,
                 section_length,
+                tracked = peer_was_tracked,
                 "peer contract check returned invalid content"
             );
         }
@@ -9069,6 +9138,100 @@ mod tests {
 
         requester_server.abort();
         responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_contract_can_probe_untracked_peer_when_capacity_is_full() -> anyhow::Result<()> {
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage(
+            "requester-capacity-full-probe",
+            requester_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+
+        for index in 0..MAX_TRACKED_PEERS {
+            let master = test_master_priv(&format!("tracked-capacity-peer-{index}"));
+            let peer = Node::new_for_tests_from_master(&master)?;
+            let public_key = keys::public_key_from_onion_hostname(peer.address())?;
+            requester_node.track_peer_identity_with_capacity(
+                &public_key,
+                peer_origin_code(false, false),
+                storedpb::FirstContactDirection::Inbound as i32,
+                MAX_TRACKED_PEERS,
+            )?;
+        }
+        assert_eq!(requester_node.known_peers().len(), MAX_TRACKED_PEERS);
+
+        let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let responder_node = Arc::new(Node::with_local_storage(
+            "responder-capacity-full-probe",
+            responder_filesystem,
+        )?);
+        responder_node.set_peer_connector(connector.clone());
+        let responder_server =
+            spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
+
+        let updates = requester_node
+            .check_contract_updates(responder_node.address())
+            .await?;
+        let responder_public_key = keys::public_key_from_onion_hostname(responder_node.address())?;
+
+        assert_eq!(updates.last().map(|update| update.success), Some(true));
+        assert_eq!(requester_node.known_peers().len(), MAX_TRACKED_PEERS);
+        assert!(!requester_node
+            .known_peers()
+            .contains(&responder_node.address().to_string()));
+        assert!(!requester_node.is_tracked_peer(&responder_public_key)?);
+        assert_eq!(requester_node.tracked_peers()?.len(), MAX_TRACKED_PEERS);
+
+        responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn check_contract_failure_does_not_track_untracked_peer_when_capacity_is_full(
+    ) -> anyhow::Result<()> {
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage(
+            "requester-capacity-full-offline-probe",
+            requester_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+
+        for index in 0..MAX_TRACKED_PEERS {
+            let master = test_master_priv(&format!("tracked-offline-peer-{index}"));
+            let peer = Node::new_for_tests_from_master(&master)?;
+            let public_key = keys::public_key_from_onion_hostname(peer.address())?;
+            requester_node.track_peer_identity_with_capacity(
+                &public_key,
+                peer_origin_code(false, false),
+                storedpb::FirstContactDirection::Inbound as i32,
+                MAX_TRACKED_PEERS,
+            )?;
+        }
+        assert_eq!(requester_node.known_peers().len(), MAX_TRACKED_PEERS);
+
+        let offline_peer = Node::new("untracked-offline-probe")?;
+        let offline_public_key = keys::public_key_from_onion_hostname(offline_peer.address())?;
+        let updates = requester_node
+            .check_contract_updates_with_policy(offline_peer.address(), test_check_retry_policy())
+            .await?;
+
+        assert_eq!(updates.last().map(|update| update.success), Some(false));
+        assert_eq!(
+            updates.last().map(|update| update.state),
+            Some(clirpc::ContractState::PeerUnavailable as i32)
+        );
+        assert_eq!(requester_node.known_peers().len(), MAX_TRACKED_PEERS);
+        assert!(!requester_node
+            .known_peers()
+            .contains(&offline_peer.address().to_string()));
+        assert!(!requester_node.is_tracked_peer(&offline_public_key)?);
+        assert_eq!(requester_node.tracked_peers()?.len(), MAX_TRACKED_PEERS);
+
         Ok(())
     }
 
