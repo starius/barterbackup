@@ -4102,14 +4102,29 @@ impl Node {
                 .await?;
         } else if self.active_conflict()?.is_none() {
             if let Some(candidate) = freshest_recoverable.as_ref() {
+                let current_key = current_content
+                    .as_ref()
+                    .and_then(|content_info| self.revision_key(&content_info.content_id).ok());
                 let already_current = current_content
                     .as_ref()
                     .is_some_and(|content_info| content_info.content_id == candidate.content_id);
+                let peer_is_newer_than_current = current_key
+                    .as_ref()
+                    .is_none_or(|current_key| candidate.key > *current_key);
                 recovered_fallback_version = most_recent
                     .as_ref()
                     .is_some_and(|most_recent| most_recent.content_id != candidate.content_id);
                 if already_current {
                     recovered_most_recent_version = !recovered_fallback_version;
+                } else if !peer_is_newer_than_current {
+                    info!(
+                        current_content_id = %current_content
+                            .as_ref()
+                            .map(|content_info| content_id_hex(&content_info.content_id))
+                            .unwrap_or_default(),
+                        peer_content_id = %content_id_hex(&candidate.content_id),
+                        "kept newer local content instead of recovering an older peer revision"
+                    );
                 } else {
                     // Try every peer that advertised the newest revision so one
                     // broken replica cannot block recovery from another copy.
@@ -10312,6 +10327,81 @@ mod tests {
 
         let recovered_file = recovered_node.with_store(|store| store.get_file("alpha.txt"))?;
         assert_eq!(recovered_file, b"version-1".to_vec());
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recover_content_does_not_replace_newer_local_version_with_older_peer_copy(
+    ) -> anyhow::Result<()> {
+        let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let local_node = Arc::new(Node::with_local_storage(
+            "keep-newer-local-version",
+            local_filesystem,
+        )?);
+        let stale_peer_identity = Node::new("keep-newer-local-version-peer")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        local_node.set_peer_connector(connector.clone());
+        local_node.add_known_peer(stale_peer_identity.address())?;
+
+        let cli = CliService::new(local_node.clone());
+        cli.set_file(tonic::Request::new(clirpc::SetFileRequest {
+            file: Some(clirpc::File {
+                name: "alpha.txt".to_string(),
+                data: b"version-1".to_vec(),
+                ..Default::default()
+            }),
+        }))
+        .await?;
+        let version_1 = local_node.responder_content()?.unwrap();
+        let blob_1 = local_node.with_store(|store| store.current_blob())?;
+
+        cli.set_file(tonic::Request::new(clirpc::SetFileRequest {
+            file: Some(clirpc::File {
+                name: "alpha.txt".to_string(),
+                data: b"version-2".to_vec(),
+                ..Default::default()
+            }),
+        }))
+        .await?;
+        let version_2 = local_node.responder_content()?.unwrap();
+
+        let stale_service = StaticPeerService::new(
+            bbrpc::GetContentRevisionResponse {
+                requester_content: Some(version_1.clone()),
+                requester_remaining_seconds: 0,
+                responder_content: None,
+                requester_latest_known_content: Some(version_1.clone()),
+                requester_pinned: false,
+            },
+            DownloadBehavior::Response(bbrpc::DownloadResponse {
+                total_length: i64::try_from(blob_1.len()).unwrap_or(i64::MAX),
+                sha256: Sha256::digest(&blob_1).to_vec(),
+                section: Some(bbrpc::download_response::Section::RawBytes(
+                    bbrpc::RawBytes {
+                        value: blob_1.clone(),
+                    },
+                )),
+            }),
+        );
+        let (endpoint, server) = spawn_plain_peer_server(stale_service).await?;
+        connector.register_peer(stale_peer_identity.address(), &endpoint);
+
+        let update = local_node.recover_content_update().await?;
+        assert_eq!(update.most_recent_content_id, version_1.content_id);
+        assert_eq!(update.freshest_recoverable_content_id, version_1.content_id);
+        assert_eq!(update.total_downloaded_bytes, 0);
+        assert!(!update.recovered_most_recent_version);
+        assert!(!update.recovered_fallback_version);
+        assert_eq!(
+            local_node.with_store(|store| store.get_file("alpha.txt"))?,
+            b"version-2".to_vec()
+        );
+        assert_eq!(
+            local_node.responder_content()?.unwrap().content_id,
+            version_2.content_id
+        );
 
         server.abort();
         Ok(())
