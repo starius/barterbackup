@@ -805,13 +805,6 @@ mod tests {
         {
             Err(Status::unimplemented(""))
         }
-        async fn checkout_revision(
-            &self,
-            _: Request<protos::clirpc::CheckoutRevisionRequest>,
-        ) -> std::result::Result<tonic::Response<protos::clirpc::CheckoutRevisionResponse>, Status>
-        {
-            Err(Status::unimplemented(""))
-        }
         async fn checkout_revision_stream(
             &self,
             _: Request<protos::clirpc::CheckoutRevisionRequest>,
@@ -826,12 +819,6 @@ mod tests {
         {
             Err(Status::unimplemented(""))
         }
-        async fn set_file(
-            &self,
-            _: Request<protos::clirpc::SetFileRequest>,
-        ) -> std::result::Result<tonic::Response<protos::clirpc::SetFileResponse>, Status> {
-            Err(Status::unimplemented(""))
-        }
         async fn set_file_stream(
             &self,
             _: Request<tonic::Streaming<protos::clirpc::SetFileChunk>>,
@@ -843,12 +830,6 @@ mod tests {
             _: Request<protos::clirpc::DeleteFileRequest>,
         ) -> std::result::Result<tonic::Response<protos::clirpc::DeleteFileResponse>, Status>
         {
-            Err(Status::unimplemented(""))
-        }
-        async fn get_file(
-            &self,
-            _: Request<protos::clirpc::GetFileRequest>,
-        ) -> std::result::Result<tonic::Response<protos::clirpc::GetFileResponse>, Status> {
             Err(Status::unimplemented(""))
         }
         async fn get_file_stream(

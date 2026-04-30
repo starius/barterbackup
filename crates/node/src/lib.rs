@@ -4367,6 +4367,65 @@ impl CliService {
     pub fn new(node: Arc<Node>) -> Self {
         Self { node }
     }
+
+    /// Return one conflicted or archived revision as a unary helper.
+    pub async fn checkout_revision(
+        &self,
+        request: tonic::Request<clirpc::CheckoutRevisionRequest>,
+    ) -> Result<tonic::Response<clirpc::CheckoutRevisionResponse>, tonic::Status> {
+        let request = request.into_inner();
+        validate_peer_content_id(&request.content_id)?;
+        let files = self.node.checkout_revision_files(&request.content_id)?;
+        Ok(Response::new(clirpc::CheckoutRevisionResponse {
+            file: files
+                .into_iter()
+                .map(|file| clirpc::File {
+                    name: file.name,
+                    data: file.data,
+                    modified_at: i64::try_from(file.modified_at_secs).unwrap_or(i64::MAX),
+                    modified_at_ns: i64::from(file.modified_at_nanos),
+                })
+                .collect(),
+        }))
+    }
+
+    /// Store one plaintext file as a unary helper.
+    pub async fn set_file(
+        &self,
+        request: tonic::Request<clirpc::SetFileRequest>,
+    ) -> Result<tonic::Response<clirpc::SetFileResponse>, tonic::Status> {
+        self.node.ensure_no_active_conflict()?;
+        let request = request.into_inner();
+        let file = request
+            .file
+            .ok_or_else(|| Status::invalid_argument("file is required"))?;
+        if file.name.is_empty() {
+            return Err(Status::invalid_argument("file name is required"));
+        }
+        if file.modified_at_ns < 0 || file.modified_at_ns >= 1_000_000_000 {
+            return Err(Status::invalid_argument(
+                "file modified_at_ns must be below one second",
+            ));
+        }
+        if file.modified_at < 0 {
+            return Err(Status::invalid_argument(
+                "file modified_at must not be negative",
+            ));
+        }
+        let modified_at_secs = u64::try_from(file.modified_at)
+            .map_err(|_| Status::invalid_argument("file modified_at is out of range"))?;
+        let modified_at_nanos = u32::try_from(file.modified_at_ns)
+            .map_err(|_| Status::invalid_argument("file modified_at_ns is out of range"))?;
+        self.node.with_store(|store| {
+            store.set_file_with_modified_at(
+                &file.name,
+                file.data,
+                modified_at_secs,
+                modified_at_nanos,
+            )
+        })?;
+        Ok(Response::new(clirpc::SetFileResponse {}))
+    }
 }
 
 #[tonic::async_trait]
@@ -4566,26 +4625,6 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         Ok(Response::new(self.node.list_conflicts_response()?))
     }
 
-    async fn checkout_revision(
-        &self,
-        request: tonic::Request<clirpc::CheckoutRevisionRequest>,
-    ) -> Result<tonic::Response<clirpc::CheckoutRevisionResponse>, tonic::Status> {
-        let request = request.into_inner();
-        validate_peer_content_id(&request.content_id)?;
-        let files = self.node.checkout_revision_files(&request.content_id)?;
-        Ok(Response::new(clirpc::CheckoutRevisionResponse {
-            file: files
-                .into_iter()
-                .map(|file| clirpc::File {
-                    name: file.name,
-                    data: file.data,
-                    modified_at: i64::try_from(file.modified_at_secs).unwrap_or(i64::MAX),
-                    modified_at_ns: i64::from(file.modified_at_nanos),
-                })
-                .collect(),
-        }))
-    }
-
     async fn checkout_revision_stream(
         &self,
         request: tonic::Request<clirpc::CheckoutRevisionRequest>,
@@ -4606,43 +4645,6 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         validate_peer_content_id(&request.content_id)?;
         self.node.resolve_conflict(&request.content_id)?;
         Ok(Response::new(clirpc::ResolveConflictResponse {}))
-    }
-
-    async fn set_file(
-        &self,
-        request: tonic::Request<clirpc::SetFileRequest>,
-    ) -> Result<tonic::Response<clirpc::SetFileResponse>, tonic::Status> {
-        self.node.ensure_no_active_conflict()?;
-        let request = request.into_inner();
-        let file = request
-            .file
-            .ok_or_else(|| Status::invalid_argument("file is required"))?;
-        if file.name.is_empty() {
-            return Err(Status::invalid_argument("file name is required"));
-        }
-        if file.modified_at_ns < 0 || file.modified_at_ns >= 1_000_000_000 {
-            return Err(Status::invalid_argument(
-                "file modified_at_ns must be below one second",
-            ));
-        }
-        if file.modified_at < 0 {
-            return Err(Status::invalid_argument(
-                "file modified_at must not be negative",
-            ));
-        }
-        let modified_at_secs = u64::try_from(file.modified_at)
-            .map_err(|_| Status::invalid_argument("file modified_at is out of range"))?;
-        let modified_at_nanos = u32::try_from(file.modified_at_ns)
-            .map_err(|_| Status::invalid_argument("file modified_at_ns is out of range"))?;
-        self.node.with_store(|store| {
-            store.set_file_with_modified_at(
-                &file.name,
-                file.data,
-                modified_at_secs,
-                modified_at_nanos,
-            )
-        })?;
-        Ok(Response::new(clirpc::SetFileResponse {}))
     }
 
     async fn set_file_stream(
@@ -4675,29 +4677,6 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         self.node
             .with_store(|store| store.delete_file(&request.name))?;
         Ok(Response::new(clirpc::DeleteFileResponse {}))
-    }
-
-    async fn get_file(
-        &self,
-        request: tonic::Request<clirpc::GetFileRequest>,
-    ) -> Result<tonic::Response<clirpc::GetFileResponse>, tonic::Status> {
-        self.node.ensure_no_active_conflict()?;
-        let request = request.into_inner();
-        if request.name.is_empty() {
-            return Err(Status::invalid_argument("file name is required"));
-        }
-
-        let file = self
-            .node
-            .with_store(|store| store.get_plain_file(&request.name))?;
-        Ok(Response::new(clirpc::GetFileResponse {
-            file: Some(clirpc::File {
-                name: file.name,
-                data: file.data,
-                modified_at: i64::try_from(file.modified_at_secs).unwrap_or(i64::MAX),
-                modified_at_ns: i64::from(file.modified_at_nanos),
-            }),
-        }))
     }
 
     async fn get_file_stream(
@@ -5156,6 +5135,78 @@ mod tests {
             .await?;
 
         Ok((BarterBackupClientClient::new(channel), handle))
+    }
+
+    /// BarterBackupClientCompatExt rebuilds removed unary helpers on top of streams for tests.
+    #[async_trait]
+    trait BarterBackupClientCompatExt {
+        async fn set_file(
+            &mut self,
+            request: clirpc::SetFileRequest,
+        ) -> Result<Response<clirpc::SetFileResponse>, Status>;
+
+        async fn get_file(
+            &mut self,
+            request: clirpc::GetFileRequest,
+        ) -> Result<Response<clirpc::GetFileResponse>, Status>;
+    }
+
+    #[async_trait]
+    impl BarterBackupClientCompatExt for BarterBackupClientClient<tonic::transport::Channel> {
+        async fn set_file(
+            &mut self,
+            request: clirpc::SetFileRequest,
+        ) -> Result<Response<clirpc::SetFileResponse>, Status> {
+            let file = request
+                .file
+                .ok_or_else(|| Status::invalid_argument("file is required"))?;
+            let metadata = clirpc::FileInfo {
+                name: file.name,
+                size_bytes: i64::try_from(file.data.len()).unwrap_or(i64::MAX),
+                modified_at: file.modified_at,
+                modified_at_ns: file.modified_at_ns,
+            };
+            let mut chunks = vec![clirpc::SetFileChunk {
+                chunk: Some(clirpc::set_file_chunk::Chunk::File(metadata)),
+            }];
+            if !file.data.is_empty() {
+                chunks.push(clirpc::SetFileChunk {
+                    chunk: Some(clirpc::set_file_chunk::Chunk::Data(file.data)),
+                });
+            }
+            self.set_file_stream(tokio_stream::iter(chunks)).await
+        }
+
+        async fn get_file(
+            &mut self,
+            request: clirpc::GetFileRequest,
+        ) -> Result<Response<clirpc::GetFileResponse>, Status> {
+            let mut stream = self.get_file_stream(request).await?.into_inner();
+            let mut metadata: Option<clirpc::FileInfo> = None;
+            let mut data = Vec::new();
+            while let Some(chunk) = stream.try_next().await? {
+                match chunk.chunk {
+                    Some(clirpc::get_file_chunk::Chunk::File(file)) => {
+                        metadata = Some(file);
+                    }
+                    Some(clirpc::get_file_chunk::Chunk::Data(bytes)) => {
+                        data.extend_from_slice(&bytes);
+                    }
+                    None => return Err(Status::internal("daemon streamed an empty file chunk")),
+                }
+            }
+
+            let metadata =
+                metadata.ok_or_else(|| Status::internal("daemon omitted file metadata"))?;
+            Ok(Response::new(clirpc::GetFileResponse {
+                file: Some(clirpc::File {
+                    name: metadata.name,
+                    data,
+                    modified_at: metadata.modified_at,
+                    modified_at_ns: metadata.modified_at_ns,
+                }),
+            }))
+        }
     }
 
     /// Spawn a TLS-protected p2p server for integration-style node tests.

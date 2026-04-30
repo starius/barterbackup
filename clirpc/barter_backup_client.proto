@@ -60,11 +60,6 @@ service BarterBackupClient {
     // ListConflicts reports unresolved and archived conflicting revisions.
     rpc ListConflicts(ListConflictsRequest) returns (ListConflictsResponse);
 
-    // CheckoutRevision returns the plaintext files for one conflicted or
-    // archived revision so the operator can inspect it locally.
-    rpc CheckoutRevision(CheckoutRevisionRequest)
-        returns (CheckoutRevisionResponse);
-
     // CheckoutRevisionStream streams plaintext files for one conflicted or
     // archived revision so the operator can inspect it locally without one
     // large unary response.
@@ -76,23 +71,12 @@ service BarterBackupClient {
     rpc ResolveConflict(ResolveConflictRequest)
         returns (ResolveConflictResponse);
 
-    // SetFile sends one plaintext file plus its modification time to the
-    // daemon. The daemon assembles a single content blob from the current set
-    // of files, stores it encrypted locally, and uploads the resulting
-    // content to other peers (also encrypted). It stores other peers' content
-    // in exchange.
-    rpc SetFile(SetFileRequest) returns (SetFileResponse);
-
     // SetFileStream streams one plaintext file plus its modification time to
     // the daemon without relying on one large unary request.
     rpc SetFileStream(stream SetFileChunk) returns (SetFileResponse);
 
     // DeleteFile removes a file by name from the current content set.
     rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
-
-    // GetFile returns one plaintext file and its stored metadata by name from
-    // the current set of files that form the most recent content blob.
-    rpc GetFile(GetFileRequest) returns (GetFileResponse);
 
     // GetFileStream streams one plaintext file and its stored metadata by
     // name from the current set of files that form the most recent content

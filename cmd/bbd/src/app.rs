@@ -931,6 +931,55 @@ impl DaemonService {
         }
     }
 
+    /// Store one plaintext file through the local CLI service for tests.
+    #[cfg(test)]
+    async fn set_file(
+        &self,
+        request: tonic::Request<clirpc::SetFileRequest>,
+    ) -> Result<Response<clirpc::SetFileResponse>, Status> {
+        let response = CliService::new(self.unlocked_node().await?)
+            .set_file(request)
+            .await?;
+        self.wake_maintenance();
+        Ok(response)
+    }
+
+    /// Fetch one plaintext file through the local CLI service for tests.
+    #[cfg(test)]
+    async fn get_file(
+        &self,
+        request: tonic::Request<clirpc::GetFileRequest>,
+    ) -> Result<Response<clirpc::GetFileResponse>, Status> {
+        let mut stream = CliService::new(self.unlocked_node().await?)
+            .get_file_stream(request)
+            .await?
+            .into_inner();
+        let mut metadata: Option<clirpc::FileInfo> = None;
+        let mut data = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            match chunk.chunk {
+                Some(clirpc::get_file_chunk::Chunk::File(file)) => {
+                    metadata = Some(file);
+                }
+                Some(clirpc::get_file_chunk::Chunk::Data(bytes)) => {
+                    data.extend_from_slice(&bytes);
+                }
+                None => return Err(Status::internal("daemon streamed an empty file chunk")),
+            }
+        }
+
+        let file = metadata.ok_or_else(|| Status::internal("daemon omitted file metadata"))?;
+        Ok(Response::new(clirpc::GetFileResponse {
+            file: Some(clirpc::File {
+                name: file.name,
+                data,
+                modified_at: file.modified_at,
+                modified_at_ns: file.modified_at_ns,
+            }),
+        }))
+    }
+
     /// Return the path to the daemon password fingerprint file.
     fn fingerprint_path(&self) -> PathBuf {
         self.data_dir.join("fingerprint.txt")
@@ -1400,15 +1449,6 @@ impl BarterBackupClient for DaemonService {
             .await
     }
 
-    async fn checkout_revision(
-        &self,
-        request: tonic::Request<clirpc::CheckoutRevisionRequest>,
-    ) -> Result<Response<clirpc::CheckoutRevisionResponse>, Status> {
-        CliService::new(self.unlocked_node().await?)
-            .checkout_revision(request)
-            .await
-    }
-
     async fn checkout_revision_stream(
         &self,
         request: tonic::Request<clirpc::CheckoutRevisionRequest>,
@@ -1425,17 +1465,6 @@ impl BarterBackupClient for DaemonService {
         CliService::new(self.unlocked_node().await?)
             .resolve_conflict(request)
             .await
-    }
-
-    async fn set_file(
-        &self,
-        request: tonic::Request<clirpc::SetFileRequest>,
-    ) -> Result<Response<clirpc::SetFileResponse>, Status> {
-        let response = CliService::new(self.unlocked_node().await?)
-            .set_file(request)
-            .await?;
-        self.wake_maintenance();
-        Ok(response)
     }
 
     async fn set_file_stream(
@@ -1458,15 +1487,6 @@ impl BarterBackupClient for DaemonService {
             .await?;
         self.wake_maintenance();
         Ok(response)
-    }
-
-    async fn get_file(
-        &self,
-        request: tonic::Request<clirpc::GetFileRequest>,
-    ) -> Result<Response<clirpc::GetFileResponse>, Status> {
-        CliService::new(self.unlocked_node().await?)
-            .get_file(request)
-            .await
     }
 
     async fn get_file_stream(
@@ -1663,13 +1683,6 @@ impl BarterBackupClient for DaemonRpcService {
         self.daemon.list_conflicts(request).await
     }
 
-    async fn checkout_revision(
-        &self,
-        request: tonic::Request<clirpc::CheckoutRevisionRequest>,
-    ) -> Result<Response<clirpc::CheckoutRevisionResponse>, Status> {
-        self.daemon.checkout_revision(request).await
-    }
-
     async fn checkout_revision_stream(
         &self,
         request: tonic::Request<clirpc::CheckoutRevisionRequest>,
@@ -1684,13 +1697,6 @@ impl BarterBackupClient for DaemonRpcService {
         self.daemon.resolve_conflict(request).await
     }
 
-    async fn set_file(
-        &self,
-        request: tonic::Request<clirpc::SetFileRequest>,
-    ) -> Result<Response<clirpc::SetFileResponse>, Status> {
-        self.daemon.set_file(request).await
-    }
-
     async fn set_file_stream(
         &self,
         request: tonic::Request<tonic::Streaming<clirpc::SetFileChunk>>,
@@ -1703,13 +1709,6 @@ impl BarterBackupClient for DaemonRpcService {
         request: tonic::Request<clirpc::DeleteFileRequest>,
     ) -> Result<Response<clirpc::DeleteFileResponse>, Status> {
         self.daemon.delete_file(request).await
-    }
-
-    async fn get_file(
-        &self,
-        request: tonic::Request<clirpc::GetFileRequest>,
-    ) -> Result<Response<clirpc::GetFileResponse>, Status> {
-        self.daemon.get_file(request).await
     }
 
     async fn get_file_stream(

@@ -2510,9 +2510,7 @@ mod tests {
     use super::*;
     use node::{CliService, Node, P2pService};
     use protos::bbrpc::barter_backup_server_server::BarterBackupServerServer;
-    use protos::clirpc::barter_backup_client_server::{
-        BarterBackupClient, BarterBackupClientServer,
-    };
+    use protos::clirpc::barter_backup_client_server::BarterBackupClientServer;
     use std::io::Cursor;
     use std::sync::Arc;
     use storage::{Filesystem, MemoryFilesystem};
@@ -3905,17 +3903,16 @@ mod tests {
         recovered_node.set_peer_connector(connector.clone());
 
         let mut local_client = spawn_cli_server_for_node(local_node.clone()).await?;
+        let mut remote_client = spawn_cli_server_for_node(remote_node.clone()).await?;
         let mut recovered_client = spawn_cli_server_for_node(recovered_node.clone()).await?;
-        let remote_cli = CliService::new(remote_node.clone());
-        remote_cli
-            .set_file(tonic::Request::new(protos::clirpc::SetFileRequest {
-                file: Some(protos::clirpc::File {
-                    name: "remote.txt".to_string(),
-                    data: b"remote-body".to_vec(),
-                    ..Default::default()
-                }),
-            }))
-            .await?;
+        set_file_with_client(
+            &mut remote_client,
+            "remote.txt",
+            b"remote-body".to_vec(),
+            0,
+            0,
+        )
+        .await?;
 
         set_file_with_client(&mut local_client, "local.txt", b"local-body".to_vec(), 0, 0).await?;
 
