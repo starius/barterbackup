@@ -247,6 +247,11 @@ echo 'correct horse battery staple' | bbcli init --password-stdin
 echo 'correct horse battery staple' | bbcli unlock --password-stdin
 ```
 
+One main password corresponds to one node identity and one onion service.
+Do not run multiple live nodes with the same password at the same time. A
+second node may use that password only when the first node is no longer
+available and you are bringing up a replacement for recovery or takeover.
+
 If you use a custom data directory:
 
 ```bash
