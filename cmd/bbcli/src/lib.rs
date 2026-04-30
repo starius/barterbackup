@@ -22,8 +22,8 @@ use protos::clirpc::{
     ExportBuiltInPeersRequest, File, FileInfo, GetContractsRequest, GetFileRequest,
     GetStorageConfigRequest, InitRequest, ListConflictsRequest, ListFilesRequest, PeerInfo,
     PeerStatus, PeersRequest, PeersResponse, PinPeerRequest, ProposeContractRequest,
-    RecoverContentRequest, ResolveConflictRequest, SetStorageConfigRequest, StateRequest,
-    StateResponse, StopRequest, StorageConfig, UnlockRequest, UnpinPeerRequest,
+    RecoverContentRequest, RecoverContentUpdate, ResolveConflictRequest, SetStorageConfigRequest,
+    StateRequest, StateResponse, StopRequest, StorageConfig, UnlockRequest, UnpinPeerRequest,
 };
 use tlsutil::{connect_pinned_channel, read_keys};
 use tokio::time::sleep;
@@ -1831,20 +1831,128 @@ fn check_contract_failure_reason(state: protos::clirpc::ContractState) -> &'stat
 /// Print the streamed updates for one recovery pass.
 async fn recover_content(target: &LocalCliTarget) -> Result<()> {
     let mut client = connect_client(target).await?;
-    for update in recover_content_with_client(&mut client).await? {
-        println!(
-            "most_recent_length={} peers_with_latest={} recoverable_length={} peers_with_recoverable={} total_versions={} peers_with_any_versions={} downloaded_bytes={} recovered={} fallback={}",
-            update.most_recent_length,
-            update.num_peers_with_most_recent_version,
-            update.freshest_recoverable_length,
-            update.num_peers_with_freshest_recoverable_version,
-            update.total_versions_found,
-            update.num_peers_with_any_versions,
-            update.total_downloaded_bytes,
-            update.recovered_most_recent_version,
-            update.recovered_fallback_version
+    let updates = recover_content_with_client(&mut client).await?;
+    let final_update = updates
+        .last()
+        .context("daemon returned no recovery updates")?;
+    write_recovery_summary(&mut io::stdout().lock(), final_update)?;
+    Ok(())
+}
+
+/// Print one operator-facing recovery summary for the last recovery update.
+fn write_recovery_summary(writer: &mut impl Write, update: &RecoverContentUpdate) -> Result<()> {
+    if update.total_versions_found <= 0 {
+        bail!("recovery found no content versions on any known peer");
+    }
+
+    if update.recovered_most_recent_version {
+        writeln!(writer, "recovery: recovered the most recent version")
+            .context("write recovery summary")?;
+        writeln!(writer, "versions_found: {}", update.total_versions_found)
+            .context("write recovery summary")?;
+        writeln!(
+            writer,
+            "peers_with_most_recent_version: {}",
+            update.num_peers_with_most_recent_version
+        )
+        .context("write recovery summary")?;
+        writeln!(
+            writer,
+            "peers_with_any_versions: {}",
+            update.num_peers_with_any_versions
+        )
+        .context("write recovery summary")?;
+        writeln!(
+            writer,
+            "downloaded_files: {}",
+            update.most_recent_downloaded_files
+        )
+        .context("write recovery summary")?;
+        writeln!(
+            writer,
+            "downloaded_bytes: {}",
+            update.total_downloaded_bytes
+        )
+        .context("write recovery summary")?;
+        return Ok(());
+    }
+
+    if update.recovered_fallback_version {
+        writeln!(
+            writer,
+            "recovery: recovered the newest available fallback version"
+        )
+        .context("write recovery summary")?;
+        writeln!(writer, "versions_found: {}", update.total_versions_found)
+            .context("write recovery summary")?;
+        writeln!(
+            writer,
+            "peers_with_most_recent_version: {}",
+            update.num_peers_with_most_recent_version
+        )
+        .context("write recovery summary")?;
+        writeln!(
+            writer,
+            "peers_with_fallback_version: {}",
+            update.num_peers_with_freshest_recoverable_version
+        )
+        .context("write recovery summary")?;
+        writeln!(
+            writer,
+            "peers_with_any_versions: {}",
+            update.num_peers_with_any_versions
+        )
+        .context("write recovery summary")?;
+        writeln!(
+            writer,
+            "downloaded_files: {}",
+            update.most_recent_downloaded_files
+        )
+        .context("write recovery summary")?;
+        writeln!(
+            writer,
+            "downloaded_bytes: {}",
+            update.total_downloaded_bytes
+        )
+        .context("write recovery summary")?;
+        return Ok(());
+    }
+
+    if update.freshest_recoverable_length <= 0
+        || update.num_peers_with_freshest_recoverable_version <= 0
+    {
+        bail!(
+            "recovery found {} content version(s) on known peers, but none were recoverable",
+            update.total_versions_found
         );
     }
+
+    writeln!(writer, "recovery: no peer revision was applied").context("write recovery summary")?;
+    writeln!(writer, "versions_found: {}", update.total_versions_found)
+        .context("write recovery summary")?;
+    writeln!(
+        writer,
+        "peers_with_recoverable_version: {}",
+        update.num_peers_with_freshest_recoverable_version
+    )
+    .context("write recovery summary")?;
+    writeln!(
+        writer,
+        "peers_with_any_versions: {}",
+        update.num_peers_with_any_versions
+    )
+    .context("write recovery summary")?;
+    writeln!(
+        writer,
+        "downloaded_bytes: {}",
+        update.total_downloaded_bytes
+    )
+    .context("write recovery summary")?;
+    writeln!(
+        writer,
+        "hint: local content may already be newer, or conflicting revisions may need manual resolution with `bbcli recovery conflicts`"
+    )
+    .context("write recovery summary")?;
     Ok(())
 }
 
@@ -2962,6 +3070,125 @@ mod tests {
             String::from_utf8(output).unwrap(),
             "storage was successfully initialized\n"
         );
+    }
+
+    #[test]
+    fn write_recovery_summary_rejects_missing_versions() {
+        let mut output = Vec::new();
+        let error =
+            write_recovery_summary(&mut output, &RecoverContentUpdate::default()).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "recovery found no content versions on any known peer"
+        );
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn write_recovery_summary_formats_most_recent_success() {
+        let mut output = Vec::new();
+        write_recovery_summary(
+            &mut output,
+            &RecoverContentUpdate {
+                total_versions_found: 2,
+                num_peers_with_most_recent_version: 1,
+                num_peers_with_any_versions: 2,
+                most_recent_downloaded_files: 3,
+                total_downloaded_bytes: 4096,
+                recovered_most_recent_version: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            concat!(
+                "recovery: recovered the most recent version\n",
+                "versions_found: 2\n",
+                "peers_with_most_recent_version: 1\n",
+                "peers_with_any_versions: 2\n",
+                "downloaded_files: 3\n",
+                "downloaded_bytes: 4096\n"
+            )
+        );
+    }
+
+    #[test]
+    fn write_recovery_summary_formats_fallback_success() {
+        let mut output = Vec::new();
+        write_recovery_summary(
+            &mut output,
+            &RecoverContentUpdate {
+                total_versions_found: 2,
+                num_peers_with_most_recent_version: 1,
+                num_peers_with_freshest_recoverable_version: 1,
+                num_peers_with_any_versions: 1,
+                most_recent_downloaded_files: 2,
+                total_downloaded_bytes: 2048,
+                recovered_fallback_version: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            concat!(
+                "recovery: recovered the newest available fallback version\n",
+                "versions_found: 2\n",
+                "peers_with_most_recent_version: 1\n",
+                "peers_with_fallback_version: 1\n",
+                "peers_with_any_versions: 1\n",
+                "downloaded_files: 2\n",
+                "downloaded_bytes: 2048\n"
+            )
+        );
+    }
+
+    #[test]
+    fn write_recovery_summary_rejects_known_but_unrecoverable_versions() {
+        let mut output = Vec::new();
+        let error = write_recovery_summary(
+            &mut output,
+            &RecoverContentUpdate {
+                total_versions_found: 2,
+                num_peers_with_any_versions: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "recovery found 2 content version(s) on known peers, but none were recoverable"
+        );
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn write_recovery_summary_formats_nonapplying_recovery() {
+        let mut output = Vec::new();
+        write_recovery_summary(
+            &mut output,
+            &RecoverContentUpdate {
+                total_versions_found: 2,
+                num_peers_with_freshest_recoverable_version: 1,
+                num_peers_with_any_versions: 2,
+                freshest_recoverable_length: 8192,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("recovery: no peer revision was applied\n"));
+        assert!(rendered.contains("versions_found: 2\n"));
+        assert!(rendered.contains("peers_with_recoverable_version: 1\n"));
+        assert!(rendered.contains("peers_with_any_versions: 2\n"));
+        assert!(rendered.contains("downloaded_bytes: 0\n"));
+        assert!(rendered.contains("bbcli recovery conflicts"));
     }
 
     #[test]
