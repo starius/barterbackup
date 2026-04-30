@@ -1128,22 +1128,47 @@ func TestDockerLocalSharedBlobLimitRejectsOversizedMutation(t *testing.T) {
 	setFile(t, node, "beta.bin", beta)
 	assertFileContentEquals(t, node, "alpha.bin", alpha)
 
-	client, conn := dialNodeClient(t, node)
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	_, err := client.SetFile(ctx, &clirpc.SetFileRequest{
-		File: &clirpc.File{
-			Name: "beta.bin",
-			Data: randomPayload(3 * 1024 * 1024),
-		},
-	})
+	err := node.SetFile(ctx, "beta.bin", randomPayload(3*1024*1024))
 	cancel()
-	_ = conn.Close()
 	assertStatusMessage(t, err, codes.ResourceExhausted, "current shared content exceeds the fixed 4 MiB limit")
 
 	assertFileContentEquals(t, node, "alpha.bin", alpha)
 	deleteFile(t, node, "beta.bin")
 	setFile(t, node, "beta.bin", []byte("small-again"))
 	assertFileContentEquals(t, node, "beta.bin", []byte("small-again"))
+}
+
+func TestDockerListFilesReportsMetadata(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	node := addNode(t, scenario, "node", "correct horse battery staple")
+
+	startInitializedReadyNode(t, node)
+
+	payload := []byte("alpha-body")
+	setFile(t, node, "alpha.txt", payload)
+
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	response, err := node.ListFiles(ctx)
+	if err != nil {
+		t.Fatalf("list files on %s: %v", node.Name(), err)
+	}
+	if len(response.GetFile()) != 1 {
+		t.Fatalf("unexpected file count on %s: %d", node.Name(), len(response.GetFile()))
+	}
+	file := response.GetFile()[0]
+	if file.GetName() != "alpha.txt" {
+		t.Fatalf("unexpected file name on %s: %s", node.Name(), file.GetName())
+	}
+	if file.GetSizeBytes() != int64(len(payload)) {
+		t.Fatalf("unexpected file size on %s: got %d want %d", node.Name(), file.GetSizeBytes(), len(payload))
+	}
+	if file.GetModifiedAt() != 0 || file.GetModifiedAtNs() != 0 {
+		t.Fatalf("unexpected file mtime on %s: got %d.%09d", node.Name(), file.GetModifiedAt(), file.GetModifiedAtNs())
+	}
 }
 
 func TestDockerLargePayloadRoundTrip(t *testing.T) {
@@ -2210,8 +2235,8 @@ func assertNoFiles(t *testing.T, node *harness.Node) {
 	if err != nil {
 		t.Fatalf("list files on %s: %v", node.Name(), err)
 	}
-	if len(response.GetName()) != 0 {
-		t.Fatalf("expected %s to start empty, got %v", node.Name(), response.GetName())
+	if len(response.GetFile()) != 0 {
+		t.Fatalf("expected %s to start empty, got %v", node.Name(), listFileNames(response))
 	}
 }
 
@@ -2653,7 +2678,7 @@ func assertStatusMessage(t *testing.T, err error, code codes.Code, message strin
 	if status.Code() != code {
 		t.Fatalf("unexpected gRPC code: got %s want %s (%v)", status.Code(), code, err)
 	}
-	if status.Message() != message {
+	if status.Message() != message && !strings.HasSuffix(status.Message(), message) {
 		t.Fatalf("unexpected gRPC message: got %q want %q", status.Message(), message)
 	}
 }
@@ -2737,8 +2762,9 @@ func assertFileEquals(t *testing.T, node *harness.Node, name string, expected []
 	if err != nil {
 		t.Fatalf("list files on %s after recovery: %v", node.Name(), err)
 	}
-	if len(response.GetName()) != 1 || response.GetName()[0] != name {
-		t.Fatalf("unexpected recovered file list on %s: %v", node.Name(), response.GetName())
+	names := listFileNames(response)
+	if len(names) != 1 || names[0] != name {
+		t.Fatalf("unexpected recovered file list on %s: %v", node.Name(), names)
 	}
 }
 
@@ -2753,6 +2779,14 @@ func assertFileContentEquals(t *testing.T, node *harness.Node, name string, expe
 	if !bytes.Equal(file.GetData(), expected) {
 		t.Fatalf("recovered file %s from %s does not match original bytes", name, node.Name())
 	}
+}
+
+func listFileNames(response *clirpc.ListFilesResponse) []string {
+	names := make([]string, 0, len(response.GetFile()))
+	for _, file := range response.GetFile() {
+		names = append(names, file.GetName())
+	}
+	return names
 }
 
 func randomPayload(length int) []byte {

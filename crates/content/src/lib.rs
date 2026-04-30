@@ -89,6 +89,10 @@ pub enum ContentError {
     #[error("metadata file ordering is invalid")]
     InvalidFileOrdering,
 
+    /// One stored file metadata field is invalid.
+    #[error("invalid file metadata: {0}")]
+    InvalidFileMetadata(&'static str),
+
     /// The file hash did not match the decrypted body.
     #[error("file hash mismatch for {0:?}")]
     FileHashMismatch(String),
@@ -152,6 +156,10 @@ pub struct PlainFile {
     pub name: String,
     /// data is the plaintext file body.
     pub data: Vec<u8>,
+    /// modified_at_secs is the Unix timestamp in whole seconds.
+    pub modified_at_secs: u64,
+    /// modified_at_nanos is the nanosecond component of the source file mtime.
+    pub modified_at_nanos: u32,
 }
 
 /// EncodedContent is the result of sealing a content revision.
@@ -176,8 +184,8 @@ pub struct DecodedContent {
     pub content_id: Vec<u8>,
     /// metadata is the authenticated metadata message.
     pub metadata: storedpb::Metadata,
-    /// files maps file names to plaintext bodies.
-    pub files: BTreeMap<String, Vec<u8>>,
+    /// files maps file names to plaintext bodies and metadata.
+    pub files: BTreeMap<String, PlainFile>,
 }
 
 /// ContentCodec owns the subkeys used to encode and decode content blobs.
@@ -341,7 +349,17 @@ impl ContentCodec {
             offset += ciphertext_len;
 
             verify_file_hash(&file_header.name, &file_header.file_sha256, &plaintext)?;
-            if files.insert(file_header.name.clone(), plaintext).is_some() {
+            let file = PlainFile {
+                name: file_header.name.clone(),
+                data: plaintext,
+                modified_at_secs: u64::try_from(file_header.modified_at).map_err(|_| {
+                    ContentError::InvalidFileMetadata("modified_at is out of range")
+                })?,
+                modified_at_nanos: u32::try_from(file_header.modified_at_ns).map_err(|_| {
+                    ContentError::InvalidFileMetadata("modified_at_ns is out of range")
+                })?,
+            };
+            if files.insert(file_header.name.clone(), file).is_some() {
                 return Err(ContentError::DuplicateFileName(file_header.name.clone()));
             }
         }
@@ -485,6 +503,8 @@ fn build_metadata(files: &[PlainFile], peers: &[storedpb::Peer]) -> storedpb::Me
             name: file.name.clone(),
             file_length: i64::try_from(file.data.len()).unwrap(),
             file_sha256: Sha256::digest(&file.data).to_vec(),
+            modified_at: i64::try_from(file.modified_at_secs).unwrap_or(i64::MAX),
+            modified_at_ns: i64::from(file.modified_at_nanos),
         })
         .collect();
 
@@ -523,6 +543,19 @@ fn validate_file_headers(file_headers: &[storedpb::FileHeader]) -> Result<(), Co
     for window in file_headers.windows(2) {
         if window[0].name >= window[1].name {
             return Err(ContentError::InvalidFileOrdering);
+        }
+    }
+
+    for file in file_headers {
+        if file.modified_at < 0 {
+            return Err(ContentError::InvalidFileMetadata(
+                "modified_at must not be negative",
+            ));
+        }
+        if !(0..1_000_000_000).contains(&file.modified_at_ns) {
+            return Err(ContentError::InvalidFileMetadata(
+                "modified_at_ns must be below one second",
+            ));
         }
     }
 
@@ -630,10 +663,14 @@ mod tests {
             PlainFile {
                 name: "alpha.txt".to_string(),
                 data: b"alpha-body".to_vec(),
+                modified_at_secs: 1_700_000_001,
+                modified_at_nanos: 11,
             },
             PlainFile {
                 name: "beta.txt".to_string(),
                 data: b"beta-body".to_vec(),
+                modified_at_secs: 1_700_000_002,
+                modified_at_nanos: 22,
             },
         ]
     }
@@ -653,7 +690,12 @@ mod tests {
         .prop_map(|files| {
             files
                 .into_iter()
-                .map(|(name, data)| PlainFile { name, data })
+                .map(|(name, data)| PlainFile {
+                    name,
+                    data,
+                    modified_at_secs: 0,
+                    modified_at_nanos: 0,
+                })
                 .collect()
         })
     }
@@ -717,13 +759,18 @@ mod tests {
         assert_eq!(decoded.content_id, encoded.content_id);
         assert_eq!(decoded.metadata, encoded.metadata);
         assert_eq!(
-            decoded.files.get("alpha.txt").unwrap(),
-            &b"alpha-body".to_vec(),
+            decoded.files.get("alpha.txt").unwrap().data,
+            b"alpha-body".to_vec(),
         );
         assert_eq!(
-            decoded.files.get("beta.txt").unwrap(),
-            &b"beta-body".to_vec(),
+            decoded.files.get("beta.txt").unwrap().data,
+            b"beta-body".to_vec(),
         );
+        assert_eq!(
+            decoded.files.get("alpha.txt").unwrap().modified_at_secs,
+            1_700_000_001
+        );
+        assert_eq!(decoded.files.get("beta.txt").unwrap().modified_at_nanos, 22);
         assert_eq!(encoded.bytes.len() % CONTENT_ALIGNMENT, 0);
     }
 
@@ -734,10 +781,14 @@ mod tests {
             PlainFile {
                 name: "one".to_string(),
                 data: vec![0x55; 64],
+                modified_at_secs: 0,
+                modified_at_nanos: 0,
             },
             PlainFile {
                 name: "two".to_string(),
                 data: vec![0x55; 64],
+                modified_at_secs: 0,
+                modified_at_nanos: 0,
             },
         ];
         let first = codec.encode(sample_seed(9), &files, &[]).unwrap();
@@ -781,10 +832,14 @@ mod tests {
             PlainFile {
                 name: "dup".to_string(),
                 data: b"a".to_vec(),
+                modified_at_secs: 0,
+                modified_at_nanos: 0,
             },
             PlainFile {
                 name: "dup".to_string(),
                 data: b"b".to_vec(),
+                modified_at_secs: 0,
+                modified_at_nanos: 0,
             },
         ];
 
@@ -832,7 +887,7 @@ mod tests {
             let decoded = codec.decode(&encoded.bytes).unwrap();
             let expected_files = files
                 .iter()
-                .map(|file| (file.name.clone(), file.data.clone()))
+                .map(|file| (file.name.clone(), file.clone()))
                 .collect::<BTreeMap<_, _>>();
 
             prop_assert_eq!(decoded.files, expected_files);

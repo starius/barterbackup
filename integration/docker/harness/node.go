@@ -12,6 +12,8 @@ import (
 	"barterbackup/integration/docker/gen/clirpc"
 )
 
+const localFileChunkBytes = 256 * 1024
+
 // WaitForState waits until local cli keys exist and the node answers State.
 func (n *Node) WaitForState(ctx context.Context) (*clirpc.StateResponse, error) {
 	if err := n.WaitForLocalRPC(ctx); err != nil {
@@ -281,9 +283,36 @@ func (n *Node) SetFile(ctx context.Context, name string, data []byte) error {
 		return err
 	}
 	defer conn.Close()
-	_, err = client.SetFile(ctx, &clirpc.SetFileRequest{
-		File: &clirpc.File{Name: name, Data: data},
-	})
+	stream, err := client.SetFileStream(ctx)
+	if err != nil {
+		return fmt.Errorf("open streamed set file %s on %s: %w", name, n.name, err)
+	}
+	if err := stream.Send(&clirpc.SetFileChunk{
+		Chunk: &clirpc.SetFileChunk_File{
+			File: &clirpc.FileInfo{
+				Name:       name,
+				SizeBytes:  int64(len(data)),
+				ModifiedAt: 0,
+			},
+		},
+	}); err != nil {
+		return fmt.Errorf("send file metadata for %s on %s: %w", name, n.name, err)
+	}
+	for len(data) > 0 {
+		chunkLen := len(data)
+		if chunkLen > localFileChunkBytes {
+			chunkLen = localFileChunkBytes
+		}
+		if err := stream.Send(&clirpc.SetFileChunk{
+			Chunk: &clirpc.SetFileChunk_Data{
+				Data: data[:chunkLen],
+			},
+		}); err != nil {
+			return fmt.Errorf("send file chunk for %s on %s: %w", name, n.name, err)
+		}
+		data = data[chunkLen:]
+	}
+	_, err = stream.CloseAndRecv()
 	if err != nil {
 		return fmt.Errorf("set file %s on %s: %w", name, n.name, err)
 	}
@@ -325,11 +354,42 @@ func (n *Node) GetFile(ctx context.Context, name string) (*clirpc.File, error) {
 		return nil, err
 	}
 	defer conn.Close()
-	response, err := client.GetFile(ctx, &clirpc.GetFileRequest{Name: name})
+	stream, err := client.GetFileStream(ctx, &clirpc.GetFileRequest{Name: name})
 	if err != nil {
 		return nil, fmt.Errorf("get file %s from %s: %w", name, n.name, err)
 	}
-	return response.File, nil
+	var file *clirpc.File
+	for {
+		chunk, recvErr := stream.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		if recvErr != nil {
+			return nil, fmt.Errorf("receive file %s from %s: %w", name, n.name, recvErr)
+		}
+		switch typed := chunk.GetChunk().(type) {
+		case *clirpc.GetFileChunk_File:
+			if file != nil {
+				return nil, fmt.Errorf("get file %s from %s started a second file", name, n.name)
+			}
+			file = &clirpc.File{
+				Name:         typed.File.GetName(),
+				ModifiedAt:   typed.File.GetModifiedAt(),
+				ModifiedAtNs: typed.File.GetModifiedAtNs(),
+			}
+		case *clirpc.GetFileChunk_Data:
+			if file == nil {
+				return nil, fmt.Errorf("get file %s from %s sent data before metadata", name, n.name)
+			}
+			file.Data = append(file.Data, typed.Data...)
+		default:
+			return nil, fmt.Errorf("get file %s from %s returned an empty chunk", name, n.name)
+		}
+	}
+	if file == nil {
+		return nil, fmt.Errorf("get file %s from %s returned no file", name, n.name)
+	}
+	return file, nil
 }
 
 // ExportBuiltInPeers renders the full Rust source for the built-in peer list.
@@ -528,11 +588,43 @@ func (n *Node) CheckoutRevision(
 		return nil, err
 	}
 	defer conn.Close()
-	response, err := client.CheckoutRevision(ctx, &clirpc.CheckoutRevisionRequest{
+	stream, err := client.CheckoutRevisionStream(ctx, &clirpc.CheckoutRevisionRequest{
 		ContentId: contentID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("checkout revision on %s: %w", n.name, err)
+	}
+	response := &clirpc.CheckoutRevisionResponse{}
+	var current *clirpc.File
+	for {
+		chunk, recvErr := stream.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		if recvErr != nil {
+			return nil, fmt.Errorf("receive checked-out revision from %s: %w", n.name, recvErr)
+		}
+		switch typed := chunk.GetChunk().(type) {
+		case *clirpc.CheckoutRevisionChunk_File:
+			if current != nil {
+				response.File = append(response.File, current)
+			}
+			current = &clirpc.File{
+				Name:         typed.File.GetName(),
+				ModifiedAt:   typed.File.GetModifiedAt(),
+				ModifiedAtNs: typed.File.GetModifiedAtNs(),
+			}
+		case *clirpc.CheckoutRevisionChunk_Data:
+			if current == nil {
+				return nil, fmt.Errorf("checkout revision on %s sent data before metadata", n.name)
+			}
+			current.Data = append(current.Data, typed.Data...)
+		default:
+			return nil, fmt.Errorf("checkout revision on %s returned an empty chunk", n.name)
+		}
+	}
+	if current != nil {
+		response.File = append(response.File, current)
 	}
 	return response, nil
 }

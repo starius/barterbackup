@@ -1097,6 +1097,13 @@ impl BarterBackupClient for DaemonService {
     type TimerInterceptStream =
         Pin<Box<dyn Stream<Item = Result<clirpc::TimerInterceptEvent, tonic::Status>> + Send>>;
 
+    /// CheckoutRevisionStreamStream streams one checked-out plaintext revision.
+    type CheckoutRevisionStreamStream =
+        <CliService as BarterBackupClient>::CheckoutRevisionStreamStream;
+
+    /// GetFileStreamStream streams one plaintext file download.
+    type GetFileStreamStream = <CliService as BarterBackupClient>::GetFileStreamStream;
+
     /// ProposeContractStream streams contract proposal progress updates.
     type ProposeContractStream = <CliService as BarterBackupClient>::ProposeContractStream;
 
@@ -1402,6 +1409,15 @@ impl BarterBackupClient for DaemonService {
             .await
     }
 
+    async fn checkout_revision_stream(
+        &self,
+        request: tonic::Request<clirpc::CheckoutRevisionRequest>,
+    ) -> Result<Response<Self::CheckoutRevisionStreamStream>, Status> {
+        CliService::new(self.unlocked_node().await?)
+            .checkout_revision_stream(request)
+            .await
+    }
+
     async fn resolve_conflict(
         &self,
         request: tonic::Request<clirpc::ResolveConflictRequest>,
@@ -1417,6 +1433,17 @@ impl BarterBackupClient for DaemonService {
     ) -> Result<Response<clirpc::SetFileResponse>, Status> {
         let response = CliService::new(self.unlocked_node().await?)
             .set_file(request)
+            .await?;
+        self.wake_maintenance();
+        Ok(response)
+    }
+
+    async fn set_file_stream(
+        &self,
+        request: tonic::Request<tonic::Streaming<clirpc::SetFileChunk>>,
+    ) -> Result<Response<clirpc::SetFileResponse>, Status> {
+        let response = CliService::new(self.unlocked_node().await?)
+            .set_file_stream(request)
             .await?;
         self.wake_maintenance();
         Ok(response)
@@ -1439,6 +1466,15 @@ impl BarterBackupClient for DaemonService {
     ) -> Result<Response<clirpc::GetFileResponse>, Status> {
         CliService::new(self.unlocked_node().await?)
             .get_file(request)
+            .await
+    }
+
+    async fn get_file_stream(
+        &self,
+        request: tonic::Request<clirpc::GetFileRequest>,
+    ) -> Result<Response<Self::GetFileStreamStream>, Status> {
+        CliService::new(self.unlocked_node().await?)
+            .get_file_stream(request)
             .await
     }
 
@@ -1512,6 +1548,13 @@ impl BarterBackupClient for DaemonService {
 impl BarterBackupClient for DaemonRpcService {
     /// TimerInterceptStream streams hidden labeled timer registrations.
     type TimerInterceptStream = <DaemonService as BarterBackupClient>::TimerInterceptStream;
+
+    /// CheckoutRevisionStreamStream streams one checked-out plaintext revision.
+    type CheckoutRevisionStreamStream =
+        <DaemonService as BarterBackupClient>::CheckoutRevisionStreamStream;
+
+    /// GetFileStreamStream streams one plaintext file download.
+    type GetFileStreamStream = <DaemonService as BarterBackupClient>::GetFileStreamStream;
 
     /// ProposeContractStream streams contract proposal progress updates.
     type ProposeContractStream = <DaemonService as BarterBackupClient>::ProposeContractStream;
@@ -1627,6 +1670,13 @@ impl BarterBackupClient for DaemonRpcService {
         self.daemon.checkout_revision(request).await
     }
 
+    async fn checkout_revision_stream(
+        &self,
+        request: tonic::Request<clirpc::CheckoutRevisionRequest>,
+    ) -> Result<Response<Self::CheckoutRevisionStreamStream>, Status> {
+        self.daemon.checkout_revision_stream(request).await
+    }
+
     async fn resolve_conflict(
         &self,
         request: tonic::Request<clirpc::ResolveConflictRequest>,
@@ -1641,6 +1691,13 @@ impl BarterBackupClient for DaemonRpcService {
         self.daemon.set_file(request).await
     }
 
+    async fn set_file_stream(
+        &self,
+        request: tonic::Request<tonic::Streaming<clirpc::SetFileChunk>>,
+    ) -> Result<Response<clirpc::SetFileResponse>, Status> {
+        self.daemon.set_file_stream(request).await
+    }
+
     async fn delete_file(
         &self,
         request: tonic::Request<clirpc::DeleteFileRequest>,
@@ -1653,6 +1710,13 @@ impl BarterBackupClient for DaemonRpcService {
         request: tonic::Request<clirpc::GetFileRequest>,
     ) -> Result<Response<clirpc::GetFileResponse>, Status> {
         self.daemon.get_file(request).await
+    }
+
+    async fn get_file_stream(
+        &self,
+        request: tonic::Request<clirpc::GetFileRequest>,
+    ) -> Result<Response<Self::GetFileStreamStream>, Status> {
+        self.daemon.get_file_stream(request).await
     }
 
     async fn list_files(
@@ -3546,6 +3610,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -3704,7 +3769,7 @@ mod tests {
             .into_inner();
         assert!(!health.server_onion.is_empty());
 
-        set_file_with_client(&mut client, "alpha.txt", b"alpha-body".to_vec()).await?;
+        set_file_with_client(&mut client, "alpha.txt", b"alpha-body".to_vec(), 0, 0).await?;
         assert_eq!(
             list_files_with_client(&mut client).await?,
             vec!["alpha.txt".to_string()]
@@ -4224,6 +4289,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -4231,7 +4297,8 @@ mod tests {
             .list_files(tonic::Request::new(clirpc::ListFilesRequest {}))
             .await?
             .into_inner();
-        assert_eq!(listed.name, vec!["alpha.txt".to_string()]);
+        assert_eq!(listed.file.len(), 1);
+        assert_eq!(listed.file[0].name, "alpha.txt");
 
         runtime_factory.release();
         wait_for_async(Duration::from_secs(2), || {
@@ -4291,6 +4358,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -4546,6 +4614,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -4553,7 +4622,8 @@ mod tests {
             .list_files(tonic::Request::new(clirpc::ListFilesRequest {}))
             .await?
             .into_inner();
-        assert_eq!(listed.name, vec!["alpha.txt".to_string()]);
+        assert_eq!(listed.file.len(), 1);
+        assert_eq!(listed.file[0].name, "alpha.txt");
 
         service.shutdown().await?;
         Ok(())
@@ -4597,6 +4667,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -4660,6 +4731,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -4793,6 +4865,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -4854,6 +4927,9 @@ mod tests {
         init_and_unlock_service(&owner_service, "refill-owner").await?;
         init_and_unlock_service(&first_peer_service, "refill-first").await?;
         init_and_unlock_service(&refill_peer_service, "refill-second").await?;
+        wait_for_public_peer_runtime(&owner_service, Duration::from_secs(5)).await?;
+        wait_for_public_peer_runtime(&first_peer_service, Duration::from_secs(5)).await?;
+        wait_for_public_peer_runtime(&refill_peer_service, Duration::from_secs(5)).await?;
         set_storage_config(&owner_service, 4 * 1024 * 1024, 1).await?;
 
         let first_peer_onion = unlocked_node(&first_peer_service)
@@ -4885,6 +4961,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -4912,7 +4989,7 @@ mod tests {
 
         first_peer_service.shutdown().await?;
 
-        wait_for_async(Duration::from_secs(5), || {
+        wait_for_async(Duration::from_secs(10), || {
             let owner_service = &owner_service;
             let refill_peer_onion = refill_peer_onion.clone();
             async move {
@@ -4968,6 +5045,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;

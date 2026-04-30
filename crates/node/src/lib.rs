@@ -8,7 +8,7 @@ mod builtin_peers;
 
 use anyhow::Result;
 use clock::{Clock, SystemClock, Timestamp};
-use content::CONTENT_ID_LEN;
+use content::{PlainFile, CONTENT_ID_LEN};
 use futures::{stream, Stream};
 use protos::{bbrpc, clirpc, storedpb};
 use sha2::{Digest, Sha256};
@@ -24,6 +24,9 @@ use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tonic::{Code, Response, Status};
 use tracing::{debug, info, warn};
 use transport::PeerConnector;
+
+/// LOCAL_CLI_FILE_CHUNK_BYTES is the chunk size used for streamed local file RPCs.
+const LOCAL_CLI_FILE_CHUNK_BYTES: usize = 256 * 1024;
 
 /// PeerIdentity describes the authenticated peer that issued a request.
 struct PeerIdentity {
@@ -995,6 +998,61 @@ fn rpc_content_info(content: storedpb::PeerContent) -> bbrpc::ContentInfo {
         content_id: content.content_id,
         content_length: content.content_length,
     }
+}
+
+/// Convert one stored file summary into the local RPC metadata shape.
+fn rpc_file_info(file: storage::StoredFileInfo) -> clirpc::FileInfo {
+    clirpc::FileInfo {
+        name: file.name,
+        size_bytes: file.size_bytes,
+        modified_at: file.modified_at_secs,
+        modified_at_ns: file.modified_at_nanos,
+    }
+}
+
+/// Convert one plaintext file into the metadata-only local RPC shape.
+fn rpc_file_info_from_plain_file(file: &PlainFile) -> clirpc::FileInfo {
+    clirpc::FileInfo {
+        name: file.name.clone(),
+        size_bytes: i64::try_from(file.data.len()).unwrap_or(i64::MAX),
+        modified_at: i64::try_from(file.modified_at_secs).unwrap_or(i64::MAX),
+        modified_at_ns: i64::from(file.modified_at_nanos),
+    }
+}
+
+/// Split one plaintext file into local streamed download chunks.
+fn get_file_chunks(file: PlainFile) -> Vec<Result<clirpc::GetFileChunk, Status>> {
+    let mut chunks = vec![Ok(clirpc::GetFileChunk {
+        chunk: Some(clirpc::get_file_chunk::Chunk::File(
+            rpc_file_info_from_plain_file(&file),
+        )),
+    })];
+    for data in file.data.chunks(LOCAL_CLI_FILE_CHUNK_BYTES) {
+        chunks.push(Ok(clirpc::GetFileChunk {
+            chunk: Some(clirpc::get_file_chunk::Chunk::Data(data.to_vec())),
+        }));
+    }
+    chunks
+}
+
+/// Split one revision checkout into local streamed file chunks.
+fn checkout_revision_chunks(
+    files: Vec<PlainFile>,
+) -> Vec<Result<clirpc::CheckoutRevisionChunk, Status>> {
+    let mut chunks = Vec::new();
+    for file in files {
+        chunks.push(Ok(clirpc::CheckoutRevisionChunk {
+            chunk: Some(clirpc::checkout_revision_chunk::Chunk::File(
+                rpc_file_info_from_plain_file(&file),
+            )),
+        }));
+        for data in file.data.chunks(LOCAL_CLI_FILE_CHUNK_BYTES) {
+            chunks.push(Ok(clirpc::CheckoutRevisionChunk {
+                chunk: Some(clirpc::checkout_revision_chunk::Chunk::Data(data.to_vec())),
+            }));
+        }
+    }
+    chunks
 }
 
 /// Return whether the observed recovery candidates imply a divergent timeline.
@@ -2922,21 +2980,9 @@ impl Node {
         Ok(clirpc::ListConflictsResponse { revisions })
     }
 
-    /// Decode one conflicted or archived revision into a checkout response.
-    fn checkout_revision_response(
-        &self,
-        content_id: &[u8],
-    ) -> Result<clirpc::CheckoutRevisionResponse, Status> {
-        let files = self.with_store(|store| store.read_revision_files(content_id))?;
-        Ok(clirpc::CheckoutRevisionResponse {
-            file: files
-                .into_iter()
-                .map(|file| clirpc::File {
-                    name: file.name,
-                    data: file.data,
-                })
-                .collect(),
-        })
+    /// Decode one conflicted or archived revision into plaintext files.
+    fn checkout_revision_files(&self, content_id: &[u8]) -> Result<Vec<PlainFile>, Status> {
+        self.with_store(|store| store.read_revision_files(content_id))
     }
 
     /// Resolve the active conflict and keep the selected revision as current.
@@ -4236,6 +4282,80 @@ impl Node {
     }
 }
 
+/// Read one streamed local file upload into memory.
+async fn collect_set_file_upload(
+    mut stream: tonic::Streaming<clirpc::SetFileChunk>,
+) -> Result<PlainFile, Status> {
+    let first = stream
+        .message()
+        .await?
+        .ok_or_else(|| Status::invalid_argument("file upload stream is empty"))?;
+    let info = match first.chunk {
+        Some(clirpc::set_file_chunk::Chunk::File(info)) => info,
+        Some(clirpc::set_file_chunk::Chunk::Data(_)) => {
+            return Err(Status::invalid_argument(
+                "file metadata must be the first upload chunk",
+            ));
+        }
+        None => {
+            return Err(Status::invalid_argument("file upload chunk is empty"));
+        }
+    };
+    if info.name.is_empty() {
+        return Err(Status::invalid_argument("file name is required"));
+    }
+    if info.size_bytes < 0 {
+        return Err(Status::invalid_argument("file size must be non-negative"));
+    }
+    if info.modified_at < 0 {
+        return Err(Status::invalid_argument(
+            "file modified_at must not be negative",
+        ));
+    }
+    if info.modified_at_ns < 0 || info.modified_at_ns >= 1_000_000_000 {
+        return Err(Status::invalid_argument(
+            "file modified_at_ns must be below one second",
+        ));
+    }
+
+    let expected_len = usize::try_from(info.size_bytes)
+        .map_err(|_| Status::invalid_argument("file size is too large"))?;
+    let modified_at_secs = u64::try_from(info.modified_at)
+        .map_err(|_| Status::invalid_argument("file modified_at is out of range"))?;
+    let modified_at_nanos = u32::try_from(info.modified_at_ns)
+        .map_err(|_| Status::invalid_argument("file modified_at_ns is out of range"))?;
+
+    let mut data = Vec::with_capacity(expected_len.min(LOCAL_CLI_FILE_CHUNK_BYTES));
+    while let Some(chunk) = stream.message().await? {
+        match chunk.chunk {
+            Some(clirpc::set_file_chunk::Chunk::Data(bytes)) => {
+                data.extend_from_slice(&bytes);
+            }
+            Some(clirpc::set_file_chunk::Chunk::File(_)) => {
+                return Err(Status::invalid_argument(
+                    "file metadata must appear only once per upload",
+                ));
+            }
+            None => {
+                return Err(Status::invalid_argument("file upload chunk is empty"));
+            }
+        }
+    }
+
+    if data.len() != expected_len {
+        return Err(Status::invalid_argument(
+            "file size does not match streamed payload",
+        ));
+    }
+
+    Ok(PlainFile {
+        name: info.name,
+        data,
+        modified_at_secs,
+        modified_at_nanos,
+    })
+}
+
 /// CliService exposes the local daemon RPC surface.
 pub struct CliService {
     /// node is the backing BarterBackup node.
@@ -4255,6 +4375,19 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
     type TimerInterceptStream = Pin<
         Box<dyn Stream<Item = Result<clirpc::TimerInterceptEvent, tonic::Status>> + Send + 'static>,
     >;
+
+    /// CheckoutRevisionStreamStream is the streamed plaintext checkout response.
+    type CheckoutRevisionStreamStream = Pin<
+        Box<
+            dyn Stream<Item = Result<clirpc::CheckoutRevisionChunk, tonic::Status>>
+                + Send
+                + 'static,
+        >,
+    >;
+
+    /// GetFileStreamStream is the streamed plaintext file-download response.
+    type GetFileStreamStream =
+        Pin<Box<dyn Stream<Item = Result<clirpc::GetFileChunk, tonic::Status>> + Send + 'static>>;
 
     /// ProposeContractStream is the streaming response for contract proposals.
     type ProposeContractStream = Pin<
@@ -4439,9 +4572,30 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
     ) -> Result<tonic::Response<clirpc::CheckoutRevisionResponse>, tonic::Status> {
         let request = request.into_inner();
         validate_peer_content_id(&request.content_id)?;
-        Ok(Response::new(
-            self.node.checkout_revision_response(&request.content_id)?,
-        ))
+        let files = self.node.checkout_revision_files(&request.content_id)?;
+        Ok(Response::new(clirpc::CheckoutRevisionResponse {
+            file: files
+                .into_iter()
+                .map(|file| clirpc::File {
+                    name: file.name,
+                    data: file.data,
+                    modified_at: i64::try_from(file.modified_at_secs).unwrap_or(i64::MAX),
+                    modified_at_ns: i64::from(file.modified_at_nanos),
+                })
+                .collect(),
+        }))
+    }
+
+    async fn checkout_revision_stream(
+        &self,
+        request: tonic::Request<clirpc::CheckoutRevisionRequest>,
+    ) -> Result<tonic::Response<Self::CheckoutRevisionStreamStream>, tonic::Status> {
+        let request = request.into_inner();
+        validate_peer_content_id(&request.content_id)?;
+        let files = self.node.checkout_revision_files(&request.content_id)?;
+        Ok(Response::new(Box::pin(stream::iter(
+            checkout_revision_chunks(files),
+        ))))
     }
 
     async fn resolve_conflict(
@@ -4466,9 +4620,45 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         if file.name.is_empty() {
             return Err(Status::invalid_argument("file name is required"));
         }
+        if file.modified_at_ns < 0 || file.modified_at_ns >= 1_000_000_000 {
+            return Err(Status::invalid_argument(
+                "file modified_at_ns must be below one second",
+            ));
+        }
+        if file.modified_at < 0 {
+            return Err(Status::invalid_argument(
+                "file modified_at must not be negative",
+            ));
+        }
+        let modified_at_secs = u64::try_from(file.modified_at)
+            .map_err(|_| Status::invalid_argument("file modified_at is out of range"))?;
+        let modified_at_nanos = u32::try_from(file.modified_at_ns)
+            .map_err(|_| Status::invalid_argument("file modified_at_ns is out of range"))?;
+        self.node.with_store(|store| {
+            store.set_file_with_modified_at(
+                &file.name,
+                file.data,
+                modified_at_secs,
+                modified_at_nanos,
+            )
+        })?;
+        Ok(Response::new(clirpc::SetFileResponse {}))
+    }
 
-        self.node
-            .with_store(|store| store.set_file(&file.name, file.data))?;
+    async fn set_file_stream(
+        &self,
+        request: tonic::Request<tonic::Streaming<clirpc::SetFileChunk>>,
+    ) -> Result<tonic::Response<clirpc::SetFileResponse>, tonic::Status> {
+        self.node.ensure_no_active_conflict()?;
+        let file = collect_set_file_upload(request.into_inner()).await?;
+        self.node.with_store(|store| {
+            store.set_file_with_modified_at(
+                &file.name,
+                file.data,
+                file.modified_at_secs,
+                file.modified_at_nanos,
+            )
+        })?;
         Ok(Response::new(clirpc::SetFileResponse {}))
     }
 
@@ -4497,15 +4687,33 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
             return Err(Status::invalid_argument("file name is required"));
         }
 
-        let data = self
+        let file = self
             .node
-            .with_store(|store| store.get_file(&request.name))?;
+            .with_store(|store| store.get_plain_file(&request.name))?;
         Ok(Response::new(clirpc::GetFileResponse {
             file: Some(clirpc::File {
-                name: request.name,
-                data,
+                name: file.name,
+                data: file.data,
+                modified_at: i64::try_from(file.modified_at_secs).unwrap_or(i64::MAX),
+                modified_at_ns: i64::from(file.modified_at_nanos),
             }),
         }))
+    }
+
+    async fn get_file_stream(
+        &self,
+        request: tonic::Request<clirpc::GetFileRequest>,
+    ) -> Result<tonic::Response<Self::GetFileStreamStream>, tonic::Status> {
+        self.node.ensure_no_active_conflict()?;
+        let request = request.into_inner();
+        if request.name.is_empty() {
+            return Err(Status::invalid_argument("file name is required"));
+        }
+
+        let file = self
+            .node
+            .with_store(|store| store.get_plain_file(&request.name))?;
+        Ok(Response::new(Box::pin(stream::iter(get_file_chunks(file)))))
     }
 
     async fn list_files(
@@ -4513,8 +4721,10 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         _request: tonic::Request<clirpc::ListFilesRequest>,
     ) -> Result<tonic::Response<clirpc::ListFilesResponse>, tonic::Status> {
         self.node.ensure_no_active_conflict()?;
-        let names = self.node.with_store(|store| Ok(store.list_files()))?;
-        Ok(Response::new(clirpc::ListFilesResponse { name: names }))
+        let files = self.node.with_store(|store| Ok(store.list_file_info()))?;
+        Ok(Response::new(clirpc::ListFilesResponse {
+            file: files.into_iter().map(rpc_file_info).collect(),
+        }))
     }
 
     async fn set_storage_config(
@@ -5797,6 +6007,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"owner-data".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -5805,6 +6016,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "beta.txt".to_string(),
                     data: b"peer-data".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -5887,6 +6099,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"owner-v1".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -5903,6 +6116,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"owner-v2".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -5977,6 +6191,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             })
             .await?;
@@ -5985,7 +6200,9 @@ mod tests {
             .list_files(clirpc::ListFilesRequest {})
             .await?
             .into_inner();
-        assert_eq!(listed.name, vec!["alpha.txt".to_string()]);
+        assert_eq!(listed.file.len(), 1);
+        assert_eq!(listed.file[0].name, "alpha.txt");
+        assert_eq!(listed.file[0].size_bytes, 10);
 
         let fetched = client
             .get_file(clirpc::GetFileRequest {
@@ -6010,6 +6227,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "beta.txt".to_string(),
                     data: b"beta-body".to_vec(),
+                    ..Default::default()
                 }),
             })
             .await?;
@@ -6023,7 +6241,8 @@ mod tests {
             .list_files(clirpc::ListFilesRequest {})
             .await?
             .into_inner();
-        assert_eq!(listed.name, vec!["beta.txt".to_string()]);
+        assert_eq!(listed.file.len(), 1);
+        assert_eq!(listed.file[0].name, "beta.txt");
 
         let storage_info = client
             .get_storage_config(clirpc::GetStorageConfigRequest {})
@@ -6733,6 +6952,7 @@ mod tests {
             file: Some(clirpc::File {
                 name: "alpha.txt".to_string(),
                 data: b"alpha-body".to_vec(),
+                ..Default::default()
             }),
         }))
         .await?;
@@ -6820,6 +7040,7 @@ mod tests {
             file: Some(clirpc::File {
                 name: "alpha.txt".to_string(),
                 data: vec![0x41; 128],
+                ..Default::default()
             }),
         }))
         .await?;
@@ -6869,6 +7090,7 @@ mod tests {
             file: Some(clirpc::File {
                 name: "alpha.txt".to_string(),
                 data: b"small-tail".to_vec(),
+                ..Default::default()
             }),
         }))
         .await?;
@@ -7503,6 +7725,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -7569,6 +7792,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -7650,6 +7874,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -7774,6 +7999,7 @@ mod tests {
             file: Some(clirpc::File {
                 name: "alpha.txt".to_string(),
                 data: b"alpha-body".to_vec(),
+                ..Default::default()
             }),
         }))
         .await?;
@@ -7818,6 +8044,7 @@ mod tests {
             file: Some(clirpc::File {
                 name: "alpha.txt".to_string(),
                 data: b"alpha-body".to_vec(),
+                ..Default::default()
             }),
         }))
         .await?;
@@ -7973,6 +8200,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8036,6 +8264,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8093,6 +8322,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8197,6 +8427,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "peer.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8206,6 +8437,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "peer.txt".to_string(),
                     data: b"bravo-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8284,6 +8516,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "peer.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8293,6 +8526,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "peer.txt".to_string(),
                     data: b"bravo-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8361,6 +8595,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "peer.txt".to_string(),
                     data: b"this blob is too large for one byte".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8420,6 +8655,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "peer.txt".to_string(),
                     data: b"small".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8448,6 +8684,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "peer.txt".to_string(),
                     data: vec![b'x'; 1024 * 1024],
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8512,6 +8749,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "peer.txt".to_string(),
                     data: b"small".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8537,6 +8775,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "peer.txt".to_string(),
                     data: vec![b'x'; 1024 * 1024],
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8638,6 +8877,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "owner.txt".to_string(),
                     data: b"owner-data".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8647,6 +8887,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "peer.txt".to_string(),
                     data: vec![b'p'; 17],
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8655,6 +8896,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "peer.txt".to_string(),
                     data: vec![b'r'; 19],
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8663,6 +8905,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "peer.txt".to_string(),
                     data: vec![b'd'; 23],
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8671,6 +8914,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "peer.txt".to_string(),
                     data: vec![b't'; 1_000_000],
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8849,6 +9093,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "owner.txt".to_string(),
                     data: b"owner-data".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -8939,6 +9184,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -9027,6 +9273,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -9092,6 +9339,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -9290,6 +9538,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -9395,6 +9644,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -9455,6 +9705,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -9514,6 +9765,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -9569,6 +9821,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -9640,6 +9893,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -9724,6 +9978,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -9787,6 +10042,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -9896,6 +10152,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "left.txt".to_string(),
                     data: b"left-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -9904,6 +10161,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "right.txt".to_string(),
                     data: b"right-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -9968,6 +10226,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "left.txt".to_string(),
                     data: b"left-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -10023,6 +10282,7 @@ mod tests {
             file: Some(clirpc::File {
                 name: "alpha.txt".to_string(),
                 data: b"alpha-body".to_vec(),
+                ..Default::default()
             }),
         }))
         .await?;
@@ -10073,6 +10333,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -10129,6 +10390,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -10185,6 +10447,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"version-1".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -10214,6 +10477,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"version-2".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -10280,6 +10544,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"version-1".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -10291,6 +10556,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"version-2".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -10448,6 +10714,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"branch-a".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -10456,6 +10723,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"branch-b".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -10586,6 +10854,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"version-1".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -10598,6 +10867,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"version-2".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -10646,6 +10916,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"local-branch".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -10737,6 +11008,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"version-1".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -10749,6 +11021,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"version-2".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -10874,6 +11147,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"latest-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -10957,6 +11231,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -11027,6 +11302,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-v1".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
@@ -11067,6 +11343,7 @@ mod tests {
                 file: Some(clirpc::File {
                     name: "alpha.txt".to_string(),
                     data: b"alpha-v2".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;

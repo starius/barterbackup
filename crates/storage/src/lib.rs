@@ -242,6 +242,19 @@ pub struct CurrentContent {
     pub file_name: String,
 }
 
+/// StoredFileInfo is one metadata-only description of a logical user file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredFileInfo {
+    /// name is the stable user-facing file identifier.
+    pub name: String,
+    /// size_bytes is the plaintext file length in bytes.
+    pub size_bytes: i64,
+    /// modified_at_secs is the Unix timestamp in whole seconds.
+    pub modified_at_secs: i64,
+    /// modified_at_nanos is the nanosecond component of the source file mtime.
+    pub modified_at_nanos: i64,
+}
+
 /// Store owns the live local file set and the encrypted content blobs on disk.
 pub struct Store {
     fs: Arc<dyn Filesystem>,
@@ -250,7 +263,7 @@ pub struct Store {
     peer_cipher: Aes256GcmSiv,
     mirrored_blob_cipher: Aes256GcmSiv,
     mirrored_name_key: Vec<u8>,
-    files: BTreeMap<String, Vec<u8>>,
+    files: BTreeMap<String, PlainFile>,
     peers: Vec<storedpb::Peer>,
     active_conflict: Option<storedpb::ActiveConflict>,
     archived_conflicts: Vec<storedpb::ConflictRevision>,
@@ -393,6 +406,19 @@ impl Store {
         self.files.keys().cloned().collect()
     }
 
+    /// Return metadata for every logical user file in deterministic order.
+    pub fn list_file_info(&self) -> Vec<StoredFileInfo> {
+        self.files
+            .values()
+            .map(|file| StoredFileInfo {
+                name: file.name.clone(),
+                size_bytes: i64::try_from(file.data.len()).unwrap_or(i64::MAX),
+                modified_at_secs: i64::try_from(file.modified_at_secs).unwrap_or(i64::MAX),
+                modified_at_nanos: i64::from(file.modified_at_nanos),
+            })
+            .collect()
+    }
+
     /// Return the number of logical user files in the active revision.
     pub fn file_count(&self) -> i64 {
         i64::try_from(self.files.len()).unwrap_or(i64::MAX)
@@ -400,13 +426,18 @@ impl Store {
 
     /// Return the total plaintext size of all logical user files.
     pub fn total_file_bytes(&self) -> i64 {
-        self.files.values().fold(0i64, |total, data| {
-            total.saturating_add(i64::try_from(data.len()).unwrap_or(i64::MAX))
+        self.files.values().fold(0i64, |total, file| {
+            total.saturating_add(i64::try_from(file.data.len()).unwrap_or(i64::MAX))
         })
     }
 
     /// Read a plaintext file by name.
     pub fn get_file(&self, name: &str) -> Result<Vec<u8>, StorageError> {
+        Ok(self.get_plain_file(name)?.data)
+    }
+
+    /// Read one plaintext file plus its stored metadata by name.
+    pub fn get_plain_file(&self, name: &str) -> Result<PlainFile, StorageError> {
         self.files
             .get(name)
             .cloned()
@@ -415,22 +446,48 @@ impl Store {
 
     /// Persist or replace a plaintext file.
     pub fn set_file(&mut self, name: &str, data: Vec<u8>) -> Result<(), StorageError> {
+        self.set_file_with_modified_at(name, data, 0, 0)
+    }
+
+    /// Persist or replace a plaintext file with an explicit source mtime.
+    pub fn set_file_with_modified_at(
+        &mut self,
+        name: &str,
+        data: Vec<u8>,
+        modified_at_secs: u64,
+        modified_at_nanos: u32,
+    ) -> Result<(), StorageError> {
         if name.is_empty() {
             return Err(StorageError::InvalidFileName);
+        }
+        if modified_at_nanos >= 1_000_000_000 {
+            return Err(StorageError::InvalidTimestamp);
         }
 
         let mut next_files = self.current_plain_files();
         if let Some(file) = next_files.iter_mut().find(|file| file.name == name) {
             file.data = data.clone();
+            file.modified_at_secs = modified_at_secs;
+            file.modified_at_nanos = modified_at_nanos;
         } else {
             next_files.push(PlainFile {
                 name: name.to_string(),
                 data: data.clone(),
+                modified_at_secs,
+                modified_at_nanos,
             });
         }
         self.enforce_shared_blob_limit_for_state(&next_files, &self.peers)?;
 
-        let previous = self.files.insert(name.to_string(), data);
+        let previous = self.files.insert(
+            name.to_string(),
+            PlainFile {
+                name: name.to_string(),
+                data,
+                modified_at_secs,
+                modified_at_nanos,
+            },
+        );
         match self.persist_files() {
             Ok(()) => Ok(()),
             Err(error) => {
@@ -953,11 +1010,7 @@ impl Store {
     /// Decode one revision blob into plaintext files without reading from disk.
     pub fn decode_revision_files(&self, blob: &[u8]) -> Result<Vec<PlainFile>, StorageError> {
         let decoded = self.codec.decode(blob)?;
-        Ok(decoded
-            .files
-            .into_iter()
-            .map(|(name, data)| PlainFile { name, data })
-            .collect())
+        Ok(decoded.files.into_values().collect())
     }
 
     /// Add one revision to the active conflict set if it is not already tracked.
@@ -1273,14 +1326,7 @@ impl Store {
             .current
             .as_ref()
             .map_or(1, |current| current.revision.sequence + 1);
-        let files = self
-            .files
-            .iter()
-            .map(|(name, data)| PlainFile {
-                name: name.clone(),
-                data: data.clone(),
-            })
-            .collect::<Vec<_>>();
+        let files = self.files.values().cloned().collect::<Vec<_>>();
         let encoded = self.codec.encode(
             RevisionSeed {
                 sequence: next_sequence,
@@ -1347,13 +1393,7 @@ impl Store {
 
     /// Return the current plaintext file set in deterministic order.
     fn current_plain_files(&self) -> Vec<PlainFile> {
-        self.files
-            .iter()
-            .map(|(name, data)| PlainFile {
-                name: name.clone(),
-                data: data.clone(),
-            })
-            .collect()
+        self.files.values().cloned().collect()
     }
 
     /// Apply one peer metadata mutation transactionally against the size limit.
@@ -1640,6 +1680,28 @@ mod tests {
 
         let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
         assert_eq!(reloaded.get_file("alpha.txt").unwrap(), b"secret".to_vec());
+    }
+
+    #[test]
+    fn set_file_metadata_round_trips_through_persistence() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+
+        store
+            .set_file_with_modified_at("alpha.txt", b"secret".to_vec(), 123, 456)
+            .unwrap();
+        let listed = store.list_file_info();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "alpha.txt");
+        assert_eq!(listed[0].size_bytes, 6);
+        assert_eq!(listed[0].modified_at_secs, 123);
+        assert_eq!(listed[0].modified_at_nanos, 456);
+
+        let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        let listed = reloaded.list_file_info();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].modified_at_secs, 123);
+        assert_eq!(listed[0].modified_at_nanos, 456);
     }
 
     #[test]
@@ -2333,6 +2395,8 @@ mod tests {
             let files = vec![PlainFile {
                 name: "payload.bin".to_string(),
                 data: vec![0u8; mid],
+                modified_at_secs: 0,
+                modified_at_nanos: 0,
             }];
             let encoded_len = store.codec.encoded_len(&files, &peers).unwrap();
             if encoded_len <= MAX_SHARED_CONTENT_BLOB_BYTES {

@@ -289,7 +289,8 @@ func recoverManualEnvFileUntilPresent(
 	if err != nil {
 		t.Fatalf("list files on %s after recovery: %v", node.Name(), err)
 	}
-	for _, name := range response.GetName() {
+	for _, file := range response.GetFile() {
+		name := file.GetName()
 		if name == fileName {
 			return
 		}

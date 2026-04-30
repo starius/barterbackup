@@ -665,6 +665,22 @@ mod tests {
                     + 'static,
             >,
         >;
+        type CheckoutRevisionStreamStream = std::pin::Pin<
+            Box<
+                dyn tokio_stream::Stream<
+                        Item = std::result::Result<protos::clirpc::CheckoutRevisionChunk, Status>,
+                    > + Send
+                    + 'static,
+            >,
+        >;
+        type GetFileStreamStream = std::pin::Pin<
+            Box<
+                dyn tokio_stream::Stream<
+                        Item = std::result::Result<protos::clirpc::GetFileChunk, Status>,
+                    > + Send
+                    + 'static,
+            >,
+        >;
         async fn state(
             &self,
             _req: Request<StateRequest>,
@@ -796,6 +812,13 @@ mod tests {
         {
             Err(Status::unimplemented(""))
         }
+        async fn checkout_revision_stream(
+            &self,
+            _: Request<protos::clirpc::CheckoutRevisionRequest>,
+        ) -> std::result::Result<tonic::Response<Self::CheckoutRevisionStreamStream>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
         async fn resolve_conflict(
             &self,
             _: Request<protos::clirpc::ResolveConflictRequest>,
@@ -806,6 +829,12 @@ mod tests {
         async fn set_file(
             &self,
             _: Request<protos::clirpc::SetFileRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::SetFileResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+        async fn set_file_stream(
+            &self,
+            _: Request<tonic::Streaming<protos::clirpc::SetFileChunk>>,
         ) -> std::result::Result<tonic::Response<protos::clirpc::SetFileResponse>, Status> {
             Err(Status::unimplemented(""))
         }
@@ -820,6 +849,12 @@ mod tests {
             &self,
             _: Request<protos::clirpc::GetFileRequest>,
         ) -> std::result::Result<tonic::Response<protos::clirpc::GetFileResponse>, Status> {
+            Err(Status::unimplemented(""))
+        }
+        async fn get_file_stream(
+            &self,
+            _: Request<protos::clirpc::GetFileRequest>,
+        ) -> std::result::Result<tonic::Response<Self::GetFileStreamStream>, Status> {
             Err(Status::unimplemented(""))
         }
         async fn list_files(

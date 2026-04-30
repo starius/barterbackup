@@ -65,26 +65,42 @@ service BarterBackupClient {
     rpc CheckoutRevision(CheckoutRevisionRequest)
         returns (CheckoutRevisionResponse);
 
+    // CheckoutRevisionStream streams plaintext files for one conflicted or
+    // archived revision so the operator can inspect it locally without one
+    // large unary response.
+    rpc CheckoutRevisionStream(CheckoutRevisionRequest)
+        returns (stream CheckoutRevisionChunk);
+
     // ResolveConflict chooses the revision that should stay active and archives
     // the remaining conflicting revisions.
     rpc ResolveConflict(ResolveConflictRequest)
         returns (ResolveConflictResponse);
 
-    // SetFile sends a single file to the daemon. The daemon assembles a
-    // single content blob from the current set of files, stores it encrypted
-    // locally, and uploads the resulting content to other peers (also
-    // encrypted). It stores other peers' content in exchange.
+    // SetFile sends one plaintext file plus its modification time to the
+    // daemon. The daemon assembles a single content blob from the current set
+    // of files, stores it encrypted locally, and uploads the resulting
+    // content to other peers (also encrypted). It stores other peers' content
+    // in exchange.
     rpc SetFile(SetFileRequest) returns (SetFileResponse);
+
+    // SetFileStream streams one plaintext file plus its modification time to
+    // the daemon without relying on one large unary request.
+    rpc SetFileStream(stream SetFileChunk) returns (SetFileResponse);
 
     // DeleteFile removes a file by name from the current content set.
     rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
 
-    // GetFile returns the file data by its name from the current set of
-    // files that form the most recent content blob.
+    // GetFile returns one plaintext file and its stored metadata by name from
+    // the current set of files that form the most recent content blob.
     rpc GetFile(GetFileRequest) returns (GetFileResponse);
 
-    // ListFiles returns only the names of files that form the most recent
-    // content blob.
+    // GetFileStream streams one plaintext file and its stored metadata by
+    // name from the current set of files that form the most recent content
+    // blob without one large unary response.
+    rpc GetFileStream(GetFileRequest) returns (stream GetFileChunk);
+
+    // ListFiles returns metadata for files that form the most recent content
+    // blob.
     rpc ListFiles(ListFilesRequest) returns (ListFilesResponse);
 
     // SetStorageConfig sets how much data of other peers we want to store
@@ -545,6 +561,16 @@ message CheckoutRevisionResponse {
     repeated File file = 1;
 }
 
+message CheckoutRevisionChunk {
+    oneof chunk {
+        // file starts one file inside the selected revision.
+        FileInfo file = 1;
+
+        // data carries one plaintext chunk of the current file.
+        bytes data = 2;
+    }
+}
+
 message ResolveConflictRequest {
     // content_id identifies the revision that should stay active.
     bytes content_id = 1;
@@ -561,11 +587,43 @@ message File {
 
     // data is the raw file bytes.
     bytes data = 2;
+
+    // modified_at is the Unix timestamp (seconds) of the source file mtime.
+    int64 modified_at = 3;
+
+    // modified_at_ns is the nanosecond component corresponding to modified_at.
+    int64 modified_at_ns = 4;
+}
+
+// FileInfo is one metadata-only description of a stored logical file.
+message FileInfo {
+    // name is an arbitrary identifier shown to the user (for example,
+    // a filename).
+    string name = 1;
+
+    // size_bytes is the plaintext file length in bytes.
+    int64 size_bytes = 2;
+
+    // modified_at is the Unix timestamp (seconds) of the source file mtime.
+    int64 modified_at = 3;
+
+    // modified_at_ns is the nanosecond component corresponding to modified_at.
+    int64 modified_at_ns = 4;
 }
 
 message SetFileRequest {
     // file is the file to add or update in the current content set.
     File file = 1;
+}
+
+message SetFileChunk {
+    oneof chunk {
+        // file starts one streamed upload and carries metadata.
+        FileInfo file = 1;
+
+        // data carries one plaintext chunk of the uploaded file.
+        bytes data = 2;
+    }
 }
 
 message SetFileResponse {}
@@ -587,11 +645,21 @@ message GetFileResponse {
     File file = 1;
 }
 
+message GetFileChunk {
+    oneof chunk {
+        // file starts one streamed download and carries metadata.
+        FileInfo file = 1;
+
+        // data carries one plaintext chunk of the requested file.
+        bytes data = 2;
+    }
+}
+
 message ListFilesRequest {}
 
 message ListFilesResponse {
-    // name contains names of files that form the most recent content blob.
-    repeated string name = 1;
+    // file contains metadata for files that form the most recent content blob.
+    repeated FileInfo file = 1;
 }
 
 // StorageConfig has settings that the user can change.

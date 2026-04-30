@@ -7,6 +7,7 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::string::ToString;
 use std::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -14,15 +15,15 @@ use crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::style::Stylize;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use dirs::home_dir;
-use futures_util::TryStreamExt;
+use futures_util::{stream, TryStreamExt};
 use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
 use protos::clirpc::{
     CheckContractRequest, CheckoutRevisionRequest, ConnectPeerRequest, DeleteFileRequest,
-    ExportBuiltInPeersRequest, File, GetContractsRequest, GetFileRequest, GetStorageConfigRequest,
-    InitRequest, ListConflictsRequest, ListFilesRequest, PeerInfo, PeerStatus, PeersRequest,
-    PeersResponse, PinPeerRequest, ProposeContractRequest, RecoverContentRequest,
-    ResolveConflictRequest, SetFileRequest, SetStorageConfigRequest, StateRequest, StateResponse,
-    StopRequest, StorageConfig, UnlockRequest, UnpinPeerRequest,
+    ExportBuiltInPeersRequest, File, FileInfo, GetContractsRequest, GetFileRequest,
+    GetStorageConfigRequest, InitRequest, ListConflictsRequest, ListFilesRequest, PeerInfo,
+    PeerStatus, PeersRequest, PeersResponse, PinPeerRequest, ProposeContractRequest,
+    RecoverContentRequest, ResolveConflictRequest, SetStorageConfigRequest, StateRequest,
+    StateResponse, StopRequest, StorageConfig, UnlockRequest, UnpinPeerRequest,
 };
 use tlsutil::{connect_pinned_channel, read_keys};
 use tokio::time::sleep;
@@ -45,6 +46,9 @@ const MIN_MAIN_PASSWORD_GUESSES_LOG10: f64 = 25.0;
 /// ZXCVBN_MAX_PASSWORD_CHARS is the official zxcvbn input limit.
 const ZXCVBN_MAX_PASSWORD_CHARS: usize = 100;
 
+/// LOCAL_FILE_CHUNK_BYTES is the chunk size used for local streamed file RPCs.
+const LOCAL_FILE_CHUNK_BYTES: usize = 256 * 1024;
+
 /// UNLOCK_RETRY_INTERVAL is the delay between unlock readiness probes.
 const UNLOCK_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -61,6 +65,14 @@ struct PasswordAssessment {
     suggestions: Vec<String>,
     /// used_recursive_workaround reports whether the local fallback was needed.
     used_recursive_workaround: bool,
+}
+
+/// CollectedStreamedFile is one streamed file reconstructed from local clirpc chunks.
+struct CollectedStreamedFile {
+    /// file is the reconstructed file payload and metadata.
+    file: File,
+    /// expected_size_bytes is the advertised plaintext length.
+    expected_size_bytes: usize,
 }
 
 /// Args configures the top-level `bbcli` command-line interface.
@@ -1091,11 +1103,11 @@ async fn stop(target: &LocalCliTarget) -> Result<()> {
     stop_with_client(&mut client).await
 }
 
-/// Print the stored file names.
+/// Print the stored file metadata.
 async fn list_files(target: &LocalCliTarget) -> Result<()> {
     let mut client = connect_client(target).await?;
-    for name in list_files_with_client(&mut client).await? {
-        println!("{name}");
+    for line in format_file_list(&list_file_info_with_client(&mut client).await?) {
+        println!("{line}");
     }
     Ok(())
 }
@@ -1104,7 +1116,8 @@ async fn list_files(target: &LocalCliTarget) -> Result<()> {
 async fn set_file(target: &LocalCliTarget, name: &str, path: &Path) -> Result<()> {
     let mut client = connect_client(target).await?;
     let data = fs::read(path).with_context(|| format!("read input file {}", path.display()))?;
-    set_file_with_client(&mut client, name, data).await
+    let (modified_at, modified_at_ns) = local_file_modified_at(path)?;
+    set_file_with_client(&mut client, name, data, modified_at, modified_at_ns).await
 }
 
 /// Download one plaintext file.
@@ -1132,6 +1145,69 @@ fn get_file_stdout_bytes(data: Vec<u8>, stdout_is_terminal: bool) -> Result<Vec<
     bail!(
         "refusing to print binary data to the terminal; pass an output path or pipe to `| cat` or `| less`"
     )
+}
+
+/// Return one local source-file mtime or fall back to the current time.
+fn local_file_modified_at(path: &Path) -> Result<(i64, i64)> {
+    let modified = fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or_else(|_| SystemTime::now());
+    let duration = modified
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| SystemTime::now().duration_since(UNIX_EPOCH).unwrap());
+    Ok((
+        i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
+        i64::from(duration.subsec_nanos()),
+    ))
+}
+
+/// Build one streamed upload request from file metadata and plaintext bytes.
+fn build_set_file_upload(
+    name: &str,
+    data: Vec<u8>,
+    modified_at: i64,
+    modified_at_ns: i64,
+) -> Vec<protos::clirpc::SetFileChunk> {
+    let mut chunks = vec![protos::clirpc::SetFileChunk {
+        chunk: Some(protos::clirpc::set_file_chunk::Chunk::File(FileInfo {
+            name: name.to_string(),
+            size_bytes: i64::try_from(data.len()).unwrap_or(i64::MAX),
+            modified_at,
+            modified_at_ns,
+        })),
+    }];
+    for chunk in data.chunks(LOCAL_FILE_CHUNK_BYTES) {
+        chunks.push(protos::clirpc::SetFileChunk {
+            chunk: Some(protos::clirpc::set_file_chunk::Chunk::Data(chunk.to_vec())),
+        });
+    }
+    chunks
+}
+
+/// Start collecting one streamed file after receiving its metadata chunk.
+fn start_streamed_file(file: FileInfo) -> Result<CollectedStreamedFile> {
+    if file.size_bytes < 0 {
+        bail!("daemon reported a negative file size");
+    }
+
+    Ok(CollectedStreamedFile {
+        file: File {
+            name: file.name,
+            data: Vec::new(),
+            modified_at: file.modified_at,
+            modified_at_ns: file.modified_at_ns,
+        },
+        expected_size_bytes: usize::try_from(file.size_bytes)
+            .context("daemon reported a file size that does not fit on this platform")?,
+    })
+}
+
+/// Validate one reconstructed streamed file before returning it to the caller.
+fn finish_streamed_file(collected: CollectedStreamedFile) -> Result<File> {
+    if collected.file.data.len() != collected.expected_size_bytes {
+        bail!("daemon streamed a file body with an unexpected length");
+    }
+    Ok(collected.file)
 }
 
 /// Delete one stored file.
@@ -1207,7 +1283,7 @@ async fn checkout_revision(
     let mut client = connect_client(target).await?;
     let response = checkout_revision_with_client(&mut client, &content_id).await?;
     fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
-    for file in response.file {
+    for file in response {
         let target = checked_checkout_target(out_dir, &file.name)?;
         fs::write(&target, &file.data).with_context(|| format!("write {}", target.display()))?;
     }
@@ -1629,6 +1705,19 @@ fn format_contracts_response(response: &protos::clirpc::GetContractsResponse) ->
                 latest_cached_id,
                 contract.their_latest_cached_content_length,
                 cache_is_stale
+            )
+        })
+        .collect()
+}
+
+/// Format stored file metadata for CLI output.
+fn format_file_list(files: &[FileInfo]) -> Vec<String> {
+    files
+        .iter()
+        .map(|file| {
+            format!(
+                "name={} size_bytes={} modified_at={}.{:09}",
+                file.name, file.size_bytes, file.modified_at, file.modified_at_ns
             )
         })
         .collect()
@@ -2113,14 +2202,16 @@ pub async fn set_file_with_client(
     client: &mut BarterBackupClientClient<Channel>,
     name: &str,
     data: Vec<u8>,
+    modified_at: i64,
+    modified_at_ns: i64,
 ) -> Result<()> {
     client
-        .set_file(SetFileRequest {
-            file: Some(File {
-                name: name.to_string(),
-                data,
-            }),
-        })
+        .set_file_stream(stream::iter(build_set_file_upload(
+            name,
+            data,
+            modified_at,
+            modified_at_ns,
+        )))
         .await?;
     Ok(())
 }
@@ -2130,22 +2221,50 @@ pub async fn get_file_with_client(
     client: &mut BarterBackupClientClient<Channel>,
     name: &str,
 ) -> Result<Vec<u8>> {
-    let response = client
-        .get_file(GetFileRequest {
+    let mut stream = client
+        .get_file_stream(GetFileRequest {
             name: name.to_string(),
         })
         .await?
         .into_inner();
-    let file = response.file.context("daemon returned no file body")?;
-    Ok(file.data)
+    let mut file = None;
+    while let Some(chunk) = stream.message().await? {
+        match chunk.chunk.context("daemon returned an empty file chunk")? {
+            protos::clirpc::get_file_chunk::Chunk::File(info) => {
+                if file.is_some() {
+                    bail!("daemon started a second file in one file download");
+                }
+                file = Some(start_streamed_file(info)?);
+            }
+            protos::clirpc::get_file_chunk::Chunk::Data(data) => {
+                let collected = file
+                    .as_mut()
+                    .context("daemon sent file data before file metadata")?;
+                collected.file.data.extend_from_slice(&data);
+            }
+        }
+    }
+    let file = file.context("daemon returned no file body")?;
+    Ok(finish_streamed_file(file)?.data)
+}
+
+/// List stored file metadata through an already connected client.
+pub async fn list_file_info_with_client(
+    client: &mut BarterBackupClientClient<Channel>,
+) -> Result<Vec<FileInfo>> {
+    let response = client.list_files(ListFilesRequest {}).await?.into_inner();
+    Ok(response.file)
 }
 
 /// List stored file names through an already connected client.
 pub async fn list_files_with_client(
     client: &mut BarterBackupClientClient<Channel>,
 ) -> Result<Vec<String>> {
-    let response = client.list_files(ListFilesRequest {}).await?.into_inner();
-    Ok(response.name)
+    Ok(list_file_info_with_client(client)
+        .await?
+        .into_iter()
+        .map(|file| file.name)
+        .collect())
 }
 
 /// Delete one file through an already connected client.
@@ -2250,13 +2369,38 @@ pub async fn list_conflicts_with_client(
 pub async fn checkout_revision_with_client(
     client: &mut BarterBackupClientClient<Channel>,
     content_id: &[u8],
-) -> Result<protos::clirpc::CheckoutRevisionResponse> {
-    Ok(client
-        .checkout_revision(CheckoutRevisionRequest {
+) -> Result<Vec<File>> {
+    let mut stream = client
+        .checkout_revision_stream(CheckoutRevisionRequest {
             content_id: content_id.to_vec(),
         })
         .await?
-        .into_inner())
+        .into_inner();
+    let mut files = Vec::new();
+    let mut current = None;
+    while let Some(chunk) = stream.message().await? {
+        match chunk
+            .chunk
+            .context("daemon returned an empty checkout chunk")?
+        {
+            protos::clirpc::checkout_revision_chunk::Chunk::File(info) => {
+                if let Some(file) = current.take() {
+                    files.push(finish_streamed_file(file)?);
+                }
+                current = Some(start_streamed_file(info)?);
+            }
+            protos::clirpc::checkout_revision_chunk::Chunk::Data(data) => {
+                let current_file = current
+                    .as_mut()
+                    .context("daemon sent checkout data before file metadata")?;
+                current_file.file.data.extend_from_slice(&data);
+            }
+        }
+    }
+    if let Some(file) = current.take() {
+        files.push(finish_streamed_file(file)?);
+    }
+    Ok(files)
 }
 
 /// Resolve the active conflict through an existing client.
@@ -3191,11 +3335,16 @@ mod tests {
     async fn file_command_helpers_round_trip() -> anyhow::Result<()> {
         let mut client = spawn_cli_server().await?;
 
-        set_file_with_client(&mut client, "alpha.txt", b"alpha".to_vec()).await?;
-        set_file_with_client(&mut client, "beta.txt", b"beta".to_vec()).await?;
+        set_file_with_client(&mut client, "alpha.txt", b"alpha".to_vec(), 0, 0).await?;
+        set_file_with_client(&mut client, "beta.txt", b"beta".to_vec(), 0, 0).await?;
 
         let names = list_files_with_client(&mut client).await?;
         assert_eq!(names, vec!["alpha.txt".to_string(), "beta.txt".to_string()]);
+        let info = list_file_info_with_client(&mut client).await?;
+        assert_eq!(info.len(), 2);
+        assert_eq!(info[0].name, "alpha.txt");
+        assert_eq!(info[0].size_bytes, 5);
+        assert_eq!(info[0].modified_at, 0);
 
         let data = get_file_with_client(&mut client, "alpha.txt").await?;
         assert_eq!(data, b"alpha".to_vec());
@@ -3212,12 +3361,27 @@ mod tests {
         let output_dir = tempdir()?;
         let output_path = output_dir.path().join("alpha.txt");
 
-        set_file_with_client(&mut client, "alpha.txt", b"alpha".to_vec()).await?;
+        set_file_with_client(&mut client, "alpha.txt", b"alpha".to_vec(), 0, 0).await?;
         let data = get_file_with_client(&mut client, "alpha.txt").await?;
         fs::write(&output_path, data)?;
 
         assert_eq!(fs::read(&output_path)?, b"alpha".to_vec());
         Ok(())
+    }
+
+    #[test]
+    fn format_file_list_includes_size_and_mtime() {
+        let lines = format_file_list(&[FileInfo {
+            name: "alpha.txt".to_string(),
+            size_bytes: 5,
+            modified_at: 123,
+            modified_at_ns: 45,
+        }]);
+
+        assert_eq!(
+            lines,
+            vec!["name=alpha.txt size_bytes=5 modified_at=123.000000045".to_string()]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3748,11 +3912,12 @@ mod tests {
                 file: Some(protos::clirpc::File {
                     name: "remote.txt".to_string(),
                     data: b"remote-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
 
-        set_file_with_client(&mut local_client, "local.txt", b"local-body".to_vec()).await?;
+        set_file_with_client(&mut local_client, "local.txt", b"local-body".to_vec(), 0, 0).await?;
 
         let local_server =
             spawn_registered_p2p_server(local_node.clone(), connector.as_ref()).await?;

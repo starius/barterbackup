@@ -32,6 +32,12 @@ message FileHeader {
 
     // file_sha256 is the SHA-256 hash of the file.
     bytes file_sha256 = 3;
+
+    // modified_at is the Unix timestamp (seconds) of the source file mtime.
+    int64 modified_at = 4;
+
+    // modified_at_ns is the nanosecond component corresponding to modified_at.
+    int64 modified_at_ns = 5;
 }
 
 // Peer is data about the peer that should survive a node reset.
