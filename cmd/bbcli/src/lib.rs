@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::event::{read, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::style::Stylize;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use dirs::home_dir;
 use futures_util::TryStreamExt;
@@ -758,7 +759,9 @@ where
         allow_weak_password,
         &mut io::stderr().lock(),
     )?;
-    init(target, &password, wait_timeout).await
+    init(target, &password, wait_timeout).await?;
+    write_init_success_message(&mut io::stdout().lock(), io::stdout().is_terminal())?;
+    Ok(())
 }
 
 /// Prepare and validate one init password before the daemon RPC request.
@@ -955,16 +958,24 @@ fn write_password_quality_message(
     if let Some(warning) = assessment.warning.as_ref() {
         writeln!(writer, "warning: {warning}").context("write password quality warning")?;
     }
-    if assessment.suggestions.is_empty() {
-        writeln!(writer, "feedback: no additional suggestions from zxcvbn")
-            .context("write password quality feedback")?;
-    } else {
+    if !assessment.suggestions.is_empty() {
         for suggestion in &assessment.suggestions {
             writeln!(writer, "suggestion: {suggestion}")
                 .context("write password quality suggestion")?;
         }
     }
 
+    Ok(())
+}
+
+/// Print one success message after daemon storage initialization completes.
+fn write_init_success_message(writer: &mut impl Write, colorize: bool) -> Result<()> {
+    let message = "storage was successfully initialized";
+    if colorize {
+        writeln!(writer, "{}", message.green()).context("write init success message")?;
+    } else {
+        writeln!(writer, "{message}").context("write init success message")?;
+    }
     Ok(())
 }
 
@@ -2351,7 +2362,7 @@ mod tests {
         assert!(rendered.contains("password quality: accepted"));
         assert!(rendered.contains("score: 4/4"));
         assert!(rendered.contains("guesses_log10:"));
-        assert!(rendered.contains("feedback: no additional suggestions from zxcvbn"));
+        assert!(!rendered.contains("feedback: no additional suggestions from zxcvbn"));
     }
 
     #[test]
@@ -2467,6 +2478,29 @@ mod tests {
         assert_eq!(combined.warning, None);
         assert_eq!(combined.suggestions, vec!["shared suggestion".to_string()]);
         assert_eq!(combined.score, Score::Two);
+    }
+
+    #[test]
+    fn write_init_success_message_can_colorize_terminal_output() {
+        let mut output = Vec::new();
+
+        write_init_success_message(&mut output, true).unwrap();
+
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("storage was successfully initialized"));
+        assert!(rendered.contains("\u{1b}["));
+    }
+
+    #[test]
+    fn write_init_success_message_omits_color_for_nonterminal_output() {
+        let mut output = Vec::new();
+
+        write_init_success_message(&mut output, false).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "storage was successfully initialized\n"
+        );
     }
 
     #[test]
