@@ -5,6 +5,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::string::ToString;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -26,7 +27,7 @@ use tlsutil::{connect_pinned_channel, read_keys};
 use tokio::time::sleep;
 use tonic::transport::Channel;
 use tonic::Code;
-use zxcvbn::{zxcvbn, Entropy, Score};
+use zxcvbn::{zxcvbn, Score};
 
 /// DEFAULT_LOCAL_ADDR is the default local daemon address.
 pub const DEFAULT_LOCAL_ADDR: &str = "https://127.0.0.1:9911";
@@ -40,8 +41,26 @@ const DEFAULT_KEYS_WAIT_SECS: u64 = 5;
 /// MIN_MAIN_PASSWORD_GUESSES_LOG10 is the minimum accepted zxcvbn guess count.
 const MIN_MAIN_PASSWORD_GUESSES_LOG10: f64 = 25.0;
 
+/// ZXCVBN_MAX_PASSWORD_CHARS is the official zxcvbn input limit.
+const ZXCVBN_MAX_PASSWORD_CHARS: usize = 100;
+
 /// UNLOCK_RETRY_INTERVAL is the delay between unlock readiness probes.
 const UNLOCK_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+
+/// PasswordAssessment captures the password-quality fields used by the CLI.
+#[derive(Debug, Clone, PartialEq)]
+struct PasswordAssessment {
+    /// guesses_log10 is the estimated base-10 order of magnitude for guesses.
+    guesses_log10: f64,
+    /// score is the conventional zxcvbn score bucket.
+    score: Score,
+    /// warning is the shared warning across all recursively-assessed parts.
+    warning: Option<String>,
+    /// suggestions are the shared suggestions across all recursively-assessed parts.
+    suggestions: Vec<String>,
+    /// used_recursive_workaround reports whether the local fallback was needed.
+    used_recursive_workaround: bool,
+}
 
 /// Args configures the top-level `bbcli` command-line interface.
 #[derive(Parser, Debug)]
@@ -764,12 +783,12 @@ fn enforce_init_password_policy(
     allow_weak_password: bool,
     writer: &mut impl Write,
 ) -> Result<()> {
-    let entropy = zxcvbn(password, &[]);
-    let meets_threshold = entropy.guesses_log10() >= MIN_MAIN_PASSWORD_GUESSES_LOG10;
+    let assessment = assess_password_strength(password);
+    let meets_threshold = assessment.guesses_log10 >= MIN_MAIN_PASSWORD_GUESSES_LOG10;
     let override_used = allow_weak_password && !meets_threshold;
     write_password_quality_message(
         writer,
-        &entropy,
+        &assessment,
         meets_threshold || override_used,
         override_used,
     )?;
@@ -780,15 +799,137 @@ fn enforce_init_password_policy(
 
     bail!(
         "main password is too weak for offline attack resistance: guesses_log10 {:.2} is below the required {:.1}; rerun with --allow-weak-password to override",
-        entropy.guesses_log10(),
+        assessment.guesses_log10,
         MIN_MAIN_PASSWORD_GUESSES_LOG10
     );
+}
+
+/// Assess one init password, working around zxcvbn saturation and the 100-char cap.
+fn assess_password_strength(password: &str) -> PasswordAssessment {
+    if password.chars().count() > ZXCVBN_MAX_PASSWORD_CHARS {
+        return assess_password_strength_recursive(password);
+    }
+
+    let entropy = zxcvbn(password, &[]);
+    if entropy.guesses() == u64::MAX {
+        return assess_password_strength_recursive(password);
+    }
+
+    assessment_from_entropy(&entropy)
+}
+
+/// Recursively assess one password by splitting it into equal halves as needed.
+fn assess_password_strength_recursive(password: &str) -> PasswordAssessment {
+    let char_count = password.chars().count();
+    if char_count <= ZXCVBN_MAX_PASSWORD_CHARS {
+        let entropy = zxcvbn(password, &[]);
+        if entropy.guesses() != u64::MAX || char_count <= 1 {
+            return assessment_from_entropy(&entropy);
+        }
+    }
+
+    // TODO: Stop splitting on u64 saturation once
+    // https://github.com/shssoichiro/zxcvbn-rs/pull/95 lands in a release.
+    // Keep revisiting the workaround separately while upstream still truncates
+    // assessments to the first 100 characters of input.
+    let (left_password, right_password) = split_password_halves(password);
+    let left = assess_password_strength_recursive(left_password);
+    let right = assess_password_strength_recursive(right_password);
+    combine_password_assessments(left, right)
+}
+
+/// Split one password into equal left and right halves by character count.
+fn split_password_halves(password: &str) -> (&str, &str) {
+    let mid_chars = password.chars().count() / 2;
+    let split_index = password
+        .char_indices()
+        .nth(mid_chars)
+        .map(|(index, _)| index)
+        .unwrap_or(password.len());
+    password.split_at(split_index)
+}
+
+/// Convert one direct zxcvbn result into the CLI assessment shape.
+fn assessment_from_entropy(entropy: &zxcvbn::Entropy) -> PasswordAssessment {
+    let (warning, suggestions) = match entropy.feedback() {
+        Some(feedback) => (
+            feedback.warning().map(|warning| warning.to_string()),
+            feedback
+                .suggestions()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        ),
+        None => (None, Vec::new()),
+    };
+
+    PasswordAssessment {
+        guesses_log10: entropy.guesses_log10(),
+        score: entropy.score(),
+        warning,
+        suggestions,
+        used_recursive_workaround: false,
+    }
+}
+
+/// Merge two recursive password assessments into one combined result.
+fn combine_password_assessments(
+    left: PasswordAssessment,
+    right: PasswordAssessment,
+) -> PasswordAssessment {
+    let warning = match (left.warning.as_ref(), right.warning.as_ref()) {
+        (Some(left_warning), Some(right_warning)) if left_warning == right_warning => {
+            Some(left_warning.clone())
+        }
+        _ => None,
+    };
+    let suggestions = intersect_assessment_suggestions(&left.suggestions, &right.suggestions);
+    let guesses_log10 = left.guesses_log10 + right.guesses_log10;
+
+    PasswordAssessment {
+        guesses_log10,
+        score: score_from_guesses_log10(guesses_log10),
+        warning,
+        suggestions,
+        used_recursive_workaround: true,
+    }
+}
+
+/// Keep only suggestions that appear in both recursive assessment branches.
+fn intersect_assessment_suggestions(left: &[String], right: &[String]) -> Vec<String> {
+    let mut shared = Vec::new();
+    for suggestion in left {
+        if right.contains(suggestion) && !shared.contains(suggestion) {
+            shared.push(suggestion.clone());
+        }
+    }
+    shared
+}
+
+/// Convert one guess magnitude into the conventional zxcvbn score bucket.
+fn score_from_guesses_log10(guesses_log10: f64) -> Score {
+    if !guesses_log10.is_finite() {
+        return Score::Zero;
+    }
+
+    const DELTA: u64 = 5;
+    if guesses_log10 < ((1_000 + DELTA) as f64).log10() {
+        Score::Zero
+    } else if guesses_log10 < ((1_000_000 + DELTA) as f64).log10() {
+        Score::One
+    } else if guesses_log10 < ((100_000_000 + DELTA) as f64).log10() {
+        Score::Two
+    } else if guesses_log10 < ((10_000_000_000_u64 + DELTA) as f64).log10() {
+        Score::Three
+    } else {
+        Score::Four
+    }
 }
 
 /// Print the zxcvbn password-strength assessment for one init password.
 fn write_password_quality_message(
     writer: &mut impl Write,
-    entropy: &Entropy,
+    assessment: &PasswordAssessment,
     accepted: bool,
     override_used: bool,
 ) -> Result<()> {
@@ -805,30 +946,22 @@ fn write_password_quality_message(
     writeln!(
         writer,
         "score: {}/4",
-        password_score_number(entropy.score())
+        password_score_number(assessment.score)
     )
     .context("write password quality score")?;
-    writeln!(writer, "guesses_log10: {:.2}", entropy.guesses_log10())
+    writeln!(writer, "guesses_log10: {:.2}", assessment.guesses_log10)
         .context("write password quality guesses")?;
 
-    match entropy.feedback() {
-        Some(feedback) => {
-            if let Some(warning) = feedback.warning() {
-                writeln!(writer, "warning: {warning}").context("write password quality warning")?;
-            }
-            if feedback.suggestions().is_empty() {
-                writeln!(writer, "feedback: no additional suggestions from zxcvbn")
-                    .context("write password quality feedback")?;
-            } else {
-                for suggestion in feedback.suggestions() {
-                    writeln!(writer, "suggestion: {suggestion}")
-                        .context("write password quality suggestion")?;
-                }
-            }
-        }
-        None => {
-            writeln!(writer, "feedback: no additional suggestions from zxcvbn")
-                .context("write password quality feedback")?;
+    if let Some(warning) = assessment.warning.as_ref() {
+        writeln!(writer, "warning: {warning}").context("write password quality warning")?;
+    }
+    if assessment.suggestions.is_empty() {
+        writeln!(writer, "feedback: no additional suggestions from zxcvbn")
+            .context("write password quality feedback")?;
+    } else {
+        for suggestion in &assessment.suggestions {
+            writeln!(writer, "suggestion: {suggestion}")
+                .context("write password quality suggestion")?;
         }
     }
 
@@ -2255,6 +2388,85 @@ mod tests {
         assert!(String::from_utf8(output)
             .unwrap()
             .contains("password quality: accepted"));
+    }
+
+    #[test]
+    fn assess_password_strength_uses_recursive_workaround_for_saturated_password() {
+        assert_eq!(zxcvbn(STRONG_TEST_PASSWORD, &[]).guesses(), u64::MAX);
+
+        let assessment = assess_password_strength(STRONG_TEST_PASSWORD);
+
+        assert!(assessment.used_recursive_workaround);
+        assert!(assessment.guesses_log10 > MIN_MAIN_PASSWORD_GUESSES_LOG10);
+        assert_eq!(assessment.score, Score::Four);
+    }
+
+    #[test]
+    fn assess_password_strength_uses_recursive_workaround_for_long_password() {
+        let long_password = format!("{STRONG_TEST_PASSWORD} {STRONG_TEST_PASSWORD}");
+        assert!(long_password.chars().count() > ZXCVBN_MAX_PASSWORD_CHARS);
+
+        let assessment = assess_password_strength(&long_password);
+
+        assert!(assessment.used_recursive_workaround);
+        assert!(assessment.guesses_log10 > MIN_MAIN_PASSWORD_GUESSES_LOG10);
+        assert_eq!(assessment.score, Score::Four);
+    }
+
+    #[test]
+    fn combine_password_assessments_keeps_only_shared_feedback() {
+        let left = PasswordAssessment {
+            guesses_log10: 13.0,
+            score: Score::Four,
+            warning: Some("shared warning".to_string()),
+            suggestions: vec![
+                "shared suggestion".to_string(),
+                "left only suggestion".to_string(),
+            ],
+            used_recursive_workaround: false,
+        };
+        let right = PasswordAssessment {
+            guesses_log10: 13.0,
+            score: Score::Four,
+            warning: Some("shared warning".to_string()),
+            suggestions: vec![
+                "shared suggestion".to_string(),
+                "right only suggestion".to_string(),
+            ],
+            used_recursive_workaround: false,
+        };
+
+        let combined = combine_password_assessments(left, right);
+
+        assert_eq!(combined.warning.as_deref(), Some("shared warning"));
+        assert_eq!(combined.suggestions, vec!["shared suggestion".to_string()]);
+        assert!(combined.used_recursive_workaround);
+        assert_eq!(combined.guesses_log10, 26.0);
+        assert_eq!(combined.score, Score::Four);
+    }
+
+    #[test]
+    fn combine_password_assessments_drops_nonshared_warning() {
+        let left = PasswordAssessment {
+            guesses_log10: 4.0,
+            score: Score::One,
+            warning: Some("left warning".to_string()),
+            suggestions: vec!["shared suggestion".to_string()],
+            used_recursive_workaround: false,
+        };
+        let right = PasswordAssessment {
+            guesses_log10: 4.0,
+            score: Score::One,
+            warning: Some("right warning".to_string()),
+            suggestions: vec!["shared suggestion".to_string()],
+            used_recursive_workaround: false,
+        };
+
+        let combined = combine_password_assessments(left, right);
+
+        assert_eq!(combined.warning, None);
+        assert_eq!(combined.suggestions, vec!["shared suggestion".to_string()]);
+        assert_eq!(combined.score, Score::Two);
     }
 
     #[test]
