@@ -686,39 +686,123 @@ fn prompt_password_with_prompt(prompt: &str) -> Result<String> {
 /// Print daemon state.
 async fn state(target: &LocalCliTarget) -> Result<()> {
     let response = state_response(target, Duration::from_secs(DEFAULT_KEYS_WAIT_SECS)).await?;
+    for line in format_state_response(&response) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Format one local daemon state response for CLI output.
+fn format_state_response(response: &StateResponse) -> Vec<String> {
     let peer_runtime_state =
         protos::clirpc::PeerRuntimeState::try_from(response.peer_runtime_state)
             .unwrap_or(protos::clirpc::PeerRuntimeState::Unknown);
     let self_peer_check_state =
         protos::clirpc::SelfPeerCheckState::try_from(response.self_peer_check_state)
             .unwrap_or(protos::clirpc::SelfPeerCheckState::Unknown);
-    println!("storage_initialized: {}", response.storage_initialized);
-    println!("server_onion: {}", response.server_onion);
-    println!("uptime_seconds: {}", response.uptime_seconds);
-    println!(
-        "peer_runtime_state: {}",
-        match peer_runtime_state {
-            protos::clirpc::PeerRuntimeState::Unknown => "unknown",
-            protos::clirpc::PeerRuntimeState::Starting => "starting",
-            protos::clirpc::PeerRuntimeState::Ready => "ready",
-            protos::clirpc::PeerRuntimeState::Failed => "failed",
-        }
-    );
+    let mut lines = vec![
+        format!("storage_initialized: {}", response.storage_initialized),
+        format!("server_onion: {}", response.server_onion),
+        format!("uptime_seconds: {}", response.uptime_seconds),
+        format!(
+            "peer_runtime_state: {}",
+            match peer_runtime_state {
+                protos::clirpc::PeerRuntimeState::Unknown => "unknown",
+                protos::clirpc::PeerRuntimeState::Starting => "starting",
+                protos::clirpc::PeerRuntimeState::Ready => "ready",
+                protos::clirpc::PeerRuntimeState::Failed => "failed",
+            }
+        ),
+    ];
     if !response.peer_runtime_error.is_empty() {
-        println!("peer_runtime_error: {}", response.peer_runtime_error);
+        lines.push(format!(
+            "peer_runtime_error: {}",
+            response.peer_runtime_error
+        ));
     }
-    println!(
+    lines.push(format!(
         "self_peer_check_state: {}",
         match self_peer_check_state {
             protos::clirpc::SelfPeerCheckState::Unknown => "unknown",
             protos::clirpc::SelfPeerCheckState::Healthy => "healthy",
             protos::clirpc::SelfPeerCheckState::Unhealthy => "unhealthy",
         }
-    );
+    ));
     if !response.self_peer_check_error.is_empty() {
-        println!("self_peer_check_error: {}", response.self_peer_check_error);
+        lines.push(format!(
+            "self_peer_check_error: {}",
+            response.self_peer_check_error
+        ));
     }
-    Ok(())
+
+    if let Some(local_summary) = response.local_summary.as_ref() {
+        if let Some(content) = local_summary.content.as_ref() {
+            lines.push(format!("files_count: {}", content.file_count));
+            lines.push(format!(
+                "files_total_size_bytes: {}",
+                content.total_size_bytes
+            ));
+            lines.push(format!(
+                "files_last_updated_at: {}",
+                if content.file_count > 0 {
+                    format!(
+                        "{}.{:09}",
+                        content.last_updated_at,
+                        content.last_updated_at_ns.max(0)
+                    )
+                } else {
+                    "never".to_string()
+                }
+            ));
+            lines.push(format!(
+                "has_pending_content_update: {}",
+                content.has_pending_update
+            ));
+        }
+        if let Some(peers) = local_summary.peers.as_ref() {
+            lines.push(format!("known_peers: {}", peers.total_known));
+            lines.push(format!("connected_peers: {}", peers.connected));
+            lines.push(format!(
+                "peers_storing_our_data: {}",
+                peers.storing_our_data
+            ));
+            lines.push(format!(
+                "peers_storing_latest_our_data: {}",
+                peers.storing_latest_our_data
+            ));
+            lines.push(format!(
+                "working_contract_peers: {}",
+                peers.working_contracts
+            ));
+            lines.push(format!(
+                "mean_working_contract_score_seconds: {}",
+                peers.mean_working_contract_score_seconds
+            ));
+            lines.push(format!("mirrored_peers: {}", peers.mirrored_peers));
+            lines.push(format!(
+                "mirrored_total_size_bytes: {}",
+                peers.mirrored_total_size_bytes
+            ));
+        }
+        if let Some(durability) = local_summary.durability.as_ref() {
+            lines.push(format!(
+                "predicted_fresh_replicas_now: {}",
+                durability.predicted_fresh_replicas_now
+            ));
+            lines.push(format!(
+                "predicted_min_replicas_target: {}",
+                durability.predicted_min_replicas_target
+            ));
+            for point in &durability.predicted_replica_horizon {
+                lines.push(format!(
+                    "predicted_replica_horizon remaining_fresh_replicas={} seconds_until_threshold={} never={}",
+                    point.remaining_fresh_replicas, point.seconds_until_threshold, point.never
+                ));
+            }
+        }
+    }
+
+    lines
 }
 
 /// Run the init command, checking daemon state before asking for a password.
@@ -2258,6 +2342,7 @@ mod tests {
             peer_runtime_error: String::new(),
             self_peer_check_state: protos::clirpc::SelfPeerCheckState::Unknown as i32,
             self_peer_check_error: String::new(),
+            local_summary: None,
         }
     }
 
@@ -2410,6 +2495,88 @@ mod tests {
         assert!(assessment.used_recursive_workaround);
         assert!(assessment.guesses_log10 > MIN_MAIN_PASSWORD_GUESSES_LOG10);
         assert_eq!(assessment.score, Score::Four);
+    }
+
+    #[test]
+    fn format_state_response_renders_local_summary() {
+        let response = StateResponse {
+            storage_initialized: true,
+            server_onion: "self.onion".to_string(),
+            uptime_seconds: 12,
+            peer_runtime_state: protos::clirpc::PeerRuntimeState::Ready as i32,
+            peer_runtime_error: String::new(),
+            self_peer_check_state: protos::clirpc::SelfPeerCheckState::Healthy as i32,
+            self_peer_check_error: String::new(),
+            local_summary: Some(protos::clirpc::StateLocalSummary {
+                content: Some(protos::clirpc::StateContentSummary {
+                    file_count: 2,
+                    total_size_bytes: 99,
+                    last_updated_at: 123,
+                    last_updated_at_ns: 45,
+                    has_pending_update: true,
+                }),
+                peers: Some(protos::clirpc::StatePeerSummary {
+                    total_known: 4,
+                    connected: 2,
+                    storing_our_data: 3,
+                    storing_latest_our_data: 1,
+                    working_contracts: 2,
+                    mean_working_contract_score_seconds: 3600,
+                    mirrored_peers: 1,
+                    mirrored_total_size_bytes: 2048,
+                }),
+                durability: Some(protos::clirpc::StateDurabilitySummary {
+                    predicted_fresh_replicas_now: 1,
+                    predicted_min_replicas_target: 2,
+                    predicted_replica_horizon: vec![protos::clirpc::ReplicaHorizonPoint {
+                        remaining_fresh_replicas: 0,
+                        seconds_until_threshold: 3600,
+                        never: false,
+                    }],
+                }),
+            }),
+        };
+
+        let lines = format_state_response(&response);
+
+        assert!(lines.iter().any(|line| line == "storage_initialized: true"));
+        assert!(lines.iter().any(|line| line == "peer_runtime_state: ready"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "self_peer_check_state: healthy"));
+        assert!(lines.iter().any(|line| line == "files_count: 2"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "files_total_size_bytes: 99"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "files_last_updated_at: 123.000000045"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "has_pending_content_update: true"));
+        assert!(lines.iter().any(|line| line == "known_peers: 4"));
+        assert!(lines.iter().any(|line| line == "connected_peers: 2"));
+        assert!(lines.iter().any(|line| line == "peers_storing_our_data: 3"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "peers_storing_latest_our_data: 1"));
+        assert!(lines.iter().any(|line| line == "working_contract_peers: 2"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "mean_working_contract_score_seconds: 3600"));
+        assert!(lines.iter().any(|line| line == "mirrored_peers: 1"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "mirrored_total_size_bytes: 2048"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "predicted_fresh_replicas_now: 1"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "predicted_min_replicas_target: 2"));
+        assert!(lines.iter().any(|line| {
+            line == "predicted_replica_horizon remaining_fresh_replicas=0 seconds_until_threshold=3600 never=false"
+        }));
     }
 
     #[test]
@@ -2665,6 +2832,7 @@ mod tests {
             peer_runtime_error: String::new(),
             self_peer_check_state: protos::clirpc::SelfPeerCheckState::Unknown as i32,
             self_peer_check_error: String::new(),
+            local_summary: None,
         })
         .unwrap_err();
 
@@ -2684,6 +2852,7 @@ mod tests {
             peer_runtime_error: String::new(),
             self_peer_check_state: protos::clirpc::SelfPeerCheckState::Healthy as i32,
             self_peer_check_error: String::new(),
+            local_summary: None,
         })
         .unwrap_err();
 
@@ -2713,6 +2882,7 @@ mod tests {
                 peer_runtime_error: String::new(),
                 self_peer_check_state: protos::clirpc::SelfPeerCheckState::Healthy as i32,
                 self_peer_check_error: String::new(),
+                local_summary: None,
             },
             move || {
                 called_clone.store(true, std::sync::atomic::Ordering::SeqCst);

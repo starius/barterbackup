@@ -17,7 +17,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use storage::{Filesystem, StorageError, Store};
+use storage::{CurrentContent, Filesystem, StorageError, Store};
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
@@ -312,6 +312,20 @@ pub struct BackgroundMaintenancePlan {
     pub fresh_replica_count: i64,
     /// min_replicas_target is the configured minimum fresh replica target.
     pub min_replicas_target: i64,
+}
+
+/// LocalStoreSnapshot is the local encrypted-store state needed for one local
+/// CLI state summary.
+#[derive(Clone, Debug, PartialEq)]
+struct LocalStoreSnapshot {
+    /// current_content is the active local revision, if any.
+    current_content: Option<CurrentContent>,
+    /// tracked_peers is the persisted tracked peer metadata.
+    tracked_peers: Vec<storedpb::Peer>,
+    /// file_count is the number of logical user files in the active revision.
+    file_count: i64,
+    /// total_file_bytes is the total plaintext size of all logical user files.
+    total_file_bytes: i64,
 }
 
 /// Build the default local storage policy.
@@ -917,6 +931,19 @@ fn replica_horizon_points(expiry_seconds: &[Option<i64>]) -> Vec<clirpc::Replica
     }
 
     points
+}
+
+/// Return the arithmetic mean of the provided scores, saturating to i64.
+fn mean_score_seconds(scores: &[i64]) -> i64 {
+    if scores.is_empty() {
+        return 0;
+    }
+
+    let total = scores.iter().fold(0i128, |running, score| {
+        running.saturating_add(i128::from(*score))
+    });
+    let mean = total / i128::try_from(scores.len()).unwrap_or(i128::MAX);
+    mean.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
 }
 
 /// Convert persisted reachability plus cache presence into the reported status.
@@ -2936,6 +2963,22 @@ impl Node {
         })
     }
 
+    /// Snapshot the local encrypted-store state used by the local state RPC.
+    fn local_store_snapshot(&self) -> Result<Option<LocalStoreSnapshot>, Status> {
+        if self.store.is_none() {
+            return Ok(None);
+        }
+
+        self.with_store(|store| {
+            Ok(Some(LocalStoreSnapshot {
+                current_content: store.current_content().cloned(),
+                tracked_peers: store.peers(),
+                file_count: store.file_count(),
+                total_file_bytes: store.total_file_bytes(),
+            }))
+        })
+    }
+
     /// Build the current local peer inventory without dialing any peers.
     fn peer_inventory(&self) -> Result<Vec<PeerInventoryEntry>, Status> {
         let tracked_peers = if self.store.is_some() {
@@ -3034,6 +3077,130 @@ impl Node {
                 .then(left.onion_service_id.cmp(&right.onion_service_id))
         });
         Ok(peers)
+    }
+
+    /// Build the local-only state summary shown by `bbcli state`.
+    pub fn local_state_summary(&self) -> Result<Option<clirpc::StateLocalSummary>, Status> {
+        let Some(snapshot) = self.local_store_snapshot()? else {
+            return Ok(None);
+        };
+        let inventory = self.peer_inventory()?;
+        let mirrored_total_size_bytes = self
+            .mirrored_blob_usage()?
+            .into_iter()
+            .fold(0i64, |total, usage| {
+                total.saturating_add(usage.blob_len.max(0))
+            });
+        let total_known = i64::try_from(inventory.len()).unwrap_or(i64::MAX);
+        let connected = i64::try_from(
+            inventory
+                .iter()
+                .filter(|peer| matches!(peer.status, PeerInventoryStatus::Connected))
+                .count(),
+        )
+        .unwrap_or(i64::MAX);
+        let mirrored_peers = i64::try_from(
+            inventory
+                .iter()
+                .filter(|peer| peer.stored_content_bytes > 0)
+                .count(),
+        )
+        .unwrap_or(i64::MAX);
+        let working_contract_peers = snapshot
+            .tracked_peers
+            .iter()
+            .filter(|peer| peer_has_contract(peer))
+            .collect::<Vec<_>>();
+        let working_contract_scores = working_contract_peers
+            .iter()
+            .map(|peer| peer.score_seconds)
+            .collect::<Vec<_>>();
+        let working_contracts = i64::try_from(working_contract_scores.len()).unwrap_or(i64::MAX);
+        let current_content_id = snapshot
+            .current_content
+            .as_ref()
+            .map(|content| content.content_id.clone());
+        let storing_our_data = i64::try_from(
+            snapshot
+                .tracked_peers
+                .iter()
+                .filter(|peer| !peer.our_content_last_verified_content_id.is_empty())
+                .count(),
+        )
+        .unwrap_or(i64::MAX);
+        let storing_latest_our_data = current_content_id
+            .as_ref()
+            .map(|current_content_id| {
+                i64::try_from(
+                    snapshot
+                        .tracked_peers
+                        .iter()
+                        .filter(|peer| {
+                            peer.our_content_last_verified_content_id == *current_content_id
+                        })
+                        .count(),
+                )
+                .unwrap_or(i64::MAX)
+            })
+            .unwrap_or(0);
+        let min_replicas_target = self.storage_config.lock().unwrap().min_replicas.max(0);
+        let desired_synced_replicas = working_contracts.max(min_replicas_target);
+        let predicted_replica_horizon = current_content_id
+            .as_ref()
+            .map(|current_content_id| {
+                snapshot
+                    .tracked_peers
+                    .iter()
+                    .filter(|peer| peer.our_content_last_verified_content_id == *current_content_id)
+                    .map(|peer| {
+                        if peer.pins_us {
+                            None
+                        } else {
+                            Some(peer.score_seconds.max(0))
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        Ok(Some(clirpc::StateLocalSummary {
+            content: Some(clirpc::StateContentSummary {
+                file_count: snapshot.file_count,
+                total_size_bytes: snapshot.total_file_bytes,
+                last_updated_at: snapshot
+                    .current_content
+                    .as_ref()
+                    .map(|content| {
+                        i64::try_from(content.revision.created_at_secs).unwrap_or(i64::MAX)
+                    })
+                    .unwrap_or_default(),
+                last_updated_at_ns: snapshot
+                    .current_content
+                    .as_ref()
+                    .map(|content| {
+                        i32::try_from(content.revision.created_at_nanos).unwrap_or(i32::MAX)
+                    })
+                    .unwrap_or_default(),
+                has_pending_update: snapshot.current_content.is_some()
+                    && storing_latest_our_data < desired_synced_replicas,
+            }),
+            peers: Some(clirpc::StatePeerSummary {
+                total_known,
+                connected,
+                storing_our_data,
+                storing_latest_our_data,
+                working_contracts,
+                mean_working_contract_score_seconds: mean_score_seconds(&working_contract_scores),
+                mirrored_peers,
+                mirrored_total_size_bytes,
+            }),
+            durability: Some(clirpc::StateDurabilitySummary {
+                predicted_fresh_replicas_now: i64::try_from(predicted_replica_horizon.len())
+                    .unwrap_or(i64::MAX),
+                predicted_min_replicas_target: min_replicas_target,
+                predicted_replica_horizon: replica_horizon_points(&predicted_replica_horizon),
+            }),
+        }))
     }
 
     /// Report whether our current local content matches the peer's advertised
@@ -4038,6 +4205,7 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
             peer_runtime_error: String::new(),
             self_peer_check_state: clirpc::SelfPeerCheckState::Unknown as i32,
             self_peer_check_error: String::new(),
+            local_summary: self.node.local_state_summary()?,
         }))
     }
 
@@ -5511,6 +5679,168 @@ mod tests {
         assert!(second.uptime_seconds >= first.uptime_seconds);
 
         server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_state_reports_local_content_and_peer_summary() -> anyhow::Result<()> {
+        let owner_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let peer_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner = Arc::new(Node::with_local_storage_and_clock(
+            "state-summary-owner",
+            owner_filesystem,
+            owner_clock.clone(),
+        )?);
+        let peer = Arc::new(Node::with_local_storage_and_clock(
+            "state-summary-peer",
+            peer_filesystem,
+            peer_clock,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        owner.set_peer_connector(connector.clone());
+        peer.set_peer_connector(connector.clone());
+        owner.add_known_peer(peer.address())?;
+        peer.add_known_peer(owner.address())?;
+        *owner.storage_config.lock().unwrap() = clirpc::StorageConfig {
+            allocated_storage_for_peers: DEFAULT_ALLOCATED_STORAGE_FOR_PEERS,
+            min_replicas: 1,
+        };
+
+        CliService::new(owner.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"owner-data".to_vec(),
+                }),
+            }))
+            .await?;
+        CliService::new(peer.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "beta.txt".to_string(),
+                    data: b"peer-data".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let owner_server = spawn_registered_p2p_server(owner.clone(), connector.as_ref()).await?;
+        let peer_server = spawn_registered_p2p_server(peer.clone(), connector.as_ref()).await?;
+        owner.propose_contract_updates(peer.address()).await?;
+        owner.check_contract_updates(peer.address()).await?;
+        owner_clock.advance(Duration::from_secs(3_600));
+        owner.check_contract_updates(peer.address()).await?;
+
+        let summary = owner
+            .local_state_summary()?
+            .ok_or_else(|| anyhow::anyhow!("missing local state summary"))?;
+        let content = summary
+            .content
+            .ok_or_else(|| anyhow::anyhow!("missing local content summary"))?;
+        let peers = summary
+            .peers
+            .ok_or_else(|| anyhow::anyhow!("missing local peer summary"))?;
+        let durability = summary
+            .durability
+            .ok_or_else(|| anyhow::anyhow!("missing local durability summary"))?;
+
+        assert_eq!(content.file_count, 1);
+        assert_eq!(content.total_size_bytes, 10);
+        assert_eq!(content.last_updated_at, 100);
+        assert_eq!(content.last_updated_at_ns, 0);
+        assert!(!content.has_pending_update);
+
+        assert_eq!(peers.total_known, 1);
+        assert_eq!(peers.connected, 1);
+        assert_eq!(peers.storing_our_data, 1);
+        assert_eq!(peers.storing_latest_our_data, 1);
+        assert_eq!(peers.working_contracts, 1);
+        assert_eq!(peers.mean_working_contract_score_seconds, 3_600);
+        assert_eq!(peers.mirrored_peers, 1);
+        assert!(peers.mirrored_total_size_bytes > 0);
+
+        assert_eq!(durability.predicted_fresh_replicas_now, 1);
+        assert_eq!(durability.predicted_min_replicas_target, 1);
+        assert_eq!(
+            durability.predicted_replica_horizon,
+            vec![clirpc::ReplicaHorizonPoint {
+                remaining_fresh_replicas: 0,
+                seconds_until_threshold: 3_600,
+                never: false,
+            }]
+        );
+
+        owner_server.abort();
+        peer_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_state_marks_pending_update_after_local_change() -> anyhow::Result<()> {
+        let owner_clock = Arc::new(ManualClock::new(Timestamp::new(200, 0).unwrap()));
+        let peer_clock = Arc::new(ManualClock::new(Timestamp::new(200, 0).unwrap()));
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner = Arc::new(Node::with_local_storage_and_clock(
+            "state-pending-owner",
+            owner_filesystem,
+            owner_clock.clone(),
+        )?);
+        let peer = Arc::new(Node::with_local_storage_and_clock(
+            "state-pending-peer",
+            peer_filesystem,
+            peer_clock,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        owner.set_peer_connector(connector.clone());
+        peer.set_peer_connector(connector.clone());
+        owner.add_known_peer(peer.address())?;
+        peer.add_known_peer(owner.address())?;
+
+        CliService::new(owner.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"owner-v1".to_vec(),
+                }),
+            }))
+            .await?;
+        let owner_server = spawn_registered_p2p_server(owner.clone(), connector.as_ref()).await?;
+        let peer_server = spawn_registered_p2p_server(peer.clone(), connector.as_ref()).await?;
+        owner.propose_contract_updates(peer.address()).await?;
+        owner.check_contract_updates(peer.address()).await?;
+        owner_server.abort();
+        peer_server.abort();
+
+        owner_clock.advance(Duration::from_secs(1));
+        CliService::new(owner.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"owner-v2".to_vec(),
+                }),
+            }))
+            .await?;
+
+        let summary = owner
+            .local_state_summary()?
+            .ok_or_else(|| anyhow::anyhow!("missing local state summary"))?;
+        let content = summary
+            .content
+            .ok_or_else(|| anyhow::anyhow!("missing local content summary"))?;
+        let peers = summary
+            .peers
+            .ok_or_else(|| anyhow::anyhow!("missing local peer summary"))?;
+        let durability = summary
+            .durability
+            .ok_or_else(|| anyhow::anyhow!("missing local durability summary"))?;
+
+        assert!(content.has_pending_update);
+        assert_eq!(peers.storing_our_data, 1);
+        assert_eq!(peers.storing_latest_our_data, 0);
+        assert_eq!(durability.predicted_fresh_replicas_now, 0);
+        assert!(durability.predicted_replica_horizon.is_empty());
         Ok(())
     }
 

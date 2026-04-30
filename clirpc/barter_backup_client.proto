@@ -220,6 +220,92 @@ enum SelfPeerCheckState
     SELF_PEER_CHECK_STATE_UNHEALTHY = 2;
 }
 
+// StateContentSummary reports locally available content information without
+// probing peers live over the network.
+message StateContentSummary {
+    // file_count is the number of logical user files in the active revision.
+    int64 file_count = 1;
+
+    // total_size_bytes is the total plaintext size of all logical user files.
+    int64 total_size_bytes = 2;
+
+    // last_updated_at is the Unix timestamp (seconds) of the active revision.
+    int64 last_updated_at = 3;
+
+    // last_updated_at_ns is the nanosecond component of last_updated_at.
+    int32 last_updated_at_ns = 4;
+
+    // has_pending_update reports whether local state predicts that the latest
+    // revision still needs background propagation or verification.
+    bool has_pending_update = 5;
+}
+
+// StatePeerSummary reports locally persisted peer counts and mirrored storage
+// without probing peers live over the network.
+message StatePeerSummary {
+    // total_known is the number of peers in the current local inventory.
+    int64 total_known = 1;
+
+    // connected is the number of peers with a currently cached outbound
+    // transport client.
+    int64 connected = 2;
+
+    // storing_our_data is the number of peers that most recently passed a
+    // contract check for any of our revisions.
+    int64 storing_our_data = 3;
+
+    // storing_latest_our_data is the number of peers that most recently
+    // passed a contract check for the active local revision.
+    int64 storing_latest_our_data = 4;
+
+    // working_contracts is the number of peers whose persisted metadata
+    // indicates an active contract relationship.
+    int64 working_contracts = 5;
+
+    // mean_working_contract_score_seconds is the arithmetic mean score across
+    // peers whose persisted metadata indicates an active contract
+    // relationship.
+    int64 mean_working_contract_score_seconds = 6;
+
+    // mirrored_peers is the number of peers whose content we currently cache
+    // locally.
+    int64 mirrored_peers = 7;
+
+    // mirrored_total_size_bytes is the deduplicated total size of locally
+    // cached peer content blobs.
+    int64 mirrored_total_size_bytes = 8;
+}
+
+// StateDurabilitySummary reports the locally predicted durability of the
+// active revision if the local node went offline immediately.
+message StateDurabilitySummary {
+    // predicted_fresh_replicas_now is the number of peers that locally
+    // persisted metadata says currently hold the active revision.
+    int64 predicted_fresh_replicas_now = 1;
+
+    // predicted_min_replicas_target is the configured minimum fresh replica
+    // target from the local storage policy.
+    int64 predicted_min_replicas_target = 2;
+
+    // predicted_replica_horizon contains the local score-based durability
+    // prediction for the active revision.
+    repeated ReplicaHorizonPoint predicted_replica_horizon = 3;
+}
+
+// StateLocalSummary groups all local-only state data that can be reported
+// immediately without probing peers live over the network.
+message StateLocalSummary {
+    // content summarizes the active local content revision.
+    StateContentSummary content = 1;
+
+    // peers summarizes the local peer inventory and mirrored storage.
+    StatePeerSummary peers = 2;
+
+    // durability summarizes the locally predicted durability of the active
+    // local content revision.
+    StateDurabilitySummary durability = 3;
+}
+
 // StateResponse returns local daemon status information.
 message StateResponse {
     // storage_initialized reports whether the daemon data directory already
@@ -246,6 +332,10 @@ message StateResponse {
 
     // self_peer_check_error contains the latest self-check failure, if any.
     string self_peer_check_error = 6;
+
+    // local_summary contains local-only data that can be reported immediately
+    // without probing peers live over the network.
+    StateLocalSummary local_summary = 8;
 }
 
 message InitRequest {

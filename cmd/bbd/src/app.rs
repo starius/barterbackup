@@ -1119,6 +1119,7 @@ impl BarterBackupClient for DaemonService {
             peer_runtime_error,
             self_peer_check_state,
             self_peer_check_error,
+            local_summary,
         ) = {
             let node_state = self.node_state.lock().await;
             match &*node_state {
@@ -1128,6 +1129,7 @@ impl BarterBackupClient for DaemonService {
                     String::new(),
                     clirpc::SelfPeerCheckState::Unknown as i32,
                     String::new(),
+                    None,
                 ),
                 DaemonNodeState::Unlocked(unlocked) => {
                     let (peer_runtime, self_check) = unlocked.peer_runtime.snapshot();
@@ -1140,6 +1142,7 @@ impl BarterBackupClient for DaemonService {
                         peer_runtime_error,
                         self_peer_check_state,
                         self_peer_check_error,
+                        unlocked.node.local_state_summary()?,
                     )
                 }
             }
@@ -1156,6 +1159,7 @@ impl BarterBackupClient for DaemonService {
             peer_runtime_error,
             self_peer_check_state,
             self_peer_check_error,
+            local_summary,
         }))
     }
 
@@ -4060,6 +4064,7 @@ mod tests {
             locked.self_peer_check_state,
             clirpc::SelfPeerCheckState::Unknown as i32
         );
+        assert!(locked.local_summary.is_none());
 
         init_and_unlock_service(&service, "password").await?;
         let unlocked = service
@@ -4068,6 +4073,7 @@ mod tests {
             .into_inner();
         assert!(unlocked.storage_initialized);
         assert!(!unlocked.server_onion.is_empty());
+        assert!(unlocked.local_summary.is_some());
         assert!(matches!(
             clirpc::PeerRuntimeState::try_from(unlocked.peer_runtime_state),
             Ok(clirpc::PeerRuntimeState::Starting | clirpc::PeerRuntimeState::Ready)

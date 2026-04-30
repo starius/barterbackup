@@ -393,6 +393,18 @@ impl Store {
         self.files.keys().cloned().collect()
     }
 
+    /// Return the number of logical user files in the active revision.
+    pub fn file_count(&self) -> i64 {
+        i64::try_from(self.files.len()).unwrap_or(i64::MAX)
+    }
+
+    /// Return the total plaintext size of all logical user files.
+    pub fn total_file_bytes(&self) -> i64 {
+        self.files.values().fold(0i64, |total, data| {
+            total.saturating_add(i64::try_from(data.len()).unwrap_or(i64::MAX))
+        })
+    }
+
     /// Read a plaintext file by name.
     pub fn get_file(&self, name: &str) -> Result<Vec<u8>, StorageError> {
         self.files
