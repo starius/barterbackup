@@ -1654,17 +1654,89 @@ async fn propose_contract(target: &LocalCliTarget, onion_service_id: &str) -> Re
 /// Print the streamed updates for one contract check.
 async fn check_contract(target: &LocalCliTarget, onion_service_id: &str) -> Result<()> {
     let mut client = connect_client(target).await?;
-    for update in check_contract_with_client(&mut client, onion_service_id).await? {
-        println!(
-            "state={} success={} our_content_length={} our_content_section_offset={} our_content_section_length={}",
-            update.state,
-            update.success,
-            update.our_content_length,
-            update.our_content_section_offset,
-            update.our_content_section_length
-        );
+    let started_at = Instant::now();
+    let updates = check_contract_with_client(&mut client, onion_service_id).await?;
+    for line in format_check_contract_updates(onion_service_id, &updates, started_at.elapsed())? {
+        println!("{line}");
     }
     Ok(())
+}
+
+/// Format one contract-check outcome for operator-facing CLI output.
+fn format_check_contract_updates(
+    onion_service_id: &str,
+    updates: &[protos::clirpc::CheckContractUpdate],
+    elapsed: Duration,
+) -> Result<Vec<String>> {
+    let final_update = updates
+        .last()
+        .context("contract check returned no updates")?;
+    let final_state = protos::clirpc::ContractState::try_from(final_update.state)
+        .unwrap_or(protos::clirpc::ContractState::NotStarted);
+    let mut lines = vec![
+        format!(
+            "contract check: {}",
+            if final_update.success {
+                "passed"
+            } else {
+                "failed"
+            }
+        ),
+        format!("peer: {onion_service_id}"),
+        format!(
+            "elapsed: {} ms",
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        ),
+    ];
+
+    if !final_update.success {
+        lines.push(format!(
+            "reason: {}",
+            check_contract_failure_reason(final_state)
+        ));
+    }
+
+    if final_update.our_content_length > 0 {
+        lines.push(format!(
+            "checked content: {} bytes",
+            final_update.our_content_length
+        ));
+    } else if final_update.success {
+        lines.push("local content: none".to_string());
+    }
+
+    if final_update.our_content_section_length > 0 {
+        lines.push(format!(
+            "sampled content: {} bytes",
+            final_update.our_content_section_length
+        ));
+    }
+
+    Ok(lines)
+}
+
+/// Render one operator-facing reason for a failed contract check.
+fn check_contract_failure_reason(state: protos::clirpc::ContractState) -> &'static str {
+    match state {
+        protos::clirpc::ContractState::PeerUnavailable => {
+            "peer was unavailable before the retry budget expired"
+        }
+        protos::clirpc::ContractState::OurContentRevisionMissing => {
+            "peer is missing the latest local revision"
+        }
+        protos::clirpc::ContractState::InvalidContentReturned => {
+            "peer returned invalid content for the sampled verification"
+        }
+        protos::clirpc::ContractState::PeerRefused => "peer refused the contract",
+        protos::clirpc::ContractState::ConnectingToPeer
+        | protos::clirpc::ContractState::CheckingContents
+        | protos::clirpc::ContractState::Completed
+        | protos::clirpc::ContractState::NotStarted
+        | protos::clirpc::ContractState::ProposingContract
+        | protos::clirpc::ContractState::SyncingContents => {
+            "contract check did not complete successfully"
+        }
+    }
 }
 
 /// Print the streamed updates for one recovery pass.
@@ -2577,6 +2649,86 @@ mod tests {
         assert!(lines.iter().any(|line| {
             line == "predicted_replica_horizon remaining_fresh_replicas=0 seconds_until_threshold=3600 never=false"
         }));
+    }
+
+    #[test]
+    fn format_check_contract_updates_renders_success_with_sample() {
+        let lines = format_check_contract_updates(
+            "peer.onion",
+            &[protos::clirpc::CheckContractUpdate {
+                state: protos::clirpc::ContractState::Completed as i32,
+                success: true,
+                our_content_length: 8192,
+                our_content_section_offset: 1024,
+                our_content_section_length: 4096,
+            }],
+            Duration::from_millis(1250),
+        )
+        .unwrap();
+
+        assert_eq!(
+            lines,
+            vec![
+                "contract check: passed".to_string(),
+                "peer: peer.onion".to_string(),
+                "elapsed: 1250 ms".to_string(),
+                "checked content: 8192 bytes".to_string(),
+                "sampled content: 4096 bytes".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_check_contract_updates_renders_success_without_local_content() {
+        let lines = format_check_contract_updates(
+            "peer.onion",
+            &[protos::clirpc::CheckContractUpdate {
+                state: protos::clirpc::ContractState::Completed as i32,
+                success: true,
+                our_content_length: 0,
+                our_content_section_offset: 0,
+                our_content_section_length: 0,
+            }],
+            Duration::from_millis(12),
+        )
+        .unwrap();
+
+        assert_eq!(
+            lines,
+            vec![
+                "contract check: passed".to_string(),
+                "peer: peer.onion".to_string(),
+                "elapsed: 12 ms".to_string(),
+                "local content: none".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_check_contract_updates_renders_failure_reason() {
+        let lines = format_check_contract_updates(
+            "peer.onion",
+            &[protos::clirpc::CheckContractUpdate {
+                state: protos::clirpc::ContractState::PeerUnavailable as i32,
+                success: false,
+                our_content_length: 2048,
+                our_content_section_offset: 0,
+                our_content_section_length: 0,
+            }],
+            Duration::from_millis(750),
+        )
+        .unwrap();
+
+        assert_eq!(
+            lines,
+            vec![
+                "contract check: failed".to_string(),
+                "peer: peer.onion".to_string(),
+                "elapsed: 750 ms".to_string(),
+                "reason: peer was unavailable before the retry budget expired".to_string(),
+                "checked content: 2048 bytes".to_string(),
+            ]
+        );
     }
 
     #[test]
