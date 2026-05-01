@@ -143,46 +143,6 @@ message Peer {
     int64 our_content_last_verified_at = 14;
 }
 
-// ConflictRevision describes one locally stored revision involved in a
-// recovery conflict.
-message ConflictRevision {
-    // content_id is the encrypted revision identifier.
-    bytes content_id = 1;
-
-    // created_at is the Unix timestamp (seconds) encoded in the revision.
-    int64 created_at = 2;
-
-    // created_at_ns is the nanosecond component corresponding to created_at.
-    int64 created_at_ns = 3;
-
-    // content_length is the encrypted blob length in bytes.
-    int64 content_length = 4;
-
-    // file_count is the number of logical user files in the revision.
-    int64 file_count = 5;
-
-    // source_peer_onion is the peer from which the revision was downloaded,
-    // when applicable.
-    string source_peer_onion = 6;
-
-    // source_is_local reports whether the revision came from the local active
-    // state rather than from a peer download.
-    bool source_is_local = 7;
-
-    // resolved_at is the Unix timestamp (seconds) when the operator decided
-    // to archive this revision.
-    int64 resolved_at = 8;
-
-    // resolved_at_ns is the nanosecond component corresponding to resolved_at.
-    int64 resolved_at_ns = 9;
-}
-
-// ActiveConflict is the unresolved set of conflicting revisions.
-message ActiveConflict {
-    // revisions is the set of locally stored revisions awaiting resolution.
-    repeated ConflictRevision revisions = 1;
-}
-
 // RecoveredRevision records one authenticated older-lineage revision that was
 // already merged into the local file set.
 message RecoveredRevision {
@@ -213,13 +173,6 @@ message Metadata {
     //   uploads promptly.
     repeated Peer peers = 2;
 
-    // active_conflict is the unresolved local recovery conflict, if any.
-    ActiveConflict active_conflict = 3;
-
-    // archived_conflicts are the non-selected revisions kept forever after a
-    // conflict was resolved.
-    repeated ConflictRevision archived_conflicts = 4;
-
     // node_initialized_at is the local node-generation boundary recorded
     // when `bbcli init` succeeded.
     int64 node_initialized_at = 5;
@@ -244,4 +197,9 @@ message Metadata {
     // recovery_mode_enabled blocks owner-originated publication until the
     // operator explicitly finishes recovery mode.
     bool recovery_mode_enabled = 10;
+
+    // current_content is the active local revision summary persisted in the
+    // sidecar so the node can restore that exact blob after a restart if the
+    // local encrypted blob file is missing.
+    PeerContent current_content = 11;
 }

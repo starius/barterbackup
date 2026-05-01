@@ -79,12 +79,21 @@ func (n *Node) State(ctx context.Context) (*clirpc.StateResponse, error) {
 
 // Init initializes the node's storage with its configured password.
 func (n *Node) Init(ctx context.Context) error {
+	return n.InitWithRecoveryMode(ctx, false)
+}
+
+// InitWithRecoveryMode initializes the node and optionally keeps publication
+// disabled until recovery is finished.
+func (n *Node) InitWithRecoveryMode(ctx context.Context, recoveryMode bool) error {
 	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	_, err = client.Init(ctx, &clirpc.InitRequest{MainPassword: n.password})
+	_, err = client.Init(ctx, &clirpc.InitRequest{
+		MainPassword: n.password,
+		RecoveryMode: recoveryMode,
+	})
 	if err != nil {
 		return fmt.Errorf("init %s: %w", n.name, err)
 	}
@@ -542,14 +551,15 @@ func (n *Node) CheckContractUntilSuccess(ctx context.Context, peerOnion string) 
 	}
 }
 
-// RecoverContentUntilRecovered retries recovery until one update reports success.
-func (n *Node) RecoverContentUntilRecovered(ctx context.Context) (*clirpc.RecoverContentUpdate, error) {
+// RecoverContentUntilApplied retries recovery until one update merges at least
+// one older-lineage revision locally.
+func (n *Node) RecoverContentUntilApplied(ctx context.Context) (*clirpc.RecoverContentUpdate, error) {
 	deadline, cancel := context.WithTimeout(ctx, defaultLongTimeout)
 	defer cancel()
 
 	for {
 		update, err := n.recoverContentOnce(deadline)
-		if err == nil && update.RecoveredMostRecentVersion {
+		if err == nil && update.GetAppliedVersions() > 0 {
 			return update, nil
 		}
 		if err := ctxErr(deadline); err != nil {
@@ -564,83 +574,17 @@ func (n *Node) RecoverContentOnce(ctx context.Context) (*clirpc.RecoverContentUp
 	return n.recoverContentOnce(ctx)
 }
 
-// ListConflicts returns unresolved and archived conflict revisions.
-func (n *Node) ListConflicts(ctx context.Context) (*clirpc.ListConflictsResponse, error) {
-	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	response, err := client.ListConflicts(ctx, &clirpc.ListConflictsRequest{})
-	if err != nil {
-		return nil, fmt.Errorf("list conflicts on %s: %w", n.name, err)
-	}
-	return response, nil
-}
-
-// CheckoutRevision returns the plaintext file set for one conflicted or archived revision.
-func (n *Node) CheckoutRevision(
-	ctx context.Context,
-	contentID []byte,
-) (*clirpc.CheckoutRevisionResponse, error) {
-	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	stream, err := client.CheckoutRevisionStream(ctx, &clirpc.CheckoutRevisionRequest{
-		ContentId: contentID,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("checkout revision on %s: %w", n.name, err)
-	}
-	response := &clirpc.CheckoutRevisionResponse{}
-	var current *clirpc.File
-	for {
-		chunk, recvErr := stream.Recv()
-		if errors.Is(recvErr, io.EOF) {
-			break
-		}
-		if recvErr != nil {
-			return nil, fmt.Errorf("receive checked-out revision from %s: %w", n.name, recvErr)
-		}
-		switch typed := chunk.GetChunk().(type) {
-		case *clirpc.CheckoutRevisionChunk_File:
-			if current != nil {
-				response.File = append(response.File, current)
-			}
-			current = &clirpc.File{
-				Name:         typed.File.GetName(),
-				ModifiedAt:   typed.File.GetModifiedAt(),
-				ModifiedAtNs: typed.File.GetModifiedAtNs(),
-			}
-		case *clirpc.CheckoutRevisionChunk_Data:
-			if current == nil {
-				return nil, fmt.Errorf("checkout revision on %s sent data before metadata", n.name)
-			}
-			current.Data = append(current.Data, typed.Data...)
-		default:
-			return nil, fmt.Errorf("checkout revision on %s returned an empty chunk", n.name)
-		}
-	}
-	if current != nil {
-		response.File = append(response.File, current)
-	}
-	return response, nil
-}
-
-// ResolveConflict chooses which conflicted revision stays active.
-func (n *Node) ResolveConflict(ctx context.Context, contentID []byte) error {
+// FinishRecovery disables recovery mode and advances the recovery watermark to
+// the current generation boundary.
+func (n *Node) FinishRecovery(ctx context.Context) error {
 	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	_, err = client.ResolveConflict(ctx, &clirpc.ResolveConflictRequest{
-		ContentId: contentID,
-	})
+	_, err = client.FinishRecovery(ctx, &clirpc.FinishRecoveryRequest{})
 	if err != nil {
-		return fmt.Errorf("resolve conflict on %s: %w", n.name, err)
+		return fmt.Errorf("finish recovery on %s: %w", n.name, err)
 	}
 	return nil
 }

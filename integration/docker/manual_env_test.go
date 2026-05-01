@@ -138,7 +138,7 @@ func TestManualEnvRecreateAndRecover(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload owner node: %v", err)
 	}
-	initializeManualEnvNode(t, workRoot, envName, "owner", owner, "owner-password")
+	initializeManualEnvRecoveryNode(t, workRoot, envName, "owner", owner, "owner-password")
 	assertNoFiles(t, owner)
 	connectPeer(t, owner, peer1Onion)
 	connectPeer(t, owner, peer2Onion)
@@ -253,6 +253,29 @@ func initializeManualEnvNode(
 	node *harness.Node,
 	password string,
 ) string {
+	return initializeManualEnvNodeWithRecoveryMode(t, workRoot, envName, nodeName, node, password, false)
+}
+
+func initializeManualEnvRecoveryNode(
+	t *testing.T,
+	workRoot string,
+	envName string,
+	nodeName string,
+	node *harness.Node,
+	password string,
+) string {
+	return initializeManualEnvNodeWithRecoveryMode(t, workRoot, envName, nodeName, node, password, true)
+}
+
+func initializeManualEnvNodeWithRecoveryMode(
+	t *testing.T,
+	workRoot string,
+	envName string,
+	nodeName string,
+	node *harness.Node,
+	password string,
+	recoveryMode bool,
+) string {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
@@ -261,7 +284,11 @@ func initializeManualEnvNode(
 		t.Fatalf("wait for state on %s: %v", node.Name(), err)
 	}
 
-	runDevEnvCommand(t, workRoot, envName, "cli", nodeName, "--", "init", password)
+	if recoveryMode {
+		runDevEnvCommand(t, workRoot, envName, "cli", nodeName, "--", "init", "--recovery-mode", password)
+	} else {
+		runDevEnvCommand(t, workRoot, envName, "cli", nodeName, "--", "init", password)
+	}
 	runDevEnvCommand(t, workRoot, envName, "cli", nodeName, "--", "unlock", password)
 
 	state, err := node.WaitForReady(ctx)
@@ -281,19 +308,23 @@ func recoverManualEnvFileUntilPresent(
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
 	defer cancel()
 
-	if _, err := node.RecoverContentUntilRecovered(ctx); err != nil {
-		t.Fatalf("recover content on %s: %v", node.Name(), err)
-	}
-
-	response, err := node.ListFiles(ctx)
-	if err != nil {
-		t.Fatalf("list files on %s after recovery: %v", node.Name(), err)
-	}
-	for _, file := range response.GetFile() {
-		name := file.GetName()
-		if name == fileName {
-			return
+	deadline := time.Now().Add(harnessDefaultTimeout())
+	for {
+		if _, err := node.RecoverContentOnce(ctx); err != nil {
+			t.Fatalf("run one recovery pass on %s: %v", node.Name(), err)
 		}
+		response, err := node.ListFiles(ctx)
+		if err != nil {
+			t.Fatalf("list files on %s after recovery: %v", node.Name(), err)
+		}
+		for _, file := range response.GetFile() {
+			if file.GetName() == fileName {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("recovery on %s did not restore %s", node.Name(), fileName)
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
-	t.Fatalf("recovery on %s did not restore %s", node.Name(), fileName)
 }

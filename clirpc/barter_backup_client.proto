@@ -57,20 +57,6 @@ service BarterBackupClient {
     rpc ExportBuiltInPeers(ExportBuiltInPeersRequest)
         returns (ExportBuiltInPeersResponse);
 
-    // ListConflicts reports unresolved and archived conflicting revisions.
-    rpc ListConflicts(ListConflictsRequest) returns (ListConflictsResponse);
-
-    // CheckoutRevisionStream streams plaintext files for one conflicted or
-    // archived revision so the operator can inspect it locally without one
-    // large unary response.
-    rpc CheckoutRevisionStream(CheckoutRevisionRequest)
-        returns (stream CheckoutRevisionChunk);
-
-    // ResolveConflict chooses the revision that should stay active and archives
-    // the remaining conflicting revisions.
-    rpc ResolveConflict(ResolveConflictRequest)
-        returns (ResolveConflictResponse);
-
     // SetFileStream streams one plaintext file plus its modification time to
     // the daemon without relying on one large unary request.
     rpc SetFileStream(stream SetFileChunk) returns (SetFileResponse);
@@ -116,9 +102,7 @@ service BarterBackupClient {
     rpc CheckContract(CheckContractRequest)
         returns (stream CheckContractUpdate);
 
-    // RecoverContent triggers content recovery from peers. The daemon does
-    // it on its own after starting and in the background. This just triggers
-    // it. The stream works forever sending new recovery events.
+    // RecoverContent triggers one explicit older-lineage recovery pass.
     rpc RecoverContent(RecoverContentRequest)
         returns (stream RecoverContentUpdate);
 
@@ -536,75 +520,6 @@ message ExportBuiltInPeersResponse {
     string rust_source = 1;
 }
 
-message ListConflictsRequest {}
-
-message ConflictRevisionInfo {
-    // content_id is the encrypted revision identifier.
-    bytes content_id = 1;
-
-    // created_at is the Unix timestamp (seconds) encoded in the revision.
-    int64 created_at = 2;
-
-    // created_at_ns is the nanosecond component corresponding to created_at.
-    int64 created_at_ns = 3;
-
-    // content_length is the encrypted blob length in bytes.
-    int64 content_length = 4;
-
-    // file_count is the number of logical user files in the revision.
-    int64 file_count = 5;
-
-    // source_peer_onion is the peer from which the revision was downloaded.
-    string source_peer_onion = 6;
-
-    // source_is_local reports whether the revision came from the local active
-    // state rather than a peer download.
-    bool source_is_local = 7;
-
-    // unresolved is true while the revision still belongs to the active
-    // unresolved conflict set.
-    bool unresolved = 8;
-
-    // resolved_at is the Unix timestamp (seconds) when the operator chose a
-    // different revision and archived this one.
-    int64 resolved_at = 9;
-
-    // resolved_at_ns is the nanosecond component corresponding to resolved_at.
-    int64 resolved_at_ns = 10;
-}
-
-message ListConflictsResponse {
-    // revisions lists unresolved and archived conflicting revisions.
-    repeated ConflictRevisionInfo revisions = 1;
-}
-
-message CheckoutRevisionRequest {
-    // content_id identifies the revision to inspect.
-    bytes content_id = 1;
-}
-
-message CheckoutRevisionResponse {
-    // file contains the plaintext file set from the selected revision.
-    repeated File file = 1;
-}
-
-message CheckoutRevisionChunk {
-    oneof chunk {
-        // file starts one file inside the selected revision.
-        FileInfo file = 1;
-
-        // data carries one plaintext chunk of the current file.
-        bytes data = 2;
-    }
-}
-
-message ResolveConflictRequest {
-    // content_id identifies the revision that should stay active.
-    bytes content_id = 1;
-}
-
-message ResolveConflictResponse {}
-
 // File represents a single user-provided file that participates in forming
 // the current content blob.
 message File {
@@ -970,69 +885,72 @@ message CheckContractUpdate {
 // RecoverContentRequest triggers content recovery workflow.
 message RecoverContentRequest {}
 
-// RecoverContentUpdate reports recovery progress and events.
+// RecoverContentUpdate reports one automatic recovery pass and its result.
 message RecoverContentUpdate {
-    // most_recent_content_id is the content_id of the most recent version.
-    bytes most_recent_content_id = 1;
+    // total_versions_found is the number of unique requester revisions peers
+    // reported during this pass.
+    int64 total_versions_found = 1;
 
-    // most_recent_ts is the Unix timestamp (seconds) of the most recent
-    // revision.
-    int64 most_recent_ts = 2;
+    // peers_with_any_versions is the number of peers that reported any
+    // requester revision for this node identity.
+    int64 peers_with_any_versions = 2;
 
-    // most_recent_ts_ns is the nanosecond component corresponding to
-    // most_recent_ts.
-    int64 most_recent_ts_ns = 3;
+    // older_lineage_versions_found is the number of unique requester
+    // revisions whose authenticated timestamps fall inside the current
+    // older-lineage recovery window.
+    int64 older_lineage_versions_found = 3;
 
-    // most_recent_length is the byte length of the most recent version.
-    int64 most_recent_length = 4;
+    // older_lineage_recoverable_versions_found is the number of unique
+    // older-lineage requester revisions that at least one peer could still
+    // serve during this pass.
+    int64 older_lineage_recoverable_versions_found = 4;
 
-    // num_peers_with_most_recent_version is the number of peers that have the
-    // most recent version.
-    int64 num_peers_with_most_recent_version = 5;
+    // applied_versions is the number of older-lineage revisions that were
+    // actually merged into the local file set.
+    int64 applied_versions = 5;
 
-    // total_versions_found is the total number of content versions discovered.
-    int64 total_versions_found = 6;
+    // downloaded_bytes is the total number of encrypted bytes fetched from
+    // peers during this recovery pass.
+    int64 downloaded_bytes = 6;
 
-    // num_peers_with_any_versions is the number of peers that have any
-    // version of our content.
-    int64 num_peers_with_any_versions = 7;
+    // added_files is the number of recovered files added under their original
+    // names.
+    int64 added_files = 7;
 
-    // most_recent_downloaded_bytes is the number of bytes downloaded for the
-    // most recent version.
-    int64 most_recent_downloaded_bytes = 8;
+    // renamed_files is the number of recovered files added under recovered
+    // names because a local file with the same name had different content.
+    int64 renamed_files = 8;
 
-    // most_recent_downloaded_files is the number of files recovered for the
-    // most recent version.
-    int64 most_recent_downloaded_files = 9;
+    // unchanged_files is the number of recovered files skipped because the
+    // local file set already contained identical plaintext bytes.
+    int64 unchanged_files = 9;
 
-    // total_downloaded_bytes is the total number of bytes recovered.
-    int64 total_downloaded_bytes = 10;
+    // newest_found_content_id is the newest requester revision observed from
+    // any peer, whether or not it was older-lineage or downloadable.
+    bytes newest_found_content_id = 10;
 
-    // recovered_most_recent_version indicates whether the most recent version
-    // has been fully recovered.
-    bool recovered_most_recent_version = 11;
+    // newest_found_ts is the Unix timestamp (seconds) encoded in
+    // newest_found_content_id.
+    int64 newest_found_ts = 11;
 
-    // freshest_recoverable_content_id is the newest version that was actually
-    // available from at least one peer.
-    bytes freshest_recoverable_content_id = 12;
+    // newest_found_ts_ns is the nanosecond component corresponding to
+    // newest_found_ts.
+    int64 newest_found_ts_ns = 12;
 
-    // freshest_recoverable_ts is the Unix timestamp (seconds) of the newest
-    // version that was actually available to download.
-    int64 freshest_recoverable_ts = 13;
+    // latest_applied_content_id is the newest older-lineage revision that was
+    // merged locally during this pass.
+    bytes latest_applied_content_id = 13;
 
-    // freshest_recoverable_ts_ns is the nanosecond component corresponding to
-    // freshest_recoverable_ts.
-    int64 freshest_recoverable_ts_ns = 14;
+    // latest_applied_ts is the Unix timestamp (seconds) encoded in
+    // latest_applied_content_id.
+    int64 latest_applied_ts = 14;
 
-    // freshest_recoverable_length is the byte length of the newest version
-    // that was actually available to download.
-    int64 freshest_recoverable_length = 15;
+    // latest_applied_ts_ns is the nanosecond component corresponding to
+    // latest_applied_ts.
+    int64 latest_applied_ts_ns = 15;
 
-    // num_peers_with_freshest_recoverable_version is the number of peers that
-    // could actually serve the freshest recoverable version.
-    int64 num_peers_with_freshest_recoverable_version = 16;
-
-    // recovered_fallback_version indicates that recovery succeeded only by
-    // falling back from the newest known version to an older available one.
-    bool recovered_fallback_version = 17;
+    // publication_blocked_reason is non-empty when the recovered local state
+    // now exceeds the publication rules and the operator must delete some
+    // files before further uploads can resume.
+    string publication_blocked_reason = 16;
 }

@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::ErrorKind;
 use std::io::{self, IsTerminal, Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::string::ToString;
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,12 +18,12 @@ use dirs::home_dir;
 use futures_util::{stream, TryStreamExt};
 use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
 use protos::clirpc::{
-    CheckContractRequest, CheckoutRevisionRequest, ConnectPeerRequest, DeleteFileRequest,
-    ExportBuiltInPeersRequest, File, FileInfo, FinishRecoveryRequest, GetContractsRequest,
-    GetFileRequest, GetStorageConfigRequest, InitRequest, ListConflictsRequest, ListFilesRequest,
-    PeerInfo, PeerStatus, PeersRequest, PeersResponse, PinPeerRequest, ProposeContractRequest,
-    RecoverContentRequest, RecoverContentUpdate, ResolveConflictRequest, SetStorageConfigRequest,
-    StateRequest, StateResponse, StopRequest, StorageConfig, UnlockRequest, UnpinPeerRequest,
+    CheckContractRequest, ConnectPeerRequest, DeleteFileRequest, ExportBuiltInPeersRequest, File,
+    FileInfo, FinishRecoveryRequest, GetContractsRequest, GetFileRequest, GetStorageConfigRequest,
+    InitRequest, ListFilesRequest, PeerInfo, PeerStatus, PeersRequest, PeersResponse,
+    PinPeerRequest, ProposeContractRequest, RecoverContentRequest, RecoverContentUpdate,
+    SetStorageConfigRequest, StateRequest, StateResponse, StopRequest, StorageConfig,
+    UnlockRequest, UnpinPeerRequest,
 };
 use tlsutil::{connect_pinned_channel, read_keys};
 use tokio::time::sleep;
@@ -306,29 +306,11 @@ enum ContractCommand {
 /// RecoveryCommand is one `bbcli recovery` subcommand.
 #[derive(Subcommand, Debug)]
 enum RecoveryCommand {
-    /// Recover the newest known local content version from peers.
+    /// Recover older requester revisions from peers and merge them locally.
     Run,
 
     /// Finish recovery mode and allow publication from the current generation.
     Finish,
-
-    /// List unresolved and archived conflicting revisions.
-    Conflicts,
-
-    /// Write one conflicting or archived revision to a local directory.
-    Checkout {
-        /// content_id is the hex-encoded revision identifier.
-        content_id: String,
-
-        /// out_dir is the local directory that receives the plaintext files.
-        out_dir: PathBuf,
-    },
-
-    /// Choose the conflicting revision that should stay active.
-    Resolve {
-        /// content_id is the hex-encoded revision identifier to keep active.
-        content_id: String,
-    },
 }
 
 /// ConfigCommand is one `bbcli config` subcommand.
@@ -542,12 +524,6 @@ async fn run_parsed(args: Args) -> Result<()> {
         Command::Recovery { cmd } => match cmd {
             RecoveryCommand::Run => recover_content(&target).await,
             RecoveryCommand::Finish => finish_recovery(&target).await,
-            RecoveryCommand::Conflicts => list_conflicts(&target).await,
-            RecoveryCommand::Checkout {
-                content_id,
-                out_dir,
-            } => checkout_revision(&target, &content_id, &out_dir).await,
-            RecoveryCommand::Resolve { content_id } => resolve_conflict(&target, &content_id).await,
         },
         Command::Config { cmd } => match cmd {
             ConfigCommand::Get {
@@ -626,11 +602,6 @@ fn read_password_from_reader(reader: &mut impl Read) -> Result<String> {
         .read_to_string(&mut password)
         .context("read password")?;
     normalize_main_password(password)
-}
-
-/// Decode one hex-encoded revision identifier.
-fn decode_content_id_hex(content_id: &str) -> Result<Vec<u8>> {
-    hex::decode(content_id).context("decode hex content id")
 }
 
 /// Prompt for a password on a real terminal while masking input with `*`.
@@ -1312,64 +1283,6 @@ async fn export_built_in_peers(target: &LocalCliTarget) -> Result<()> {
     Ok(())
 }
 
-/// Print the unresolved and archived conflict revisions.
-async fn list_conflicts(target: &LocalCliTarget) -> Result<()> {
-    let mut client = connect_client(target).await?;
-    let response = list_conflicts_with_client(&mut client).await?;
-    for revision in response.revisions {
-        println!(
-            "content_id={} unresolved={} created_at={}.{:09} content_length={} file_count={} source_peer={} source_is_local={} resolved_at={}.{:09}",
-            hex::encode(revision.content_id),
-            revision.unresolved,
-            revision.created_at,
-            revision.created_at_ns,
-            revision.content_length,
-            revision.file_count,
-            revision.source_peer_onion,
-            revision.source_is_local,
-            revision.resolved_at,
-            revision.resolved_at_ns
-        );
-    }
-    Ok(())
-}
-
-/// Write one conflicted or archived revision to a local directory.
-async fn checkout_revision(
-    target: &LocalCliTarget,
-    content_id: &str,
-    out_dir: &Path,
-) -> Result<()> {
-    let content_id = decode_content_id_hex(content_id)?;
-    let mut client = connect_client(target).await?;
-    let response = checkout_revision_with_client(&mut client, &content_id).await?;
-    fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
-    for file in response {
-        let target = checked_checkout_target(out_dir, &file.name)?;
-        fs::write(&target, &file.data).with_context(|| format!("write {}", target.display()))?;
-    }
-    Ok(())
-}
-
-/// Build one safe local checkout path for a revision file.
-fn checked_checkout_target(out_dir: &Path, file_name: &str) -> Result<PathBuf> {
-    let path = Path::new(file_name);
-    if path.components().count() != 1
-        || !matches!(path.components().next(), Some(Component::Normal(_)))
-    {
-        bail!("refusing to write unsafe revision file name `{file_name}`");
-    }
-
-    Ok(out_dir.join(path))
-}
-
-/// Resolve the active conflict and keep one revision active.
-async fn resolve_conflict(target: &LocalCliTarget, content_id: &str) -> Result<()> {
-    let content_id = decode_content_id_hex(content_id)?;
-    let mut client = connect_client(target).await?;
-    resolve_conflict_with_client(&mut client, &content_id).await
-}
-
 /// Update the storage policy.
 async fn set_storage_config(
     target: &LocalCliTarget,
@@ -1913,114 +1826,73 @@ fn write_recovery_summary(writer: &mut impl Write, update: &RecoverContentUpdate
         bail!("recovery found no content versions on any known peer");
     }
 
-    if update.recovered_most_recent_version {
-        writeln!(writer, "recovery: recovered the most recent version")
-            .context("write recovery summary")?;
-        writeln!(writer, "versions_found: {}", update.total_versions_found)
-            .context("write recovery summary")?;
-        writeln!(
-            writer,
-            "peers_with_most_recent_version: {}",
-            update.num_peers_with_most_recent_version
-        )
-        .context("write recovery summary")?;
-        writeln!(
-            writer,
-            "peers_with_any_versions: {}",
-            update.num_peers_with_any_versions
-        )
-        .context("write recovery summary")?;
-        writeln!(
-            writer,
-            "downloaded_files: {}",
-            update.most_recent_downloaded_files
-        )
-        .context("write recovery summary")?;
-        writeln!(
-            writer,
-            "downloaded_bytes: {}",
-            update.total_downloaded_bytes
-        )
-        .context("write recovery summary")?;
-        return Ok(());
-    }
-
-    if update.recovered_fallback_version {
-        writeln!(
-            writer,
-            "recovery: recovered the newest available fallback version"
-        )
-        .context("write recovery summary")?;
-        writeln!(writer, "versions_found: {}", update.total_versions_found)
-            .context("write recovery summary")?;
-        writeln!(
-            writer,
-            "peers_with_most_recent_version: {}",
-            update.num_peers_with_most_recent_version
-        )
-        .context("write recovery summary")?;
-        writeln!(
-            writer,
-            "peers_with_fallback_version: {}",
-            update.num_peers_with_freshest_recoverable_version
-        )
-        .context("write recovery summary")?;
-        writeln!(
-            writer,
-            "peers_with_any_versions: {}",
-            update.num_peers_with_any_versions
-        )
-        .context("write recovery summary")?;
-        writeln!(
-            writer,
-            "downloaded_files: {}",
-            update.most_recent_downloaded_files
-        )
-        .context("write recovery summary")?;
-        writeln!(
-            writer,
-            "downloaded_bytes: {}",
-            update.total_downloaded_bytes
-        )
-        .context("write recovery summary")?;
-        return Ok(());
-    }
-
-    if update.freshest_recoverable_length <= 0
-        || update.num_peers_with_freshest_recoverable_version <= 0
-    {
-        bail!(
-            "recovery found {} content version(s) on known peers, but none were recoverable",
-            update.total_versions_found
-        );
-    }
-
-    writeln!(writer, "recovery: no peer revision was applied").context("write recovery summary")?;
+    let headline = if update.applied_versions > 0 {
+        "recovery: merged older-lineage revisions into the local file set"
+    } else if update.older_lineage_versions_found <= 0 {
+        "recovery: no older-lineage revisions were needed"
+    } else if update.older_lineage_recoverable_versions_found <= 0 {
+        "recovery: found older-lineage revisions, but none were still stored by peers"
+    } else {
+        "recovery: found older-lineage revisions, but none were merged"
+    };
+    writeln!(writer, "{headline}").context("write recovery summary")?;
     writeln!(writer, "versions_found: {}", update.total_versions_found)
         .context("write recovery summary")?;
     writeln!(
         writer,
-        "peers_with_recoverable_version: {}",
-        update.num_peers_with_freshest_recoverable_version
-    )
-    .context("write recovery summary")?;
-    writeln!(
-        writer,
         "peers_with_any_versions: {}",
-        update.num_peers_with_any_versions
+        update.peers_with_any_versions
     )
     .context("write recovery summary")?;
     writeln!(
         writer,
-        "downloaded_bytes: {}",
-        update.total_downloaded_bytes
+        "older_lineage_versions_found: {}",
+        update.older_lineage_versions_found
     )
     .context("write recovery summary")?;
     writeln!(
         writer,
-        "hint: local content may already be newer, or conflicting revisions may need manual resolution with `bbcli recovery conflicts`"
+        "older_lineage_recoverable_versions_found: {}",
+        update.older_lineage_recoverable_versions_found
     )
     .context("write recovery summary")?;
+    writeln!(writer, "applied_versions: {}", update.applied_versions)
+        .context("write recovery summary")?;
+    writeln!(writer, "downloaded_bytes: {}", update.downloaded_bytes)
+        .context("write recovery summary")?;
+    writeln!(writer, "added_files: {}", update.added_files).context("write recovery summary")?;
+    writeln!(writer, "renamed_files: {}", update.renamed_files)
+        .context("write recovery summary")?;
+    writeln!(writer, "unchanged_files: {}", update.unchanged_files)
+        .context("write recovery summary")?;
+    if !update.newest_found_content_id.is_empty() {
+        writeln!(
+            writer,
+            "newest_found: {} @ {}.{:09}",
+            hex::encode(&update.newest_found_content_id),
+            update.newest_found_ts,
+            update.newest_found_ts_ns,
+        )
+        .context("write recovery summary")?;
+    }
+    if !update.latest_applied_content_id.is_empty() {
+        writeln!(
+            writer,
+            "latest_applied: {} @ {}.{:09}",
+            hex::encode(&update.latest_applied_content_id),
+            update.latest_applied_ts,
+            update.latest_applied_ts_ns,
+        )
+        .context("write recovery summary")?;
+    }
+    if !update.publication_blocked_reason.is_empty() {
+        writeln!(
+            writer,
+            "publication_blocked_reason: {}",
+            update.publication_blocked_reason
+        )
+        .context("write recovery summary")?;
+    }
     Ok(())
 }
 
@@ -2532,67 +2404,6 @@ pub async fn export_built_in_peers_with_client(
         .await?
         .into_inner()
         .rust_source)
-}
-
-/// List unresolved and archived conflicting revisions.
-pub async fn list_conflicts_with_client(
-    client: &mut BarterBackupClientClient<Channel>,
-) -> Result<protos::clirpc::ListConflictsResponse> {
-    Ok(client
-        .list_conflicts(ListConflictsRequest {})
-        .await?
-        .into_inner())
-}
-
-/// Fetch one conflicting or archived revision through an existing client.
-pub async fn checkout_revision_with_client(
-    client: &mut BarterBackupClientClient<Channel>,
-    content_id: &[u8],
-) -> Result<Vec<File>> {
-    let mut stream = client
-        .checkout_revision_stream(CheckoutRevisionRequest {
-            content_id: content_id.to_vec(),
-        })
-        .await?
-        .into_inner();
-    let mut files = Vec::new();
-    let mut current = None;
-    while let Some(chunk) = stream.message().await? {
-        match chunk
-            .chunk
-            .context("daemon returned an empty checkout chunk")?
-        {
-            protos::clirpc::checkout_revision_chunk::Chunk::File(info) => {
-                if let Some(file) = current.take() {
-                    files.push(finish_streamed_file(file)?);
-                }
-                current = Some(start_streamed_file(info)?);
-            }
-            protos::clirpc::checkout_revision_chunk::Chunk::Data(data) => {
-                let current_file = current
-                    .as_mut()
-                    .context("daemon sent checkout data before file metadata")?;
-                current_file.file.data.extend_from_slice(&data);
-            }
-        }
-    }
-    if let Some(file) = current.take() {
-        files.push(finish_streamed_file(file)?);
-    }
-    Ok(files)
-}
-
-/// Resolve the active conflict through an existing client.
-pub async fn resolve_conflict_with_client(
-    client: &mut BarterBackupClientClient<Channel>,
-    content_id: &[u8],
-) -> Result<()> {
-    client
-        .resolve_conflict(ResolveConflictRequest {
-            content_id: content_id.to_vec(),
-        })
-        .await?;
-    Ok(())
 }
 
 /// Update storage policy through an already connected client.
@@ -3171,17 +2982,26 @@ mod tests {
     }
 
     #[test]
-    fn write_recovery_summary_formats_most_recent_success() {
+    fn write_recovery_summary_formats_applied_recovery() {
         let mut output = Vec::new();
         write_recovery_summary(
             &mut output,
             &RecoverContentUpdate {
                 total_versions_found: 2,
-                num_peers_with_most_recent_version: 1,
-                num_peers_with_any_versions: 2,
-                most_recent_downloaded_files: 3,
-                total_downloaded_bytes: 4096,
-                recovered_most_recent_version: true,
+                peers_with_any_versions: 2,
+                older_lineage_versions_found: 2,
+                older_lineage_recoverable_versions_found: 1,
+                applied_versions: 1,
+                downloaded_bytes: 4096,
+                added_files: 1,
+                renamed_files: 1,
+                unchanged_files: 1,
+                newest_found_content_id: vec![0x22; 4],
+                newest_found_ts: 200,
+                newest_found_ts_ns: 7,
+                latest_applied_content_id: vec![0x11; 4],
+                latest_applied_ts: 100,
+                latest_applied_ts_ns: 5,
                 ..Default::default()
             },
         )
@@ -3190,29 +3010,33 @@ mod tests {
         assert_eq!(
             String::from_utf8(output).unwrap(),
             concat!(
-                "recovery: recovered the most recent version\n",
+                "recovery: merged older-lineage revisions into the local file set\n",
                 "versions_found: 2\n",
-                "peers_with_most_recent_version: 1\n",
                 "peers_with_any_versions: 2\n",
-                "downloaded_files: 3\n",
-                "downloaded_bytes: 4096\n"
+                "older_lineage_versions_found: 2\n",
+                "older_lineage_recoverable_versions_found: 1\n",
+                "applied_versions: 1\n",
+                "downloaded_bytes: 4096\n",
+                "added_files: 1\n",
+                "renamed_files: 1\n",
+                "unchanged_files: 1\n",
+                "newest_found: 22222222 @ 200.000000007\n",
+                "latest_applied: 11111111 @ 100.000000005\n"
             )
         );
     }
 
     #[test]
-    fn write_recovery_summary_formats_fallback_success() {
+    fn write_recovery_summary_formats_no_older_lineage_needed() {
         let mut output = Vec::new();
         write_recovery_summary(
             &mut output,
             &RecoverContentUpdate {
                 total_versions_found: 2,
-                num_peers_with_most_recent_version: 1,
-                num_peers_with_freshest_recoverable_version: 1,
-                num_peers_with_any_versions: 1,
-                most_recent_downloaded_files: 2,
-                total_downloaded_bytes: 2048,
-                recovered_fallback_version: true,
+                peers_with_any_versions: 1,
+                newest_found_content_id: vec![0xaa; 2],
+                newest_found_ts: 200,
+                newest_found_ts_ns: 9,
                 ..Default::default()
             },
         )
@@ -3221,69 +3045,71 @@ mod tests {
         assert_eq!(
             String::from_utf8(output).unwrap(),
             concat!(
-                "recovery: recovered the newest available fallback version\n",
+                "recovery: no older-lineage revisions were needed\n",
                 "versions_found: 2\n",
-                "peers_with_most_recent_version: 1\n",
-                "peers_with_fallback_version: 1\n",
                 "peers_with_any_versions: 1\n",
-                "downloaded_files: 2\n",
-                "downloaded_bytes: 2048\n"
+                "older_lineage_versions_found: 0\n",
+                "older_lineage_recoverable_versions_found: 0\n",
+                "applied_versions: 0\n",
+                "downloaded_bytes: 0\n",
+                "added_files: 0\n",
+                "renamed_files: 0\n",
+                "unchanged_files: 0\n",
+                "newest_found: aaaa @ 200.000000009\n"
             )
         );
     }
 
     #[test]
-    fn write_recovery_summary_rejects_known_but_unrecoverable_versions() {
-        let mut output = Vec::new();
-        let error = write_recovery_summary(
-            &mut output,
-            &RecoverContentUpdate {
-                total_versions_found: 2,
-                num_peers_with_any_versions: 2,
-                ..Default::default()
-            },
-        )
-        .unwrap_err();
-
-        assert_eq!(
-            error.to_string(),
-            "recovery found 2 content version(s) on known peers, but none were recoverable"
-        );
-        assert!(output.is_empty());
-    }
-
-    #[test]
-    fn write_recovery_summary_formats_nonapplying_recovery() {
+    fn write_recovery_summary_formats_unstored_older_lineage_versions() {
         let mut output = Vec::new();
         write_recovery_summary(
             &mut output,
             &RecoverContentUpdate {
                 total_versions_found: 2,
-                num_peers_with_freshest_recoverable_version: 1,
-                num_peers_with_any_versions: 2,
-                freshest_recoverable_length: 8192,
+                peers_with_any_versions: 2,
+                older_lineage_versions_found: 2,
                 ..Default::default()
             },
         )
         .unwrap();
 
         let rendered = String::from_utf8(output).unwrap();
-        assert!(rendered.contains("recovery: no peer revision was applied\n"));
-        assert!(rendered.contains("versions_found: 2\n"));
-        assert!(rendered.contains("peers_with_recoverable_version: 1\n"));
-        assert!(rendered.contains("peers_with_any_versions: 2\n"));
-        assert!(rendered.contains("downloaded_bytes: 0\n"));
-        assert!(rendered.contains("bbcli recovery conflicts"));
+        assert!(rendered.contains(
+            "recovery: found older-lineage revisions, but none were still stored by peers\n"
+        ));
+        assert!(rendered.contains("older_lineage_versions_found: 2\n"));
+        assert!(rendered.contains("older_lineage_recoverable_versions_found: 0\n"));
     }
 
     #[test]
-    fn checked_checkout_target_rejects_path_components() {
-        let out_dir = Path::new("/tmp/out");
+    fn write_recovery_summary_formats_blocked_recovery() {
+        let mut output = Vec::new();
+        write_recovery_summary(
+            &mut output,
+            &RecoverContentUpdate {
+                total_versions_found: 2,
+                peers_with_any_versions: 2,
+                older_lineage_versions_found: 2,
+                older_lineage_recoverable_versions_found: 2,
+                publication_blocked_reason:
+                    "current content exceeds the fixed 4 MiB publication limit".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
-        assert!(checked_checkout_target(out_dir, "alpha.txt").is_ok());
-        assert!(checked_checkout_target(out_dir, "nested/alpha.txt").is_err());
-        assert!(checked_checkout_target(out_dir, "../alpha.txt").is_err());
-        assert!(checked_checkout_target(out_dir, "/tmp/alpha.txt").is_err());
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(
+            rendered.contains("recovery: found older-lineage revisions, but none were merged\n")
+        );
+        assert!(rendered.contains("versions_found: 2\n"));
+        assert!(rendered.contains("peers_with_any_versions: 2\n"));
+        assert!(rendered.contains("older_lineage_recoverable_versions_found: 2\n"));
+        assert!(rendered.contains("downloaded_bytes: 0\n"));
+        assert!(rendered.contains(
+            "publication_blocked_reason: current content exceeds the fixed 4 MiB publication limit\n"
+        ));
     }
 
     #[test]
@@ -3575,11 +3401,11 @@ mod tests {
             }
         ));
 
-        let args = Args::parse_from(["bbcli", "recovery", "checkout", "aa", "/tmp/out"]);
+        let args = Args::parse_from(["bbcli", "recovery", "finish"]);
         assert!(matches!(
             args.cmd,
             Command::Recovery {
-                cmd: RecoveryCommand::Checkout { .. }
+                cmd: RecoveryCommand::Finish
             }
         ));
     }
@@ -4263,7 +4089,7 @@ mod tests {
         let recover_updates = recover_content_with_client(&mut recovered_client).await?;
         assert!(recover_updates
             .last()
-            .map(|update| update.recovered_most_recent_version)
+            .map(|update| update.applied_versions > 0)
             .unwrap_or(false));
         let recovered = get_file_with_client(&mut recovered_client, "local.txt").await?;
         assert_eq!(recovered, b"local-body".to_vec());

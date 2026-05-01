@@ -252,6 +252,14 @@ Do not run multiple live nodes with the same password at the same time. A
 second node may use that password only when the first node is no longer
 available and you are bringing up a replacement for recovery or takeover.
 
+For a replacement node that is recovering older replicas before it publishes
+again, initialize it in recovery mode:
+
+```bash
+echo 'correct horse battery staple' | bbcli init --recovery-mode --password-stdin
+echo 'correct horse battery staple' | bbcli unlock --password-stdin
+```
+
 If you use a custom data directory:
 
 ```bash
@@ -322,6 +330,7 @@ bbcli contract list
 bbcli contract propose <peer-onion-id>
 bbcli contract check <peer-onion-id>
 bbcli recovery run
+bbcli recovery finish
 bbcli stop
 ```
 
@@ -342,7 +351,7 @@ For example:
 bbcli peer export-built-in > crates/node/src/builtin_peers.rs
 ```
 
-Recovery and conflicts:
+Recovery workflow:
 
 - `bbcli peer list` reports the current local peer inventory without dialing peers
   live, including pin state, storage protection class, tracked-only state,
@@ -366,25 +375,38 @@ Recovery and conflicts:
   runtime resource bounds
 - `bbcli contract list` reports both the newest revision the daemon knows a
   peer has and the newest revision it has cached locally for that peer
-- recovery chooses the freshest revision that is actually recoverable across
-  all peers
-- if the freshest known revision is unavailable everywhere, recovery falls back
-  to the freshest available cached revision and reports both states
-- if recovery discovers divergent revisions, `bbd` stores every recoverable
-  branch locally, logs the conflict, and blocks normal file commands until the
-  operator resolves it
-
-Conflict workflow:
-
-```bash
-bbcli recovery conflicts
-bbcli recovery checkout <content-id> ./inspect-one
-bbcli recovery checkout <content-id> ./inspect-two
-bbcli recovery resolve <content-id>
-```
-
-After resolution the selected revision becomes active again, while the
-non-selected revisions stay archived and can still be checked out later.
+- replacement nodes should start with `bbcli init --recovery-mode`; while
+  recovery mode is enabled, owner-originated publication stays disabled and
+  local file mutation commands such as `bbcli file set` and `bbcli file delete`
+  are rejected
+- correct local wall-clock time matters when a node is initialized, because the
+  recovery boundary compares authenticated revision timestamps against the
+  node's local initialization time
+- `bbcli recovery run` scans known peers, looks at both the newest revision a
+  peer knows about and the newest revision it can still serve, and merges every
+  downloadable older-lineage revision whose authenticated timestamp is older
+  than the current node generation but newer than the last applied recovery
+  watermark
+- if the freshest known older-lineage revision is unavailable everywhere,
+  recovery still uses an older stored revision when that is the newest replica
+  any peer can actually serve
+- recovery is additive and conservative:
+  - a new file name is added directly
+  - identical file contents are skipped
+  - different contents under the same file name create a second file with a
+    `.recovered-...` timestamp suffix before the final extension
+- automatic recovery preserves older data but does not replay historical
+  deletions from older lineages
+- if recovery grows the local file set past the publishable content limit, the
+  recovered files stay available locally and `bbcli state` reports a
+  `publish_blocked_reason`; at that point the operator must delete enough files
+  locally before publication can resume
+- once you have recovered everything you still want from older replicas, run
+  `bbcli recovery finish`
+- `bbcli recovery finish` disables recovery mode, advances the effective
+  recovery watermark to the current node-generation boundary, and allows
+  publication again; after that point, older unseen lineages are ignored
+  automatically
 
 ## Security model
 

@@ -32,7 +32,7 @@ var (
 	publicTorSuiteOnce sync.Once
 )
 
-type conflictScenario struct {
+type recoveryScenario struct {
 	scenario   *harness.Scenario
 	owner      *harness.Node
 	peerB      *harness.Node
@@ -126,12 +126,12 @@ func TestDockerRealTorRecoverySmoke(t *testing.T) {
 
 	startLockedNode(t, recovered)
 	waitForReadyNode(t, recovered)
-	initNode(t, recovered)
+	initRecoveryNode(t, recovered)
 	unlockAndWaitReady(t, recovered)
 	assertNoFiles(t, recovered)
 
 	connectPeer(t, recovered, peerOnion)
-	recoverContent(t, recovered)
+	recoverFileUntilEquals(t, recovered, "payload.bin", payload)
 	assertFileEquals(t, recovered, "payload.bin", payload)
 }
 
@@ -270,12 +270,12 @@ func TestDockerBackupAndRecoveryOverChutney(t *testing.T) {
 
 	startLockedNode(t, recovered)
 	waitForReadyNode(t, recovered)
-	initNode(t, recovered)
+	initRecoveryNode(t, recovered)
 	unlockAndWaitReady(t, recovered)
 	assertNoFiles(t, recovered)
 
 	connectPeer(t, recovered, peerOnion)
-	recoverContent(t, recovered)
+	recoverFileUntilEquals(t, recovered, "payload.bin", payload)
 	assertFileEquals(t, recovered, "payload.bin", payload)
 }
 
@@ -312,12 +312,12 @@ func TestDockerBackupPeerRestartAndRecover(t *testing.T) {
 
 	startLockedNode(t, recovered)
 	waitForReadyNode(t, recovered)
-	initNode(t, recovered)
+	initRecoveryNode(t, recovered)
 	unlockAndWaitReady(t, recovered)
 	assertNoFiles(t, recovered)
 
 	connectPeer(t, recovered, peerOnion)
-	recoverContent(t, recovered)
+	recoverFileUntilEquals(t, recovered, "payload.bin", payload)
 	assertFileEquals(t, recovered, "payload.bin", payload)
 }
 
@@ -547,12 +547,9 @@ func TestDockerStopFlushesPendingPeerMetadata(t *testing.T) {
 	}
 }
 
-func TestDockerConflictRecoveryKeepRemoteVersion(t *testing.T) {
-	scenario := prepareConflictScenarioBase(t)
-	localBranch := bytes.Repeat([]byte("local-branch\n"), 1536)
+func TestDockerRecoveryModeBlocksPublicationUntilFinished(t *testing.T) {
+	scenario := prepareRecoveryMergeScenarioBase(t)
 
-	advanceNodeTime(t, scenario.recovered, 10, 0)
-	setFile(t, scenario.recovered, "payload.bin", localBranch)
 	startLockedNode(t, scenario.peerC)
 	waitForReadyNode(t, scenario.peerC)
 	setNodeTime(t, scenario.peerC, 1040, 0)
@@ -560,56 +557,33 @@ func TestDockerConflictRecoveryKeepRemoteVersion(t *testing.T) {
 	waitForPeerStorage(t, scenario.peerC, scenario.ownerOnion, int64(len(scenario.payloadV2)))
 	connectPeer(t, scenario.recovered, scenario.peerCOnion)
 
-	conflicts := waitForConflict(t, scenario.recovered)
-	assertConflictBlocksFileOps(t, scenario.recovered)
-	localRevision := findConflictRevision(
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	_, err := scenario.recovered.ProposeContract(ctx, scenario.peerCOnion)
+	cancel()
+	assertStatusMessage(
 		t,
-		conflicts,
-		func(revision *clirpc.ConflictRevisionInfo) bool { return revision.GetSourceIsLocal() },
-		"local conflicted revision",
-	)
-	remoteRevision := findConflictRevision(
-		t,
-		conflicts,
-		func(revision *clirpc.ConflictRevisionInfo) bool {
-			return revision.GetSourcePeerOnion() == scenario.peerCOnion
-		},
-		"remote conflicted revision",
-	)
-	assertCheckedOutRevision(t, scenario.recovered, localRevision.GetContentId(), "payload.bin", localBranch)
-	assertCheckedOutRevision(
-		t,
-		scenario.recovered,
-		remoteRevision.GetContentId(),
-		"payload.bin",
-		scenario.payloadV2,
+		err,
+		codes.FailedPrecondition,
+		"recovery mode is enabled; finish recovery before publishing",
 	)
 
-	resolveConflict(t, scenario.recovered, remoteRevision.GetContentId())
-	assertFileEquals(t, scenario.recovered, "payload.bin", scenario.payloadV2)
-	archived := listConflicts(t, scenario.recovered)
-	assertSingleArchivedRevision(t, archived, localRevision.GetContentId())
+	ctx, cancel = context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	err = scenario.recovered.SetFile(ctx, "blocked.bin", []byte("blocked"))
+	cancel()
+	assertStatusMessage(
+		t,
+		err,
+		codes.FailedPrecondition,
+		"local file edits are blocked while recovery mode is enabled",
+	)
 
-	startLockedNode(t, scenario.peerB)
-	waitForReadyNode(t, scenario.peerB)
-	setNodeTime(t, scenario.peerB, 1050, 0)
-	unlockTestClockAndWaitReady(t, scenario.peerB)
-	postResolve := bytes.Repeat([]byte("post-resolve-remote\n"), 2048)
-	advanceNodeTime(t, scenario.recovered, 10, 0)
-	setFile(t, scenario.recovered, "payload.bin", postResolve)
-	proposeContract(t, scenario.recovered, scenario.peerBOnion)
-	proposeContract(t, scenario.recovered, scenario.peerCOnion)
-	waitForPeerStorage(t, scenario.peerB, scenario.ownerOnion, int64(len(postResolve)))
-	waitForPeerStorage(t, scenario.peerC, scenario.ownerOnion, int64(len(postResolve)))
-	assertCheckedOutRevision(t, scenario.recovered, localRevision.GetContentId(), "payload.bin", localBranch)
+	waitForPeerStorage(t, scenario.peerC, scenario.ownerOnion, int64(len(scenario.payloadV2)))
+	assertFileEquals(t, scenario.recovered, "payload.bin", scenario.payloadV1)
 }
 
-func TestDockerConflictRecoveryKeepLocalVersion(t *testing.T) {
-	scenario := prepareConflictScenarioBase(t)
-	localBranch := bytes.Repeat([]byte("local-kept-branch\n"), 1792)
+func TestDockerRecoveryMergesOlderLineagesAndPublishesAfterFinish(t *testing.T) {
+	scenario := prepareRecoveryMergeScenarioBase(t)
 
-	advanceNodeTime(t, scenario.recovered, 10, 0)
-	setFile(t, scenario.recovered, "payload.bin", localBranch)
 	startLockedNode(t, scenario.peerC)
 	waitForReadyNode(t, scenario.peerC)
 	setNodeTime(t, scenario.peerC, 1040, 0)
@@ -617,88 +591,61 @@ func TestDockerConflictRecoveryKeepLocalVersion(t *testing.T) {
 	waitForPeerStorage(t, scenario.peerC, scenario.ownerOnion, int64(len(scenario.payloadV2)))
 	connectPeer(t, scenario.recovered, scenario.peerCOnion)
 
-	conflicts := waitForConflict(t, scenario.recovered)
-	assertConflictBlocksFileOps(t, scenario.recovered)
-	localRevision := findConflictRevision(
-		t,
-		conflicts,
-		func(revision *clirpc.ConflictRevisionInfo) bool { return revision.GetSourceIsLocal() },
-		"local conflicted revision",
-	)
-	remoteRevision := findConflictRevision(
-		t,
-		conflicts,
-		func(revision *clirpc.ConflictRevisionInfo) bool {
-			return revision.GetSourcePeerOnion() == scenario.peerCOnion
-		},
-		"remote conflicted revision",
-	)
-	assertCheckedOutRevision(t, scenario.recovered, localRevision.GetContentId(), "payload.bin", localBranch)
-	assertCheckedOutRevision(
-		t,
-		scenario.recovered,
-		remoteRevision.GetContentId(),
-		"payload.bin",
-		scenario.payloadV2,
-	)
+	_, recoveredName := recoverUntilVariant(t, scenario.recovered, "payload.bin")
+	assertFileContentEquals(t, scenario.recovered, "payload.bin", scenario.payloadV1)
+	assertFileContentEquals(t, scenario.recovered, recoveredName, scenario.payloadV2)
 
-	resolveConflict(t, scenario.recovered, localRevision.GetContentId())
-	assertFileEquals(t, scenario.recovered, "payload.bin", localBranch)
-	archived := listConflicts(t, scenario.recovered)
-	assertSingleArchivedRevision(t, archived, remoteRevision.GetContentId())
+	finishRecovery(t, scenario.recovered)
 
 	startLockedNode(t, scenario.peerB)
 	waitForReadyNode(t, scenario.peerB)
 	setNodeTime(t, scenario.peerB, 1050, 0)
 	unlockTestClockAndWaitReady(t, scenario.peerB)
-	postResolve := bytes.Repeat([]byte("post-resolve-local\n"), 2304)
+
+	postRecovery := bytes.Repeat([]byte("post-recovery\n"), 2048)
 	advanceNodeTime(t, scenario.recovered, 10, 0)
-	setFile(t, scenario.recovered, "payload.bin", postResolve)
+	setFile(t, scenario.recovered, "payload.bin", postRecovery)
+	assertFileContentEquals(t, scenario.recovered, "payload.bin", postRecovery)
+	assertFileContentEquals(t, scenario.recovered, recoveredName, scenario.payloadV2)
+
 	proposeContract(t, scenario.recovered, scenario.peerBOnion)
 	proposeContract(t, scenario.recovered, scenario.peerCOnion)
-	waitForPeerStorage(t, scenario.peerB, scenario.ownerOnion, int64(len(postResolve)))
-	waitForPeerStorage(t, scenario.peerC, scenario.ownerOnion, int64(len(postResolve)))
-	assertCheckedOutRevision(
-		t,
-		scenario.recovered,
-		remoteRevision.GetContentId(),
-		"payload.bin",
-		scenario.payloadV2,
-	)
+	if !checkContractOnce(t, scenario.recovered, scenario.peerBOnion).GetSuccess() {
+		t.Fatalf("expected publication to peer-b after finishing recovery")
+	}
+	if !checkContractOnce(t, scenario.recovered, scenario.peerCOnion).GetSuccess() {
+		t.Fatalf("expected publication to peer-c after finishing recovery")
+	}
 }
 
-func TestDockerMetadataOnlyRecoveryAutoResolves(t *testing.T) {
-	scenario := prepareConflictScenarioBase(t)
-	metadataPeer := addConflictNode(t, scenario.scenario, "metadata-peer", "metadata peer password")
-	metadataPeerOnion := startInitializedReadyTestClockNode(t, metadataPeer, 1040)
-
-	connectPeer(t, scenario.recovered, metadataPeerOnion)
-	assertPeerVisible(t, scenario.recovered, metadataPeerOnion)
+func TestDockerFinishRecoverySuppressesFurtherOlderLineageMerges(t *testing.T) {
+	scenario := prepareRecoveryMergeScenarioBase(t)
 
 	startLockedNode(t, scenario.peerC)
 	waitForReadyNode(t, scenario.peerC)
-	setNodeTime(t, scenario.peerC, 1050, 0)
+	setNodeTime(t, scenario.peerC, 1040, 0)
 	unlockTestClockAndWaitReady(t, scenario.peerC)
 	waitForPeerStorage(t, scenario.peerC, scenario.ownerOnion, int64(len(scenario.payloadV2)))
 	connectPeer(t, scenario.recovered, scenario.peerCOnion)
-
-	recoverContent(t, scenario.recovered)
-	assertFileEquals(t, scenario.recovered, "payload.bin", scenario.payloadV2)
-	assertNoActiveConflict(t, scenario.recovered)
-	assertPeerVisible(t, scenario.recovered, scenario.peerCOnion)
-	assertPeerAbsent(t, scenario.recovered, metadataPeerOnion)
+	_, recoveredName := recoverUntilVariant(t, scenario.recovered, "payload.bin")
+	assertFileContentEquals(t, scenario.recovered, recoveredName, scenario.payloadV2)
 
 	startLockedNode(t, scenario.peerB)
 	waitForReadyNode(t, scenario.peerB)
-	setNodeTime(t, scenario.peerB, 1060, 0)
+	setNodeTime(t, scenario.peerB, 1050, 0)
 	unlockTestClockAndWaitReady(t, scenario.peerB)
-	postResolve := bytes.Repeat([]byte("metadata-auto-resolved\n"), 1408)
-	advanceNodeTime(t, scenario.recovered, 10, 0)
-	setFile(t, scenario.recovered, "payload.bin", postResolve)
-	proposeContract(t, scenario.recovered, scenario.peerBOnion)
-	proposeContract(t, scenario.recovered, scenario.peerCOnion)
-	waitForPeerStorage(t, scenario.peerB, scenario.ownerOnion, int64(len(postResolve)))
-	waitForPeerStorage(t, scenario.peerC, scenario.ownerOnion, int64(len(postResolve)))
+
+	finishRecovery(t, scenario.recovered)
+
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	update, err := scenario.recovered.RecoverContentOnce(ctx)
+	if err != nil {
+		t.Fatalf("run post-finish recovery on %s: %v", scenario.recovered.Name(), err)
+	}
+	if update.GetAppliedVersions() != 0 || update.GetOlderLineageRecoverableVersionsFound() != 0 {
+		t.Fatalf("expected no further older-lineage recovery after finish, got %+v", update)
+	}
 }
 
 func TestDockerPeerExchangeGossip(t *testing.T) {
@@ -755,12 +702,12 @@ func TestDockerRecoveryFindsReplicaThroughPeerExchange(t *testing.T) {
 
 	startLockedNode(t, recovered)
 	waitForReadyNode(t, recovered)
-	initNode(t, recovered)
+	initRecoveryNode(t, recovered)
 	unlockAndWaitReady(t, recovered)
 	assertNoFiles(t, recovered)
 
 	connectPeer(t, recovered, brokerOnion)
-	recoverContent(t, recovered)
+	recoverFileUntilEquals(t, recovered, "payload.bin", payload)
 	assertFileEquals(t, recovered, "payload.bin", payload)
 	assertPeerVisible(t, recovered, replicaOnion)
 }
@@ -877,10 +824,10 @@ func TestDockerRetryAfterTransientDisconnect(t *testing.T) {
 
 	startLockedNode(t, recovered)
 	waitForReadyNode(t, recovered)
-	initNode(t, recovered)
+	initRecoveryNode(t, recovered)
 	unlockAndWaitReady(t, recovered)
 	connectPeer(t, recovered, peerOnion)
-	recoverContent(t, recovered)
+	recoverFileUntilEquals(t, recovered, "payload.bin", updatedPayload)
 	assertFileEquals(t, recovered, "payload.bin", updatedPayload)
 }
 
@@ -1109,7 +1056,7 @@ func TestDockerOperatorErrorsAreHuman(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recover content with no peers: %v", err)
 	}
-	if update.GetRecoveredMostRecentVersion() || update.GetTotalVersionsFound() != 0 || update.GetNumPeersWithAnyVersions() != 0 {
+	if update.GetAppliedVersions() != 0 || update.GetTotalVersionsFound() != 0 || update.GetPeersWithAnyVersions() != 0 {
 		t.Fatalf("unexpected recovery result without peers: %+v", update)
 	}
 }
@@ -1201,10 +1148,10 @@ func TestDockerLargePayloadRoundTrip(t *testing.T) {
 
 	startLockedNode(t, recovered)
 	waitForReadyNode(t, recovered)
-	initNode(t, recovered)
+	initRecoveryNode(t, recovered)
 	unlockAndWaitReady(t, recovered)
 	connectPeer(t, recovered, peerOnion)
-	recoverContent(t, recovered)
+	recoverFileUntilEquals(t, recovered, "payload.bin", payload)
 	assertFileEquals(t, recovered, "payload.bin", payload)
 }
 
@@ -1725,16 +1672,27 @@ func startInitializedReadyTestClockNode(
 	setNodeTime(t, node, seconds, 0)
 	initNode(t, node)
 	state := unlockTestClockAndWaitReady(t, node)
+	setNodeTime(t, node, seconds, 0)
 	return state.GetServerOnion()
+}
+
+func initNodeWithRecoveryMode(t *testing.T, node *harness.Node, recoveryMode bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	if err := node.InitWithRecoveryMode(ctx, recoveryMode); err != nil {
+		t.Fatalf("init %s: %v", node.Name(), err)
+	}
 }
 
 func initNode(t *testing.T, node *harness.Node) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	defer cancel()
-	if err := node.Init(ctx); err != nil {
-		t.Fatalf("init %s: %v", node.Name(), err)
-	}
+	initNodeWithRecoveryMode(t, node, false)
+}
+
+func initRecoveryNode(t *testing.T, node *harness.Node) {
+	t.Helper()
+	initNodeWithRecoveryMode(t, node, true)
 }
 
 func unlockAndWaitReady(t *testing.T, node *harness.Node) *clirpc.StateResponse {
@@ -1753,6 +1711,15 @@ func unlockTestClockAndWaitReady(t *testing.T, node *harness.Node) *clirpc.State
 	t.Helper()
 	unlockNode(t, node)
 	return waitForTestClockNodesReady(t, node)[0]
+}
+
+func finishRecovery(t *testing.T, node *harness.Node) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	if err := node.FinishRecovery(ctx); err != nil {
+		t.Fatalf("finish recovery on %s: %v", node.Name(), err)
+	}
 }
 
 func unlockNode(t *testing.T, node *harness.Node) {
@@ -1829,7 +1796,7 @@ func unpinPeer(t *testing.T, node *harness.Node, peerOnion string) {
 	}
 }
 
-func prepareConflictScenarioBase(t *testing.T) *conflictScenario {
+func prepareRecoveryMergeScenarioBase(t *testing.T) *recoveryScenario {
 	t.Helper()
 	scenario := newScenario(t)
 	owner := addConflictNode(t, scenario, "owner", "correct horse battery staple")
@@ -1875,17 +1842,17 @@ func prepareConflictScenarioBase(t *testing.T) *conflictScenario {
 
 	startLockedNode(t, recovered)
 	waitForReadyNode(t, recovered)
-	setNodeTime(t, recovered, 1020, 0)
-	initNode(t, recovered)
+	setNodeTime(t, recovered, 1030, 0)
+	initRecoveryNode(t, recovered)
 	unlockTestClockAndWaitReady(t, recovered)
 	assertNoFiles(t, recovered)
 	connectPeer(t, recovered, peerBOnion)
-	recoverContent(t, recovered)
+	recoverFileUntilEquals(t, recovered, "payload.bin", payloadV1)
 	assertFileEquals(t, recovered, "payload.bin", payloadV1)
 	stopNode(t, peerB)
 	assertCLIKeysRemoved(t, peerB)
 
-	return &conflictScenario{
+	return &recoveryScenario{
 		scenario:   scenario,
 		owner:      owner,
 		peerB:      peerB,
@@ -2229,175 +2196,42 @@ func waitForPeerStateHashChange(
 
 func assertNoFiles(t *testing.T, node *harness.Node) {
 	t.Helper()
+	response := listFiles(t, node)
+	if len(response.GetFile()) != 0 {
+		t.Fatalf("expected %s to start empty, got %v", node.Name(), listFileNames(response))
+	}
+}
+
+func listFiles(t *testing.T, node *harness.Node) *clirpc.ListFilesResponse {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
 	defer cancel()
 	response, err := node.ListFiles(ctx)
 	if err != nil {
 		t.Fatalf("list files on %s: %v", node.Name(), err)
 	}
-	if len(response.GetFile()) != 0 {
-		t.Fatalf("expected %s to start empty, got %v", node.Name(), listFileNames(response))
-	}
-}
-
-func recoverContent(t *testing.T, node *harness.Node) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	defer cancel()
-	update, err := node.RecoverContentUntilRecovered(ctx)
-	if err != nil {
-		t.Fatalf("recover content on %s: %v", node.Name(), err)
-	}
-	if !update.GetRecoveredMostRecentVersion() {
-		t.Fatalf(
-			"recovery on %s did not recover most recent version: peers_with_latest=%d total_versions=%d",
-			node.Name(),
-			update.GetNumPeersWithMostRecentVersion(),
-			update.GetTotalVersionsFound(),
-		)
-	}
-}
-
-func waitForConflict(t *testing.T, node *harness.Node) *clirpc.ListConflictsResponse {
-	t.Helper()
-	deadline := time.Now().Add(60 * time.Second)
-
-	for {
-		ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-		_, _ = node.RecoverContentOnce(ctx)
-		cancel()
-
-		conflicts := listConflicts(t, node)
-		if countUnresolvedConflicts(conflicts) >= 2 {
-			return conflicts
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for conflict on %s", node.Name())
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-}
-
-func listConflicts(t *testing.T, node *harness.Node) *clirpc.ListConflictsResponse {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	defer cancel()
-	response, err := node.ListConflicts(ctx)
-	if err != nil {
-		t.Fatalf("list conflicts on %s: %v", node.Name(), err)
-	}
 	return response
 }
 
-func countUnresolvedConflicts(response *clirpc.ListConflictsResponse) int {
-	count := 0
-	for _, revision := range response.GetRevisions() {
-		if revision.GetUnresolved() {
-			count++
+func findRecoveredVariantName(
+	t *testing.T,
+	response *clirpc.ListFilesResponse,
+	activeName string,
+) string {
+	t.Helper()
+	stem := strings.TrimSuffix(activeName, filepath.Ext(activeName))
+	extension := filepath.Ext(activeName)
+	for _, file := range response.GetFile() {
+		name := file.GetName()
+		if name == activeName {
+			continue
+		}
+		if strings.HasPrefix(name, stem+".recovered-") && strings.HasSuffix(name, extension) {
+			return name
 		}
 	}
-	return count
-}
-
-func findConflictRevision(
-	t *testing.T,
-	response *clirpc.ListConflictsResponse,
-	match func(*clirpc.ConflictRevisionInfo) bool,
-	description string,
-) *clirpc.ConflictRevisionInfo {
-	t.Helper()
-	for _, revision := range response.GetRevisions() {
-		if match(revision) {
-			return revision
-		}
-	}
-	t.Fatalf("missing %s in %v", description, response.GetRevisions())
-	return nil
-}
-
-func assertCheckedOutRevision(
-	t *testing.T,
-	node *harness.Node,
-	contentID []byte,
-	name string,
-	expected []byte,
-) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	defer cancel()
-	response, err := node.CheckoutRevision(ctx, contentID)
-	if err != nil {
-		t.Fatalf("checkout revision from %s: %v", node.Name(), err)
-	}
-	if len(response.GetFile()) != 1 {
-		t.Fatalf("unexpected checkout file count from %s: %d", node.Name(), len(response.GetFile()))
-	}
-	file := response.GetFile()[0]
-	if file.GetName() != name {
-		t.Fatalf("unexpected checkout file name from %s: %s", node.Name(), file.GetName())
-	}
-	if !bytes.Equal(file.GetData(), expected) {
-		t.Fatalf("unexpected checkout payload from %s", node.Name())
-	}
-}
-
-func resolveConflict(t *testing.T, node *harness.Node, contentID []byte) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	defer cancel()
-	if err := node.ResolveConflict(ctx, contentID); err != nil {
-		t.Fatalf("resolve conflict on %s: %v", node.Name(), err)
-	}
-}
-
-func assertSingleArchivedRevision(
-	t *testing.T,
-	response *clirpc.ListConflictsResponse,
-	expectedContentID []byte,
-) {
-	t.Helper()
-	if len(response.GetRevisions()) != 1 {
-		t.Fatalf("expected one archived revision, got %d", len(response.GetRevisions()))
-	}
-	revision := response.GetRevisions()[0]
-	if revision.GetUnresolved() {
-		t.Fatalf("expected archived revision, got unresolved entry")
-	}
-	if !bytes.Equal(revision.GetContentId(), expectedContentID) {
-		t.Fatalf("unexpected archived content id")
-	}
-	if revision.GetResolvedAt() == 0 {
-		t.Fatalf("archived revision is missing resolved_at")
-	}
-}
-
-func assertConflictBlocksFileOps(t *testing.T, node *harness.Node) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	defer cancel()
-
-	_, err := node.ListFiles(ctx)
-	if grpcstatus.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("expected list files to be blocked by conflict, got %v", err)
-	}
-	_, err = node.GetFile(ctx, "payload.bin")
-	if grpcstatus.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("expected get file to be blocked by conflict, got %v", err)
-	}
-	err = node.SetFile(ctx, "payload.bin", []byte("blocked"))
-	if grpcstatus.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("expected set file to be blocked by conflict, got %v", err)
-	}
-}
-
-func assertNoActiveConflict(t *testing.T, node *harness.Node) {
-	t.Helper()
-	response := listConflicts(t, node)
-	for _, revision := range response.GetRevisions() {
-		if revision.GetUnresolved() {
-			t.Fatalf("expected no active conflict on %s, got %v", node.Name(), response.GetRevisions())
-		}
-	}
+	t.Fatalf("missing recovered variant for %s in %v", activeName, listFileNames(response))
+	return ""
 }
 
 func assertPeerVisible(t *testing.T, node *harness.Node, peerOnion string) {
@@ -2455,6 +2289,17 @@ func peerInfoFromResponse(
 	}
 	t.Fatalf("missing peer %s in inventory", peerOnion)
 	return nil
+}
+
+func runRecoveryPass(t *testing.T, node *harness.Node) *clirpc.RecoverContentUpdate {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+	defer cancel()
+	update, err := node.RecoverContentOnce(ctx)
+	if err != nil {
+		t.Fatalf("run recovery on %s: %v", node.Name(), err)
+	}
+	return update
 }
 
 func peerInfoByOnion(t *testing.T, node *harness.Node, peerOnion string) *clirpc.PeerInfo {
@@ -2765,6 +2610,58 @@ func assertFileEquals(t *testing.T, node *harness.Node, name string, expected []
 	names := listFileNames(response)
 	if len(names) != 1 || names[0] != name {
 		t.Fatalf("unexpected recovered file list on %s: %v", node.Name(), names)
+	}
+}
+
+func recoverFileUntilEquals(t *testing.T, node *harness.Node, name string, expected []byte) {
+	t.Helper()
+
+	deadline := time.Now().Add(harnessDefaultTimeout())
+	for {
+		runRecoveryPass(t, node)
+		ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+		file, err := node.GetFile(ctx, name)
+		cancel()
+		if err == nil && bytes.Equal(file.GetData(), expected) {
+			return
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				t.Fatalf("timed out waiting for %s on %s: %v", name, node.Name(), err)
+			}
+			t.Fatalf("timed out waiting for %s on %s to match expected bytes", name, node.Name())
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+func recoverUntilVariant(
+	t *testing.T,
+	node *harness.Node,
+	activeName string,
+) (*clirpc.ListFilesResponse, string) {
+	t.Helper()
+
+	deadline := time.Now().Add(harnessDefaultTimeout())
+	for {
+		runRecoveryPass(t, node)
+		response := listFiles(t, node)
+		if len(response.GetFile()) == 2 {
+			for _, file := range response.GetFile() {
+				if file.GetName() != activeName {
+					return response, file.GetName()
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf(
+				"timed out waiting for recovered variant of %s on %s; current files=%v",
+				activeName,
+				node.Name(),
+				listFileNames(response),
+			)
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
 }
 

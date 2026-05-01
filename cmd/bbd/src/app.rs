@@ -1146,10 +1146,6 @@ impl BarterBackupClient for DaemonService {
     type TimerInterceptStream =
         Pin<Box<dyn Stream<Item = Result<clirpc::TimerInterceptEvent, tonic::Status>> + Send>>;
 
-    /// CheckoutRevisionStreamStream streams one checked-out plaintext revision.
-    type CheckoutRevisionStreamStream =
-        <CliService as BarterBackupClient>::CheckoutRevisionStreamStream;
-
     /// GetFileStreamStream streams one plaintext file download.
     type GetFileStreamStream = <CliService as BarterBackupClient>::GetFileStreamStream;
 
@@ -1465,33 +1461,6 @@ impl BarterBackupClient for DaemonService {
             .await
     }
 
-    async fn list_conflicts(
-        &self,
-        request: tonic::Request<clirpc::ListConflictsRequest>,
-    ) -> Result<Response<clirpc::ListConflictsResponse>, Status> {
-        CliService::new(self.unlocked_node().await?)
-            .list_conflicts(request)
-            .await
-    }
-
-    async fn checkout_revision_stream(
-        &self,
-        request: tonic::Request<clirpc::CheckoutRevisionRequest>,
-    ) -> Result<Response<Self::CheckoutRevisionStreamStream>, Status> {
-        CliService::new(self.unlocked_node().await?)
-            .checkout_revision_stream(request)
-            .await
-    }
-
-    async fn resolve_conflict(
-        &self,
-        request: tonic::Request<clirpc::ResolveConflictRequest>,
-    ) -> Result<Response<clirpc::ResolveConflictResponse>, Status> {
-        CliService::new(self.unlocked_node().await?)
-            .resolve_conflict(request)
-            .await
-    }
-
     async fn set_file_stream(
         &self,
         request: tonic::Request<tonic::Streaming<clirpc::SetFileChunk>>,
@@ -1605,10 +1574,6 @@ impl BarterBackupClient for DaemonRpcService {
     /// TimerInterceptStream streams hidden labeled timer registrations.
     type TimerInterceptStream = <DaemonService as BarterBackupClient>::TimerInterceptStream;
 
-    /// CheckoutRevisionStreamStream streams one checked-out plaintext revision.
-    type CheckoutRevisionStreamStream =
-        <DaemonService as BarterBackupClient>::CheckoutRevisionStreamStream;
-
     /// GetFileStreamStream streams one plaintext file download.
     type GetFileStreamStream = <DaemonService as BarterBackupClient>::GetFileStreamStream;
 
@@ -1710,27 +1675,6 @@ impl BarterBackupClient for DaemonRpcService {
         request: tonic::Request<clirpc::ExportBuiltInPeersRequest>,
     ) -> Result<Response<clirpc::ExportBuiltInPeersResponse>, Status> {
         self.daemon.export_built_in_peers(request).await
-    }
-
-    async fn list_conflicts(
-        &self,
-        request: tonic::Request<clirpc::ListConflictsRequest>,
-    ) -> Result<Response<clirpc::ListConflictsResponse>, Status> {
-        self.daemon.list_conflicts(request).await
-    }
-
-    async fn checkout_revision_stream(
-        &self,
-        request: tonic::Request<clirpc::CheckoutRevisionRequest>,
-    ) -> Result<Response<Self::CheckoutRevisionStreamStream>, Status> {
-        self.daemon.checkout_revision_stream(request).await
-    }
-
-    async fn resolve_conflict(
-        &self,
-        request: tonic::Request<clirpc::ResolveConflictRequest>,
-    ) -> Result<Response<clirpc::ResolveConflictResponse>, Status> {
-        self.daemon.resolve_conflict(request).await
     }
 
     async fn set_file_stream(
@@ -4841,34 +4785,26 @@ mod tests {
         );
         unlock_service(&restarted_service, "owner-password").await?;
         wait_for_public_peer_runtime(&restarted_service, Duration::from_secs(2)).await?;
-
         wait_for_async(Duration::from_secs(5), || {
             let restarted_service = &restarted_service;
             let owner_content_id = owner_content_id.clone();
             async move {
-                let mut recovery = restarted_service
-                    .recover_content(tonic::Request::new(clirpc::RecoverContentRequest {}))
-                    .await?
-                    .into_inner();
-                let recovery_update = recovery
-                    .next()
+                let content_id_matches = unlocked_node(restarted_service)
                     .await
-                    .context("expected one recovery update after restart")??;
-                Ok(recovery_update.recovered_most_recent_version
-                    && recovery_update.most_recent_content_id == owner_content_id)
+                    .current_content_info()?
+                    .is_some_and(|content| content.content_id == owner_content_id);
+                let recovered = restarted_service
+                    .get_file(tonic::Request::new(clirpc::GetFileRequest {
+                        name: "alpha.txt".to_string(),
+                    }))
+                    .await?
+                    .into_inner()
+                    .file;
+                Ok(content_id_matches
+                    && recovered.is_some_and(|file| file.data == b"alpha-body".to_vec()))
             }
         })
         .await?;
-
-        let recovered = restarted_service
-            .get_file(tonic::Request::new(clirpc::GetFileRequest {
-                name: "alpha.txt".to_string(),
-            }))
-            .await?
-            .into_inner()
-            .file
-            .unwrap();
-        assert_eq!(recovered.data, b"alpha-body".to_vec());
 
         restarted_service.shutdown().await?;
         peer_server.abort();

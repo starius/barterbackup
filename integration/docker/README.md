@@ -54,6 +54,9 @@ nix develop --command make docker-dev-env ARGS='--name lab cli 0 -- init hunter2
 nix develop --command make docker-dev-env ARGS='--name lab cli 0 -- unlock hunter2'
 nix develop --command make docker-dev-env ARGS='--name lab cli peer1 -- state'
 nix develop --command make docker-dev-env ARGS='--name lab recreate 0'
+nix develop --command make docker-dev-env ARGS='--name lab cli 0 -- init --recovery-mode hunter2'
+nix develop --command make docker-dev-env ARGS='--name lab cli 0 -- recovery run'
+nix develop --command make docker-dev-env ARGS='--name lab cli 0 -- recovery finish'
 nix develop --command make docker-dev-env ARGS='--name lab down'
 ```
 

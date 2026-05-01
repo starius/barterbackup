@@ -665,14 +665,6 @@ mod tests {
                     + 'static,
             >,
         >;
-        type CheckoutRevisionStreamStream = std::pin::Pin<
-            Box<
-                dyn tokio_stream::Stream<
-                        Item = std::result::Result<protos::clirpc::CheckoutRevisionChunk, Status>,
-                    > + Send
-                    + 'static,
-            >,
-        >;
         type GetFileStreamStream = std::pin::Pin<
             Box<
                 dyn tokio_stream::Stream<
@@ -795,27 +787,6 @@ mod tests {
             &self,
             _: Request<protos::clirpc::ExportBuiltInPeersRequest>,
         ) -> std::result::Result<tonic::Response<protos::clirpc::ExportBuiltInPeersResponse>, Status>
-        {
-            Err(Status::unimplemented(""))
-        }
-        async fn list_conflicts(
-            &self,
-            _: Request<protos::clirpc::ListConflictsRequest>,
-        ) -> std::result::Result<tonic::Response<protos::clirpc::ListConflictsResponse>, Status>
-        {
-            Err(Status::unimplemented(""))
-        }
-        async fn checkout_revision_stream(
-            &self,
-            _: Request<protos::clirpc::CheckoutRevisionRequest>,
-        ) -> std::result::Result<tonic::Response<Self::CheckoutRevisionStreamStream>, Status>
-        {
-            Err(Status::unimplemented(""))
-        }
-        async fn resolve_conflict(
-            &self,
-            _: Request<protos::clirpc::ResolveConflictRequest>,
-        ) -> std::result::Result<tonic::Response<protos::clirpc::ResolveConflictResponse>, Status>
         {
             Err(Status::unimplemented(""))
         }

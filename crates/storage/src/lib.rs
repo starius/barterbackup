@@ -255,6 +255,18 @@ pub struct StoredFileInfo {
     pub modified_at_nanos: i64,
 }
 
+/// RecoveryMergeOutcome summarizes one automatic merge of older recovered files.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecoveryMergeOutcome {
+    /// added_files is the number of recovered files added under their original names.
+    pub added_files: i64,
+    /// renamed_files is the number of recovered files added under recovered names.
+    pub renamed_files: i64,
+    /// unchanged_files is the number of recovered files skipped because the
+    /// active local file set already contained identical plaintext bytes.
+    pub unchanged_files: i64,
+}
+
 /// Store owns the live local file set and the encrypted content blobs on disk.
 pub struct Store {
     fs: Arc<dyn Filesystem>,
@@ -265,8 +277,6 @@ pub struct Store {
     mirrored_name_key: Vec<u8>,
     files: BTreeMap<String, PlainFile>,
     peers: Vec<storedpb::Peer>,
-    active_conflict: Option<storedpb::ActiveConflict>,
-    archived_conflicts: Vec<storedpb::ConflictRevision>,
     node_initialized_at: Option<(i64, i64)>,
     latest_recovered_revision: Option<storedpb::RecoveredRevision>,
     recovery_watermark: Option<(i64, i64)>,
@@ -292,6 +302,14 @@ fn peer_content_id(content: Option<&storedpb::PeerContent>) -> Option<Vec<u8>> {
     content
         .filter(|content| !content.content_id.is_empty())
         .map(|content| content.content_id.clone())
+}
+
+/// Convert one active current-content record into a persisted summary.
+fn current_content_summary(current: Option<&CurrentContent>) -> Option<storedpb::PeerContent> {
+    current.map(|current| storedpb::PeerContent {
+        content_id: current.content_id.clone(),
+        content_length: i64::try_from(current.blob_len).unwrap_or(i64::MAX),
+    })
 }
 
 /// Return one optional persisted timestamp from whole-second and nanosecond fields.
@@ -390,8 +408,6 @@ impl Store {
             mirrored_name_key,
             files: BTreeMap::new(),
             peers: Vec::new(),
-            active_conflict: None,
-            archived_conflicts: Vec::new(),
             node_initialized_at: None,
             latest_recovered_revision: None,
             recovery_watermark: None,
@@ -629,16 +645,6 @@ impl Store {
     /// Return a copy of the tracked peer metadata.
     pub fn peers(&self) -> Vec<storedpb::Peer> {
         self.peers.clone()
-    }
-
-    /// Return the unresolved active conflict, if any.
-    pub fn active_conflict(&self) -> Option<storedpb::ActiveConflict> {
-        self.active_conflict.clone()
-    }
-
-    /// Return the archived conflict revisions.
-    pub fn archived_conflicts(&self) -> Vec<storedpb::ConflictRevision> {
-        self.archived_conflicts.clone()
     }
 
     /// Ensure a peer exists in the encrypted sidecar even before any sync.
@@ -1109,73 +1115,6 @@ impl Store {
         Ok(decoded.files.into_values().collect())
     }
 
-    /// Add one revision to the active conflict set if it is not already tracked.
-    pub fn ensure_active_conflict_revision(
-        &mut self,
-        revision: storedpb::ConflictRevision,
-    ) -> Result<(), StorageError> {
-        let active_conflict =
-            self.active_conflict
-                .get_or_insert_with(|| storedpb::ActiveConflict {
-                    revisions: Vec::new(),
-                });
-        if active_conflict
-            .revisions
-            .iter()
-            .any(|tracked| tracked.content_id == revision.content_id)
-        {
-            return Ok(());
-        }
-        active_conflict.revisions.push(revision);
-        active_conflict
-            .revisions
-            .sort_by(|left, right| left.content_id.cmp(&right.content_id));
-        self.persist_peer_state()
-    }
-
-    /// Resolve the active conflict by archiving every non-selected revision.
-    pub fn resolve_active_conflict(
-        &mut self,
-        selected_content_id: &[u8],
-        resolved_at_secs: i64,
-        resolved_at_nanos: i64,
-    ) -> Result<Vec<storedpb::ConflictRevision>, StorageError> {
-        let Some(active_conflict) = self.active_conflict.take() else {
-            return Err(StorageError::FileNotFound);
-        };
-        if !active_conflict
-            .revisions
-            .iter()
-            .any(|revision| revision.content_id.as_slice() == selected_content_id)
-        {
-            self.active_conflict = Some(active_conflict);
-            return Err(StorageError::FileNotFound);
-        }
-
-        let mut archived = Vec::new();
-        for mut revision in active_conflict.revisions {
-            if revision.content_id.as_slice() == selected_content_id {
-                continue;
-            }
-            revision.resolved_at = resolved_at_secs;
-            revision.resolved_at_ns = resolved_at_nanos;
-            if self
-                .archived_conflicts
-                .iter()
-                .any(|archived_revision| archived_revision.content_id == revision.content_id)
-            {
-                continue;
-            }
-            self.archived_conflicts.push(revision.clone());
-            archived.push(revision);
-        }
-
-        self.archived_conflicts
-            .sort_by(|left, right| left.content_id.cmp(&right.content_id));
-        self.persist_peer_state()?;
-        Ok(archived)
-    }
-
     /// Read the raw encrypted content blob for the active revision.
     pub fn current_blob(&self) -> Result<Vec<u8>, StorageError> {
         let current = self.current.as_ref().ok_or(StorageError::FileNotFound)?;
@@ -1497,6 +1436,123 @@ impl Store {
         self.files.values().cloned().collect()
     }
 
+    /// Merge one recovered plaintext revision into the active file set.
+    pub fn merge_recovered_revision_files(
+        &mut self,
+        recovered_files: Vec<PlainFile>,
+        recovered_timestamp: (i64, i64),
+        recovered_content_id: &[u8],
+    ) -> Result<RecoveryMergeOutcome, StorageError> {
+        let mut outcome = RecoveryMergeOutcome::default();
+
+        for recovered_file in recovered_files {
+            let existing = self.files.get(&recovered_file.name).cloned();
+            match existing {
+                None => {
+                    self.files
+                        .insert(recovered_file.name.clone(), recovered_file);
+                    outcome.added_files = outcome.added_files.saturating_add(1);
+                }
+                Some(existing) if existing.data == recovered_file.data => {
+                    outcome.unchanged_files = outcome.unchanged_files.saturating_add(1);
+                }
+                Some(_) => {
+                    let recovered_name = self.unique_recovered_file_name(
+                        &recovered_file.name,
+                        recovered_timestamp,
+                        recovered_content_id,
+                        &recovered_file.data,
+                    );
+                    if self
+                        .files
+                        .get(&recovered_name)
+                        .is_some_and(|existing| existing.data == recovered_file.data)
+                    {
+                        outcome.unchanged_files = outcome.unchanged_files.saturating_add(1);
+                        continue;
+                    }
+
+                    let mut renamed_file = recovered_file;
+                    renamed_file.name = recovered_name.clone();
+                    self.files.insert(recovered_name, renamed_file);
+                    outcome.renamed_files = outcome.renamed_files.saturating_add(1);
+                }
+            }
+        }
+
+        if outcome.added_files > 0 || outcome.renamed_files > 0 {
+            self.persist_files()?;
+        }
+
+        Ok(outcome)
+    }
+
+    /// Build one unique file name for recovered content while preserving the
+    /// final extension when one exists.
+    fn unique_recovered_file_name(
+        &self,
+        original_name: &str,
+        recovered_timestamp: (i64, i64),
+        recovered_content_id: &[u8],
+        recovered_data: &[u8],
+    ) -> String {
+        let recovered_stamp = format!(
+            "recovered-{}-{:09}",
+            recovered_timestamp.0, recovered_timestamp.1
+        );
+        let content_suffix =
+            hex::encode(&recovered_content_id[..recovered_content_id.len().min(4)]);
+
+        let (stem, extension) = match original_name.rsplit_once('.') {
+            Some((stem, extension)) if !stem.is_empty() => {
+                (stem.to_string(), format!(".{extension}"))
+            }
+            _ => (original_name.to_string(), String::new()),
+        };
+        let base_name = if extension.is_empty() {
+            format!("{stem}.{recovered_stamp}")
+        } else {
+            format!("{stem}.{recovered_stamp}{extension}")
+        };
+        if self
+            .files
+            .get(&base_name)
+            .is_none_or(|existing| existing.data == recovered_data)
+        {
+            return base_name;
+        }
+
+        let with_suffix = if extension.is_empty() {
+            format!("{stem}.{recovered_stamp}-{content_suffix}")
+        } else {
+            format!("{stem}.{recovered_stamp}-{content_suffix}{extension}")
+        };
+        if self
+            .files
+            .get(&with_suffix)
+            .is_none_or(|existing| existing.data == recovered_data)
+        {
+            return with_suffix;
+        }
+
+        let mut disambiguator = 2u32;
+        loop {
+            let candidate = if extension.is_empty() {
+                format!("{stem}.{recovered_stamp}-{content_suffix}-{disambiguator}")
+            } else {
+                format!("{stem}.{recovered_stamp}-{content_suffix}-{disambiguator}{extension}")
+            };
+            if self
+                .files
+                .get(&candidate)
+                .is_none_or(|existing| existing.data == recovered_data)
+            {
+                return candidate;
+            }
+            disambiguator = disambiguator.saturating_add(1);
+        }
+    }
+
     /// Apply one peer metadata mutation transactionally against the size limit.
     fn update_peers(
         &mut self,
@@ -1530,8 +1586,6 @@ impl Store {
         let metadata = storedpb::Metadata {
             files: Vec::new(),
             peers: self.peers.clone(),
-            active_conflict: self.active_conflict.clone(),
-            archived_conflicts: self.archived_conflicts.clone(),
             node_initialized_at: self
                 .node_initialized_at
                 .map(|timestamp| timestamp.0)
@@ -1550,6 +1604,7 @@ impl Store {
                 .map(|timestamp| timestamp.1)
                 .unwrap_or(0),
             recovery_mode_enabled: self.recovery_mode_enabled,
+            current_content: current_content_summary(self.current.as_ref()),
         };
         let plaintext = metadata.encode_to_vec();
         let ciphertext = encrypt_sidecar(&self.peer_cipher, &plaintext);
@@ -1573,8 +1628,6 @@ impl Store {
                 peer
             })
             .collect();
-        self.active_conflict = metadata.active_conflict;
-        self.archived_conflicts = metadata.archived_conflicts;
         self.node_initialized_at = optional_metadata_timestamp(
             metadata.node_initialized_at,
             metadata.node_initialized_at_ns,
@@ -1590,6 +1643,20 @@ impl Store {
                 .map(|revision| (revision.created_at, revision.created_at_ns))
         });
         self.recovery_mode_enabled = metadata.recovery_mode_enabled;
+        self.current = metadata
+            .current_content
+            .as_ref()
+            .filter(|content| !content.content_id.is_empty())
+            .map(|content| {
+                let revision = self.parse_content_id(&content.content_id)?;
+                Ok::<CurrentContent, StorageError>(CurrentContent {
+                    revision,
+                    content_id: content.content_id.clone(),
+                    blob_len: usize::try_from(content.content_length).unwrap_or(usize::MAX),
+                    file_name: content_file_name(&content.content_id),
+                })
+            })
+            .transpose()?;
         Ok(true)
     }
 
@@ -2171,14 +2238,13 @@ mod tests {
                 our_content_last_verified_content_id: Vec::new(),
                 our_content_last_verified_at: 0,
             }],
-            active_conflict: None,
-            archived_conflicts: Vec::new(),
             node_initialized_at: 0,
             node_initialized_at_ns: 0,
             latest_recovered_revision: None,
             recovery_watermark_at: 0,
             recovery_watermark_at_ns: 0,
             recovery_mode_enabled: false,
+            current_content: None,
         };
         let peer_state_key = keys::derive_key(&master(), "bb/storage/peer-state", 32).unwrap();
         let peer_cipher = Aes256GcmSiv::new_from_slice(&peer_state_key).unwrap();
@@ -2203,53 +2269,6 @@ mod tests {
                 .map(|content| content.content_id.clone()),
             Some(b"legacy-content".to_vec())
         );
-    }
-
-    #[test]
-    fn active_and_archived_conflicts_round_trip() {
-        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
-        let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
-
-        store
-            .ensure_active_conflict_revision(storedpb::ConflictRevision {
-                content_id: b"conflict-a".to_vec(),
-                created_at: 10,
-                created_at_ns: 20,
-                content_length: 30,
-                file_count: 1,
-                source_peer_onion: "peer-a.onion".to_string(),
-                source_is_local: false,
-                resolved_at: 0,
-                resolved_at_ns: 0,
-            })
-            .unwrap();
-        store
-            .ensure_active_conflict_revision(storedpb::ConflictRevision {
-                content_id: b"conflict-b".to_vec(),
-                created_at: 11,
-                created_at_ns: 21,
-                content_length: 31,
-                file_count: 1,
-                source_peer_onion: String::new(),
-                source_is_local: true,
-                resolved_at: 0,
-                resolved_at_ns: 0,
-            })
-            .unwrap();
-        let archived = store
-            .resolve_active_conflict(b"conflict-b", 50, 60)
-            .unwrap();
-        assert_eq!(archived.len(), 1);
-
-        let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
-        assert!(reloaded.active_conflict().is_none());
-        assert_eq!(reloaded.archived_conflicts().len(), 1);
-        assert_eq!(
-            reloaded.archived_conflicts()[0].content_id,
-            b"conflict-a".to_vec()
-        );
-        assert_eq!(reloaded.archived_conflicts()[0].resolved_at, 50);
-        assert_eq!(reloaded.archived_conflicts()[0].resolved_at_ns, 60);
     }
 
     #[test]
@@ -2403,6 +2422,31 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![b"peer-b".to_vec(), b"peer-c".to_vec()]
         );
+    }
+
+    #[test]
+    fn reload_without_local_blob_keeps_current_content_summary_from_peer_state() {
+        let fs = Arc::new(MemoryFilesystem::new());
+        let mut store =
+            Store::new_with_time_source(fs.clone() as Arc<dyn Filesystem>, &master(), time_source())
+                .unwrap();
+
+        store.set_file("alpha.txt", b"alpha-body".to_vec()).unwrap();
+        store.flush_peer_state().unwrap();
+        let current = store.current_content().unwrap().clone();
+        fs.remove(&current.file_name).unwrap();
+
+        let reloaded =
+            Store::new_with_time_source(fs as Arc<dyn Filesystem>, &master(), time_source())
+                .unwrap();
+        let restored_current = reloaded.current_content().unwrap();
+        assert_eq!(restored_current.content_id, current.content_id);
+        assert_eq!(restored_current.file_name, current.file_name);
+        assert!(matches!(
+            reloaded.current_blob(),
+            Err(StorageError::FileNotFound)
+        ));
+        assert!(reloaded.get_file("alpha.txt").is_err());
     }
 
     #[test]
