@@ -1351,6 +1351,8 @@ impl Node {
             self.remove_unused_foreign_blob(&content_id)?;
         }
 
+        info!("purged stale persisted self-peer metadata from local storage");
+
         Ok(())
     }
 
@@ -1365,6 +1367,7 @@ impl Node {
             return Ok(());
         };
         let mut evicted_cached_content_ids = Vec::<Vec<u8>>::new();
+        let mut evicted_onions = Vec::<String>::new();
         {
             let mut store = store_mutex.lock().unwrap();
             let mut peers = store.peers();
@@ -1375,6 +1378,7 @@ impl Node {
             peers.sort_by_key(peer_eviction_order_key);
             let overflow = peers.len().saturating_sub(capacity);
             for peer in peers.into_iter().take(overflow) {
+                evicted_onions.push(self.onion_from_public_key_bytes(&peer.onion_pubkey)?);
                 if let Some(cached_content) = peer_latest_cached_content(&peer) {
                     evicted_cached_content_ids.push(cached_content.content_id);
                 }
@@ -1386,6 +1390,15 @@ impl Node {
 
         for content_id in evicted_cached_content_ids {
             self.remove_unused_foreign_blob(&content_id)?;
+        }
+
+        if !evicted_onions.is_empty() {
+            info!(
+                trimmed_peer_count = evicted_onions.len(),
+                trimmed_peers = ?evicted_onions,
+                capacity,
+                "trimmed tracked peers to the configured capacity"
+            );
         }
 
         Ok(())
@@ -1471,6 +1484,11 @@ impl Node {
         let mut known_peers = self.known_peers.lock().unwrap();
         if let Some(evicted_onion) = evicted_onion {
             known_peers.remove(&evicted_onion);
+            info!(
+                admitted_peer = %peer_onion,
+                evicted_peer = %evicted_onion,
+                "evicted a tracked peer to admit a higher-priority peer"
+            );
         }
         known_peers.insert(peer_onion);
         drop(known_peers);
@@ -2263,6 +2281,7 @@ impl Node {
 
     /// Remove an unreferenced foreign blob once no peer metadata points to it.
     fn remove_unused_foreign_blob(&self, content_id: &[u8]) -> Result<(), Status> {
+        let content_id_hex = content_id_hex(content_id);
         self.with_store(|store| {
             if store
                 .current_content_id()
@@ -2278,7 +2297,14 @@ impl Node {
             }
 
             match store.remove_mirrored_blob(content_id) {
-                Ok(()) | Err(StorageError::FileNotFound) => Ok(()),
+                Ok(()) => {
+                    info!(
+                        content_id = %content_id_hex,
+                        "removed unreferenced mirrored peer blob"
+                    );
+                    Ok(())
+                }
+                Err(StorageError::FileNotFound) => Ok(()),
                 Err(error) => Err(error),
             }
         })
@@ -2296,6 +2322,10 @@ impl Node {
             Ok(false) => Ok(MirroredBlobState::Missing),
             Err(StorageError::RecoveryRequired(_)) => {
                 let _ = store.remove_mirrored_blob(content_id);
+                warn!(
+                    content_id = %content_id_hex(content_id),
+                    "removed a corrupt mirrored peer blob during local recovery"
+                );
                 Ok(MirroredBlobState::Corrupt)
             }
             Err(error) => Err(error),
@@ -2492,11 +2522,22 @@ impl Node {
     /// Remove mirrored blobs that were selected as evictable best-effort cache entries.
     fn evict_mirrored_blobs(&self, content_ids: &[Vec<u8>]) -> Result<(), Status> {
         self.with_store(|store| {
+            let mut evicted_content_ids = Vec::new();
             for content_id in content_ids {
                 match store.remove_mirrored_blob(content_id) {
-                    Ok(()) | Err(StorageError::FileNotFound) => {}
+                    Ok(()) => {
+                        evicted_content_ids.push(content_id_hex(content_id));
+                    }
+                    Err(StorageError::FileNotFound) => {}
                     Err(error) => return Err(error),
                 }
+            }
+            if !evicted_content_ids.is_empty() {
+                info!(
+                    evicted_blob_count = evicted_content_ids.len(),
+                    evicted_content_ids = ?evicted_content_ids,
+                    "evicted best-effort mirrored peer blobs to stay within the storage budget"
+                );
             }
             Ok(())
         })
@@ -2639,7 +2680,7 @@ impl Node {
                 if let Some(previous_content_id) = previous_cached_content_id {
                     self.remove_unused_foreign_blob(&previous_content_id)?;
                 }
-                debug!(
+                info!(
                     peer = %peer_onion,
                     previous_content_id = %previous_content_id_hex,
                     "cleared mirrored peer content"
@@ -2989,6 +3030,9 @@ impl Node {
     fn resolve_conflict(&self, content_id: &[u8]) -> Result<(), Status> {
         let now = self.clock.now();
         let current_revision = self.current_conflict_revision()?;
+        let previous_revision_id = current_revision
+            .as_ref()
+            .map(|revision| hex::encode(&revision.content_id));
         if current_revision
             .as_ref()
             .is_some_and(|revision| revision.content_id.as_slice() != content_id)
@@ -3018,6 +3062,11 @@ impl Node {
             )?;
             Ok(())
         })?;
+        info!(
+            selected_revision = %hex::encode(content_id),
+            previous_revision = previous_revision_id.as_deref().unwrap_or("none"),
+            "resolved the active content conflict"
+        );
         self.refresh_known_peers_from_store()
     }
 
@@ -3748,6 +3797,17 @@ impl Node {
                 }),
             )
             .await?;
+            if our_content.is_none() {
+                let previous_content_id = peer_has_our_content
+                    .as_ref()
+                    .map(|content_id| content_id_hex(content_id))
+                    .unwrap_or_default();
+                info!(
+                    peer = %peer_onion,
+                    previous_content_id = %previous_content_id,
+                    "asked peer to clear our mirrored content because we currently have no local content"
+                );
+            }
             uploaded_our_content = our_content_length;
         }
         self.maybe_exchange_peers_with_client(peer_onion, &mut client)
@@ -4676,6 +4736,7 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
 
         self.node
             .with_store(|store| store.delete_file(&request.name))?;
+        info!(file = %request.name, "deleted a local file from the active content set");
         Ok(Response::new(clirpc::DeleteFileResponse {}))
     }
 
@@ -7809,6 +7870,75 @@ mod tests {
         let mirrored_blob = responder_node
             .with_store(|store| store.read_mirrored_blob(&requester_content.content_id))?;
         assert_eq!(mirrored_blob, requester_blob);
+
+        requester_server.abort();
+        responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_content_revision_none_clears_tracked_peer_blob_and_metadata() -> anyhow::Result<()>
+    {
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage(
+            "requester-clear",
+            requester_filesystem,
+        )?);
+        let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let responder_node = Arc::new(Node::with_local_storage(
+            "responder-clear",
+            responder_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        responder_node.set_peer_connector(connector.clone());
+
+        CliService::new(requester_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+
+        let requester_server =
+            spawn_registered_p2p_server(requester_node.clone(), connector.as_ref()).await?;
+        let responder_server =
+            spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
+        let mut requester_to_responder = connect_p2p_client(
+            requester_node.clone(),
+            responder_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
+
+        let requester_content = requester_node.responder_content()?.unwrap();
+        requester_to_responder
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                requester_content: Some(requester_content.clone()),
+            })
+            .await?;
+        assert!(cached_peer_blob(
+            responder_node.as_ref(),
+            &requester_content.content_id
+        )?);
+
+        requester_to_responder
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                requester_content: None,
+            })
+            .await?;
+
+        let peer = peer_entry(responder_node.as_ref(), requester_node.address())?
+            .context("missing tracked requester peer")?;
+        assert!(peer_latest_known_content(&peer).is_none());
+        assert!(peer_latest_cached_content(&peer).is_none());
+        assert!(!cached_peer_blob(
+            responder_node.as_ref(),
+            &requester_content.content_id
+        )?);
 
         requester_server.abort();
         responder_server.abort();

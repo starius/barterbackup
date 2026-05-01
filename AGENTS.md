@@ -120,6 +120,14 @@ Code style
 - Prefer straightforward control flow over clever compactness.
 - Keep comments and docs as English sentences with normal punctuation.
 
+Operational logging
+
+- Log irreversible or operator-significant state changes at `INFO` or higher.
+- This includes data deletion, remote content clearing, mirrored-blob removal,
+  peer eviction, conflict resolution, or any action that can give away data or
+  make it unavailable later.
+- Do not leave those events at `DEBUG`-only severity.
+
 Testing
 
 - Prefer deterministic tests.
