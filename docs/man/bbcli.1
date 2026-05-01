@@ -47,7 +47,7 @@ Manage files in the latest encrypted content blob
 Inspect and drive contracts with peers
 .TP
 .B "bbcli recovery"
-Run recovery and resolve divergent revisions
+Recover older requester revisions and manage recovery mode
 .TP
 .B "bbcli config"
 Read or update daemon configuration
@@ -80,6 +80,9 @@ wait_seconds is how long to wait for daemon startup readiness
 .RS
 default: 30
 .RE
+.TP
+.B "\-\-recovery\-mode"
+recovery_mode blocks outgoing publication until recovery is finished
 .TP
 .B "password <PASSWORD>"
 password is the inline main password or seed string
@@ -306,7 +309,7 @@ Usage: bbcli contract check <ONION_SERVICE_ID>
 .B "onion_service_id <ONION_SERVICE_ID>"
 onion_service_id is the peer onion service identifier
 .SS "bbcli recovery"
-Run recovery and resolve divergent revisions
+Recover older requester revisions and manage recovery mode
 .PP
 .nf
 .B Usage:
@@ -316,57 +319,24 @@ Usage: bbcli recovery <COMMAND>
 .B Subcommands
 .TP
 .B "bbcli recovery run"
-Recover the newest known local content version from peers
+Recover older requester revisions from peers and merge them locally
 .TP
-.B "bbcli recovery conflicts"
-List unresolved and archived conflicting revisions
-.TP
-.B "bbcli recovery checkout"
-Write one conflicting or archived revision to a local directory
-.TP
-.B "bbcli recovery resolve"
-Choose the conflicting revision that should stay active
+.B "bbcli recovery finish"
+Finish recovery mode and allow publication from the current generation
 .SS "bbcli recovery run"
-Recover the newest known local content version from peers
+Recover older requester revisions from peers and merge them locally
 .PP
 .nf
 .B Usage:
 Usage: bbcli recovery run
 .fi
-.SS "bbcli recovery conflicts"
-List unresolved and archived conflicting revisions
+.SS "bbcli recovery finish"
+Finish recovery mode and allow publication from the current generation
 .PP
 .nf
 .B Usage:
-Usage: bbcli recovery conflicts
+Usage: bbcli recovery finish
 .fi
-.SS "bbcli recovery checkout"
-Write one conflicting or archived revision to a local directory
-.PP
-.nf
-.B Usage:
-Usage: bbcli recovery checkout <CONTENT_ID> <OUT_DIR>
-.fi
-.PP
-.B Options
-.TP
-.B "content_id <CONTENT_ID>"
-content_id is the hex\-encoded revision identifier
-.TP
-.B "out_dir <OUT_DIR>"
-out_dir is the local directory that receives the plaintext files
-.SS "bbcli recovery resolve"
-Choose the conflicting revision that should stay active
-.PP
-.nf
-.B Usage:
-Usage: bbcli recovery resolve <CONTENT_ID>
-.fi
-.PP
-.B Options
-.TP
-.B "content_id <CONTENT_ID>"
-content_id is the hex\-encoded revision identifier to keep active
 .SS "bbcli config"
 Read or update daemon configuration
 .PP

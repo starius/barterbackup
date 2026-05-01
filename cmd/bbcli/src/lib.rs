@@ -198,7 +198,7 @@ enum Command {
         cmd: ContractCommand,
     },
 
-    /// Run recovery and resolve divergent revisions.
+    /// Recover older requester revisions and manage recovery mode.
     Recovery {
         #[command(subcommand)]
         cmd: RecoveryCommand,

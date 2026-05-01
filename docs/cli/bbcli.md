@@ -22,7 +22,7 @@ Usage: bbcli [OPTIONS] <COMMAND>
 - `peer`: Manage known peers
 - `file`: Manage files in the latest encrypted content blob
 - `contract`: Inspect and drive contracts with peers
-- `recovery`: Run recovery and resolve divergent revisions
+- `recovery`: Recover older requester revisions and manage recovery mode
 - `config`: Read or update daemon configuration
 
 ## `bbcli state`
@@ -50,6 +50,7 @@ Usage: bbcli init [OPTIONS] [PASSWORD]
 - `--password-stdin`: password_stdin reads the main password from standard input
 - `--allow-weak-password`: allow_weak_password bypasses the local password-strength gate
 - `--wait-seconds <WAIT_SECONDS>`: wait_seconds is how long to wait for daemon startup readiness (default: `30`)
+- `--recovery-mode`: recovery_mode blocks outgoing publication until recovery is finished
 - `password <PASSWORD>`: password is the inline main password or seed string
 
 ## `bbcli unlock`
@@ -280,7 +281,7 @@ Usage: bbcli contract check <ONION_SERVICE_ID>
 
 ## `bbcli recovery`
 
-Run recovery and resolve divergent revisions
+Recover older requester revisions and manage recovery mode
 
 ### Usage
 
@@ -290,14 +291,12 @@ Usage: bbcli recovery <COMMAND>
 
 ### Subcommands
 
-- `run`: Recover the newest known local content version from peers
-- `conflicts`: List unresolved and archived conflicting revisions
-- `checkout`: Write one conflicting or archived revision to a local directory
-- `resolve`: Choose the conflicting revision that should stay active
+- `run`: Recover older requester revisions from peers and merge them locally
+- `finish`: Finish recovery mode and allow publication from the current generation
 
 ### `bbcli recovery run`
 
-Recover the newest known local content version from peers
+Recover older requester revisions from peers and merge them locally
 
 #### Usage
 
@@ -305,44 +304,15 @@ Recover the newest known local content version from peers
 Usage: bbcli recovery run
 ```
 
-### `bbcli recovery conflicts`
+### `bbcli recovery finish`
 
-List unresolved and archived conflicting revisions
-
-#### Usage
-
-```text
-Usage: bbcli recovery conflicts
-```
-
-### `bbcli recovery checkout`
-
-Write one conflicting or archived revision to a local directory
+Finish recovery mode and allow publication from the current generation
 
 #### Usage
 
 ```text
-Usage: bbcli recovery checkout <CONTENT_ID> <OUT_DIR>
+Usage: bbcli recovery finish
 ```
-
-#### Options
-
-- `content_id <CONTENT_ID>`: content_id is the hex-encoded revision identifier
-- `out_dir <OUT_DIR>`: out_dir is the local directory that receives the plaintext files
-
-### `bbcli recovery resolve`
-
-Choose the conflicting revision that should stay active
-
-#### Usage
-
-```text
-Usage: bbcli recovery resolve <CONTENT_ID>
-```
-
-#### Options
-
-- `content_id <CONTENT_ID>`: content_id is the hex-encoded revision identifier to keep active
 
 ## `bbcli config`
 

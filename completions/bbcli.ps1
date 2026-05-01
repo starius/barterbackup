@@ -32,7 +32,7 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             [CompletionResult]::new('peer', 'peer', [CompletionResultType]::ParameterValue, 'Manage known peers')
             [CompletionResult]::new('file', 'file', [CompletionResultType]::ParameterValue, 'Manage files in the latest encrypted content blob')
             [CompletionResult]::new('contract', 'contract', [CompletionResultType]::ParameterValue, 'Inspect and drive contracts with peers')
-            [CompletionResult]::new('recovery', 'recovery', [CompletionResultType]::ParameterValue, 'Run recovery and resolve divergent revisions')
+            [CompletionResult]::new('recovery', 'recovery', [CompletionResultType]::ParameterValue, 'Recover older requester revisions and manage recovery mode')
             [CompletionResult]::new('config', 'config', [CompletionResultType]::ParameterValue, 'Read or update daemon configuration')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
@@ -46,6 +46,7 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             [CompletionResult]::new('--wait-seconds', '--wait-seconds', [CompletionResultType]::ParameterName, 'wait_seconds is how long to wait for daemon startup readiness')
             [CompletionResult]::new('--password-stdin', '--password-stdin', [CompletionResultType]::ParameterName, 'password_stdin reads the main password from standard input')
             [CompletionResult]::new('--allow-weak-password', '--allow-weak-password', [CompletionResultType]::ParameterName, 'allow_weak_password bypasses the local password-strength gate')
+            [CompletionResult]::new('--recovery-mode', '--recovery-mode', [CompletionResultType]::ParameterName, 'recovery_mode blocks outgoing publication until recovery is finished')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -217,10 +218,8 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
         'bbcli;recovery' {
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
-            [CompletionResult]::new('run', 'run', [CompletionResultType]::ParameterValue, 'Recover the newest known local content version from peers')
-            [CompletionResult]::new('conflicts', 'conflicts', [CompletionResultType]::ParameterValue, 'List unresolved and archived conflicting revisions')
-            [CompletionResult]::new('checkout', 'checkout', [CompletionResultType]::ParameterValue, 'Write one conflicting or archived revision to a local directory')
-            [CompletionResult]::new('resolve', 'resolve', [CompletionResultType]::ParameterValue, 'Choose the conflicting revision that should stay active')
+            [CompletionResult]::new('run', 'run', [CompletionResultType]::ParameterValue, 'Recover older requester revisions from peers and merge them locally')
+            [CompletionResult]::new('finish', 'finish', [CompletionResultType]::ParameterValue, 'Finish recovery mode and allow publication from the current generation')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
         }
@@ -229,39 +228,21 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
-        'bbcli;recovery;conflicts' {
-            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
-            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
-            break
-        }
-        'bbcli;recovery;checkout' {
-            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
-            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
-            break
-        }
-        'bbcli;recovery;resolve' {
+        'bbcli;recovery;finish' {
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'bbcli;recovery;help' {
-            [CompletionResult]::new('run', 'run', [CompletionResultType]::ParameterValue, 'Recover the newest known local content version from peers')
-            [CompletionResult]::new('conflicts', 'conflicts', [CompletionResultType]::ParameterValue, 'List unresolved and archived conflicting revisions')
-            [CompletionResult]::new('checkout', 'checkout', [CompletionResultType]::ParameterValue, 'Write one conflicting or archived revision to a local directory')
-            [CompletionResult]::new('resolve', 'resolve', [CompletionResultType]::ParameterValue, 'Choose the conflicting revision that should stay active')
+            [CompletionResult]::new('run', 'run', [CompletionResultType]::ParameterValue, 'Recover older requester revisions from peers and merge them locally')
+            [CompletionResult]::new('finish', 'finish', [CompletionResultType]::ParameterValue, 'Finish recovery mode and allow publication from the current generation')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
         }
         'bbcli;recovery;help;run' {
             break
         }
-        'bbcli;recovery;help;conflicts' {
-            break
-        }
-        'bbcli;recovery;help;checkout' {
-            break
-        }
-        'bbcli;recovery;help;resolve' {
+        'bbcli;recovery;help;finish' {
             break
         }
         'bbcli;recovery;help;help' {
@@ -313,7 +294,7 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             [CompletionResult]::new('peer', 'peer', [CompletionResultType]::ParameterValue, 'Manage known peers')
             [CompletionResult]::new('file', 'file', [CompletionResultType]::ParameterValue, 'Manage files in the latest encrypted content blob')
             [CompletionResult]::new('contract', 'contract', [CompletionResultType]::ParameterValue, 'Inspect and drive contracts with peers')
-            [CompletionResult]::new('recovery', 'recovery', [CompletionResultType]::ParameterValue, 'Run recovery and resolve divergent revisions')
+            [CompletionResult]::new('recovery', 'recovery', [CompletionResultType]::ParameterValue, 'Recover older requester revisions and manage recovery mode')
             [CompletionResult]::new('config', 'config', [CompletionResultType]::ParameterValue, 'Read or update daemon configuration')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
@@ -384,22 +365,14 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             break
         }
         'bbcli;help;recovery' {
-            [CompletionResult]::new('run', 'run', [CompletionResultType]::ParameterValue, 'Recover the newest known local content version from peers')
-            [CompletionResult]::new('conflicts', 'conflicts', [CompletionResultType]::ParameterValue, 'List unresolved and archived conflicting revisions')
-            [CompletionResult]::new('checkout', 'checkout', [CompletionResultType]::ParameterValue, 'Write one conflicting or archived revision to a local directory')
-            [CompletionResult]::new('resolve', 'resolve', [CompletionResultType]::ParameterValue, 'Choose the conflicting revision that should stay active')
+            [CompletionResult]::new('run', 'run', [CompletionResultType]::ParameterValue, 'Recover older requester revisions from peers and merge them locally')
+            [CompletionResult]::new('finish', 'finish', [CompletionResultType]::ParameterValue, 'Finish recovery mode and allow publication from the current generation')
             break
         }
         'bbcli;help;recovery;run' {
             break
         }
-        'bbcli;help;recovery;conflicts' {
-            break
-        }
-        'bbcli;help;recovery;checkout' {
-            break
-        }
-        'bbcli;help;recovery;resolve' {
+        'bbcli;help;recovery;finish' {
             break
         }
         'bbcli;help;config' {

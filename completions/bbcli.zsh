@@ -39,6 +39,7 @@ _arguments "${_arguments_options[@]}" : \
 '--wait-seconds=[wait_seconds is how long to wait for daemon startup readiness]:WAIT_SECONDS:_default' \
 '--password-stdin[password_stdin reads the main password from standard input]' \
 '--allow-weak-password[allow_weak_password bypasses the local password-strength gate]' \
+'--recovery-mode[recovery_mode blocks outgoing publication until recovery is finished]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '::password -- password is the inline main password or seed string:_default' \
@@ -318,25 +319,10 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
-(conflicts)
+(finish)
 _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
 '--help[Print help]' \
-&& ret=0
-;;
-(checkout)
-_arguments "${_arguments_options[@]}" : \
-'-h[Print help]' \
-'--help[Print help]' \
-':content_id -- content_id is the hex-encoded revision identifier:_default' \
-':out_dir -- out_dir is the local directory that receives the plaintext files:_files' \
-&& ret=0
-;;
-(resolve)
-_arguments "${_arguments_options[@]}" : \
-'-h[Print help]' \
-'--help[Print help]' \
-':content_id -- content_id is the hex-encoded revision identifier to keep active:_default' \
 && ret=0
 ;;
 (help)
@@ -355,15 +341,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
-(conflicts)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(checkout)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(resolve)
+(finish)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -578,15 +556,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
-(conflicts)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(checkout)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(resolve)
+(finish)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -641,7 +611,7 @@ _bbcli_commands() {
 'peer:Manage known peers' \
 'file:Manage files in the latest encrypted content blob' \
 'contract:Inspect and drive contracts with peers' \
-'recovery:Run recovery and resolve divergent revisions' \
+'recovery:Recover older requester revisions and manage recovery mode' \
 'config:Read or update daemon configuration' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -822,7 +792,7 @@ _bbcli__subcmd__help_commands() {
 'peer:Manage known peers' \
 'file:Manage files in the latest encrypted content blob' \
 'contract:Inspect and drive contracts with peers' \
-'recovery:Run recovery and resolve divergent revisions' \
+'recovery:Recover older requester revisions and manage recovery mode' \
 'config:Read or update daemon configuration' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -943,27 +913,15 @@ _bbcli__subcmd__help__subcmd__peer__subcmd__unpin_commands() {
 (( $+functions[_bbcli__subcmd__help__subcmd__recovery_commands] )) ||
 _bbcli__subcmd__help__subcmd__recovery_commands() {
     local commands; commands=(
-'run:Recover the newest known local content version from peers' \
-'conflicts:List unresolved and archived conflicting revisions' \
-'checkout:Write one conflicting or archived revision to a local directory' \
-'resolve:Choose the conflicting revision that should stay active' \
+'run:Recover older requester revisions from peers and merge them locally' \
+'finish:Finish recovery mode and allow publication from the current generation' \
     )
     _describe -t commands 'bbcli help recovery commands' commands "$@"
 }
-(( $+functions[_bbcli__subcmd__help__subcmd__recovery__subcmd__checkout_commands] )) ||
-_bbcli__subcmd__help__subcmd__recovery__subcmd__checkout_commands() {
+(( $+functions[_bbcli__subcmd__help__subcmd__recovery__subcmd__finish_commands] )) ||
+_bbcli__subcmd__help__subcmd__recovery__subcmd__finish_commands() {
     local commands; commands=()
-    _describe -t commands 'bbcli help recovery checkout commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__help__subcmd__recovery__subcmd__conflicts_commands] )) ||
-_bbcli__subcmd__help__subcmd__recovery__subcmd__conflicts_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli help recovery conflicts commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__help__subcmd__recovery__subcmd__resolve_commands] )) ||
-_bbcli__subcmd__help__subcmd__recovery__subcmd__resolve_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli help recovery resolve commands' commands "$@"
+    _describe -t commands 'bbcli help recovery finish commands' commands "$@"
 }
 (( $+functions[_bbcli__subcmd__help__subcmd__recovery__subcmd__run_commands] )) ||
 _bbcli__subcmd__help__subcmd__recovery__subcmd__run_commands() {
@@ -1060,64 +1018,40 @@ _bbcli__subcmd__peer__subcmd__unpin_commands() {
 (( $+functions[_bbcli__subcmd__recovery_commands] )) ||
 _bbcli__subcmd__recovery_commands() {
     local commands; commands=(
-'run:Recover the newest known local content version from peers' \
-'conflicts:List unresolved and archived conflicting revisions' \
-'checkout:Write one conflicting or archived revision to a local directory' \
-'resolve:Choose the conflicting revision that should stay active' \
+'run:Recover older requester revisions from peers and merge them locally' \
+'finish:Finish recovery mode and allow publication from the current generation' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'bbcli recovery commands' commands "$@"
 }
-(( $+functions[_bbcli__subcmd__recovery__subcmd__checkout_commands] )) ||
-_bbcli__subcmd__recovery__subcmd__checkout_commands() {
+(( $+functions[_bbcli__subcmd__recovery__subcmd__finish_commands] )) ||
+_bbcli__subcmd__recovery__subcmd__finish_commands() {
     local commands; commands=()
-    _describe -t commands 'bbcli recovery checkout commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__recovery__subcmd__conflicts_commands] )) ||
-_bbcli__subcmd__recovery__subcmd__conflicts_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli recovery conflicts commands' commands "$@"
+    _describe -t commands 'bbcli recovery finish commands' commands "$@"
 }
 (( $+functions[_bbcli__subcmd__recovery__subcmd__help_commands] )) ||
 _bbcli__subcmd__recovery__subcmd__help_commands() {
     local commands; commands=(
-'run:Recover the newest known local content version from peers' \
-'conflicts:List unresolved and archived conflicting revisions' \
-'checkout:Write one conflicting or archived revision to a local directory' \
-'resolve:Choose the conflicting revision that should stay active' \
+'run:Recover older requester revisions from peers and merge them locally' \
+'finish:Finish recovery mode and allow publication from the current generation' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'bbcli recovery help commands' commands "$@"
 }
-(( $+functions[_bbcli__subcmd__recovery__subcmd__help__subcmd__checkout_commands] )) ||
-_bbcli__subcmd__recovery__subcmd__help__subcmd__checkout_commands() {
+(( $+functions[_bbcli__subcmd__recovery__subcmd__help__subcmd__finish_commands] )) ||
+_bbcli__subcmd__recovery__subcmd__help__subcmd__finish_commands() {
     local commands; commands=()
-    _describe -t commands 'bbcli recovery help checkout commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__recovery__subcmd__help__subcmd__conflicts_commands] )) ||
-_bbcli__subcmd__recovery__subcmd__help__subcmd__conflicts_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli recovery help conflicts commands' commands "$@"
+    _describe -t commands 'bbcli recovery help finish commands' commands "$@"
 }
 (( $+functions[_bbcli__subcmd__recovery__subcmd__help__subcmd__help_commands] )) ||
 _bbcli__subcmd__recovery__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'bbcli recovery help help commands' commands "$@"
 }
-(( $+functions[_bbcli__subcmd__recovery__subcmd__help__subcmd__resolve_commands] )) ||
-_bbcli__subcmd__recovery__subcmd__help__subcmd__resolve_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli recovery help resolve commands' commands "$@"
-}
 (( $+functions[_bbcli__subcmd__recovery__subcmd__help__subcmd__run_commands] )) ||
 _bbcli__subcmd__recovery__subcmd__help__subcmd__run_commands() {
     local commands; commands=()
     _describe -t commands 'bbcli recovery help run commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__recovery__subcmd__resolve_commands] )) ||
-_bbcli__subcmd__recovery__subcmd__resolve_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli recovery resolve commands' commands "$@"
 }
 (( $+functions[_bbcli__subcmd__recovery__subcmd__run_commands] )) ||
 _bbcli__subcmd__recovery__subcmd__run_commands() {

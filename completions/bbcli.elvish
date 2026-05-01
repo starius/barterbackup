@@ -29,7 +29,7 @@ set edit:completion:arg-completer[bbcli] = {|@words|
             cand peer 'Manage known peers'
             cand file 'Manage files in the latest encrypted content blob'
             cand contract 'Inspect and drive contracts with peers'
-            cand recovery 'Run recovery and resolve divergent revisions'
+            cand recovery 'Recover older requester revisions and manage recovery mode'
             cand config 'Read or update daemon configuration'
             cand help 'Print this message or the help of the given subcommand(s)'
         }
@@ -41,6 +41,7 @@ set edit:completion:arg-completer[bbcli] = {|@words|
             cand --wait-seconds 'wait_seconds is how long to wait for daemon startup readiness'
             cand --password-stdin 'password_stdin reads the main password from standard input'
             cand --allow-weak-password 'allow_weak_password bypasses the local password-strength gate'
+            cand --recovery-mode 'recovery_mode blocks outgoing publication until recovery is finished'
             cand -h 'Print help'
             cand --help 'Print help'
         }
@@ -178,42 +179,26 @@ set edit:completion:arg-completer[bbcli] = {|@words|
         &'bbcli;recovery'= {
             cand -h 'Print help'
             cand --help 'Print help'
-            cand run 'Recover the newest known local content version from peers'
-            cand conflicts 'List unresolved and archived conflicting revisions'
-            cand checkout 'Write one conflicting or archived revision to a local directory'
-            cand resolve 'Choose the conflicting revision that should stay active'
+            cand run 'Recover older requester revisions from peers and merge them locally'
+            cand finish 'Finish recovery mode and allow publication from the current generation'
             cand help 'Print this message or the help of the given subcommand(s)'
         }
         &'bbcli;recovery;run'= {
             cand -h 'Print help'
             cand --help 'Print help'
         }
-        &'bbcli;recovery;conflicts'= {
-            cand -h 'Print help'
-            cand --help 'Print help'
-        }
-        &'bbcli;recovery;checkout'= {
-            cand -h 'Print help'
-            cand --help 'Print help'
-        }
-        &'bbcli;recovery;resolve'= {
+        &'bbcli;recovery;finish'= {
             cand -h 'Print help'
             cand --help 'Print help'
         }
         &'bbcli;recovery;help'= {
-            cand run 'Recover the newest known local content version from peers'
-            cand conflicts 'List unresolved and archived conflicting revisions'
-            cand checkout 'Write one conflicting or archived revision to a local directory'
-            cand resolve 'Choose the conflicting revision that should stay active'
+            cand run 'Recover older requester revisions from peers and merge them locally'
+            cand finish 'Finish recovery mode and allow publication from the current generation'
             cand help 'Print this message or the help of the given subcommand(s)'
         }
         &'bbcli;recovery;help;run'= {
         }
-        &'bbcli;recovery;help;conflicts'= {
-        }
-        &'bbcli;recovery;help;checkout'= {
-        }
-        &'bbcli;recovery;help;resolve'= {
+        &'bbcli;recovery;help;finish'= {
         }
         &'bbcli;recovery;help;help'= {
         }
@@ -256,7 +241,7 @@ set edit:completion:arg-completer[bbcli] = {|@words|
             cand peer 'Manage known peers'
             cand file 'Manage files in the latest encrypted content blob'
             cand contract 'Inspect and drive contracts with peers'
-            cand recovery 'Run recovery and resolve divergent revisions'
+            cand recovery 'Recover older requester revisions and manage recovery mode'
             cand config 'Read or update daemon configuration'
             cand help 'Print this message or the help of the given subcommand(s)'
         }
@@ -308,18 +293,12 @@ set edit:completion:arg-completer[bbcli] = {|@words|
         &'bbcli;help;contract;check'= {
         }
         &'bbcli;help;recovery'= {
-            cand run 'Recover the newest known local content version from peers'
-            cand conflicts 'List unresolved and archived conflicting revisions'
-            cand checkout 'Write one conflicting or archived revision to a local directory'
-            cand resolve 'Choose the conflicting revision that should stay active'
+            cand run 'Recover older requester revisions from peers and merge them locally'
+            cand finish 'Finish recovery mode and allow publication from the current generation'
         }
         &'bbcli;help;recovery;run'= {
         }
-        &'bbcli;help;recovery;conflicts'= {
-        }
-        &'bbcli;help;recovery;checkout'= {
-        }
-        &'bbcli;help;recovery;resolve'= {
+        &'bbcli;help;recovery;finish'= {
         }
         &'bbcli;help;config'= {
             cand get 'Print the current configuration and derived storage usage data'
