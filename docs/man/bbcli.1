@@ -29,7 +29,7 @@ env: BBCLI_DATA_DIR
 Print daemon state
 .TP
 .B "bbcli init"
-Initialize daemon storage with the main password
+Initialize daemon storage with the main password or complete one recovery\-mode initialization
 .TP
 .B "bbcli unlock"
 Send the main password to the daemon unlock path
@@ -46,9 +46,6 @@ Manage files in the latest encrypted content blob
 .B "bbcli contract"
 Inspect and drive contracts with peers
 .TP
-.B "bbcli recovery"
-Recover older requester revisions and manage recovery mode
-.TP
 .B "bbcli config"
 Read or update daemon configuration
 .SH COMMANDS
@@ -60,11 +57,12 @@ Print daemon state
 Usage: bbcli state
 .fi
 .SS "bbcli init"
-Initialize daemon storage with the main password
+Initialize daemon storage with the main password or complete one recovery\-mode initialization
 .PP
 .nf
 .B Usage:
 Usage: bbcli init [OPTIONS] [PASSWORD]
+       init <COMMAND>
 .fi
 .PP
 .B Options
@@ -86,6 +84,18 @@ recovery_mode blocks outgoing publication until recovery is finished
 .TP
 .B "password <PASSWORD>"
 password is the inline main password or seed string
+.PP
+.B Subcommands
+.TP
+.B "bbcli init complete"
+Complete recovery\-mode initialization and allow publication
+.SS "bbcli init complete"
+Complete recovery\-mode initialization and allow publication
+.PP
+.nf
+.B Usage:
+Usage: bbcli init complete
+.fi
 .SS "bbcli unlock"
 Send the main password to the daemon unlock path
 .PP
@@ -308,35 +318,6 @@ Usage: bbcli contract check <ONION_SERVICE_ID>
 .TP
 .B "onion_service_id <ONION_SERVICE_ID>"
 onion_service_id is the peer onion service identifier
-.SS "bbcli recovery"
-Recover older requester revisions and manage recovery mode
-.PP
-.nf
-.B Usage:
-Usage: bbcli recovery <COMMAND>
-.fi
-.PP
-.B Subcommands
-.TP
-.B "bbcli recovery run"
-Recover older requester revisions from peers and merge them locally
-.TP
-.B "bbcli recovery finish"
-Finish recovery mode and allow publication from the current generation
-.SS "bbcli recovery run"
-Recover older requester revisions from peers and merge them locally
-.PP
-.nf
-.B Usage:
-Usage: bbcli recovery run
-.fi
-.SS "bbcli recovery finish"
-Finish recovery mode and allow publication from the current generation
-.PP
-.nf
-.B Usage:
-Usage: bbcli recovery finish
-.fi
 .SS "bbcli config"
 Read or update daemon configuration
 .PP

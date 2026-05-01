@@ -26,13 +26,12 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('state', 'state', [CompletionResultType]::ParameterValue, 'Print daemon state')
-            [CompletionResult]::new('init', 'init', [CompletionResultType]::ParameterValue, 'Initialize daemon storage with the main password')
+            [CompletionResult]::new('init', 'init', [CompletionResultType]::ParameterValue, 'Initialize daemon storage with the main password or complete one recovery-mode initialization')
             [CompletionResult]::new('unlock', 'unlock', [CompletionResultType]::ParameterValue, 'Send the main password to the daemon unlock path')
             [CompletionResult]::new('stop', 'stop', [CompletionResultType]::ParameterValue, 'Ask the daemon to shut down gracefully')
             [CompletionResult]::new('peer', 'peer', [CompletionResultType]::ParameterValue, 'Manage known peers')
             [CompletionResult]::new('file', 'file', [CompletionResultType]::ParameterValue, 'Manage files in the latest encrypted content blob')
             [CompletionResult]::new('contract', 'contract', [CompletionResultType]::ParameterValue, 'Inspect and drive contracts with peers')
-            [CompletionResult]::new('recovery', 'recovery', [CompletionResultType]::ParameterValue, 'Recover older requester revisions and manage recovery mode')
             [CompletionResult]::new('config', 'config', [CompletionResultType]::ParameterValue, 'Read or update daemon configuration')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
@@ -49,6 +48,24 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             [CompletionResult]::new('--recovery-mode', '--recovery-mode', [CompletionResultType]::ParameterName, 'recovery_mode blocks outgoing publication until recovery is finished')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('complete', 'complete', [CompletionResultType]::ParameterValue, 'Complete recovery-mode initialization and allow publication')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'bbcli;init;complete' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;init;help' {
+            [CompletionResult]::new('complete', 'complete', [CompletionResultType]::ParameterValue, 'Complete recovery-mode initialization and allow publication')
+            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
+            break
+        }
+        'bbcli;init;help;complete' {
+            break
+        }
+        'bbcli;init;help;help' {
             break
         }
         'bbcli;unlock' {
@@ -215,39 +232,6 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
         'bbcli;contract;help;help' {
             break
         }
-        'bbcli;recovery' {
-            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
-            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
-            [CompletionResult]::new('run', 'run', [CompletionResultType]::ParameterValue, 'Recover older requester revisions from peers and merge them locally')
-            [CompletionResult]::new('finish', 'finish', [CompletionResultType]::ParameterValue, 'Finish recovery mode and allow publication from the current generation')
-            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
-            break
-        }
-        'bbcli;recovery;run' {
-            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
-            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
-            break
-        }
-        'bbcli;recovery;finish' {
-            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
-            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
-            break
-        }
-        'bbcli;recovery;help' {
-            [CompletionResult]::new('run', 'run', [CompletionResultType]::ParameterValue, 'Recover older requester revisions from peers and merge them locally')
-            [CompletionResult]::new('finish', 'finish', [CompletionResultType]::ParameterValue, 'Finish recovery mode and allow publication from the current generation')
-            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
-            break
-        }
-        'bbcli;recovery;help;run' {
-            break
-        }
-        'bbcli;recovery;help;finish' {
-            break
-        }
-        'bbcli;recovery;help;help' {
-            break
-        }
         'bbcli;config' {
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
@@ -288,13 +272,12 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
         }
         'bbcli;help' {
             [CompletionResult]::new('state', 'state', [CompletionResultType]::ParameterValue, 'Print daemon state')
-            [CompletionResult]::new('init', 'init', [CompletionResultType]::ParameterValue, 'Initialize daemon storage with the main password')
+            [CompletionResult]::new('init', 'init', [CompletionResultType]::ParameterValue, 'Initialize daemon storage with the main password or complete one recovery-mode initialization')
             [CompletionResult]::new('unlock', 'unlock', [CompletionResultType]::ParameterValue, 'Send the main password to the daemon unlock path')
             [CompletionResult]::new('stop', 'stop', [CompletionResultType]::ParameterValue, 'Ask the daemon to shut down gracefully')
             [CompletionResult]::new('peer', 'peer', [CompletionResultType]::ParameterValue, 'Manage known peers')
             [CompletionResult]::new('file', 'file', [CompletionResultType]::ParameterValue, 'Manage files in the latest encrypted content blob')
             [CompletionResult]::new('contract', 'contract', [CompletionResultType]::ParameterValue, 'Inspect and drive contracts with peers')
-            [CompletionResult]::new('recovery', 'recovery', [CompletionResultType]::ParameterValue, 'Recover older requester revisions and manage recovery mode')
             [CompletionResult]::new('config', 'config', [CompletionResultType]::ParameterValue, 'Read or update daemon configuration')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
@@ -303,6 +286,10 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             break
         }
         'bbcli;help;init' {
+            [CompletionResult]::new('complete', 'complete', [CompletionResultType]::ParameterValue, 'Complete recovery-mode initialization and allow publication')
+            break
+        }
+        'bbcli;help;init;complete' {
             break
         }
         'bbcli;help;unlock' {
@@ -362,17 +349,6 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             break
         }
         'bbcli;help;contract;check' {
-            break
-        }
-        'bbcli;help;recovery' {
-            [CompletionResult]::new('run', 'run', [CompletionResultType]::ParameterValue, 'Recover older requester revisions from peers and merge them locally')
-            [CompletionResult]::new('finish', 'finish', [CompletionResultType]::ParameterValue, 'Finish recovery mode and allow publication from the current generation')
-            break
-        }
-        'bbcli;help;recovery;run' {
-            break
-        }
-        'bbcli;help;recovery;finish' {
             break
         }
         'bbcli;help;config' {

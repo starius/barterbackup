@@ -16,13 +16,12 @@ Usage: bbcli [OPTIONS] <COMMAND>
 ## Subcommands
 
 - `state`: Print daemon state
-- `init`: Initialize daemon storage with the main password
+- `init`: Initialize daemon storage with the main password or complete one recovery-mode initialization
 - `unlock`: Send the main password to the daemon unlock path
 - `stop`: Ask the daemon to shut down gracefully
 - `peer`: Manage known peers
 - `file`: Manage files in the latest encrypted content blob
 - `contract`: Inspect and drive contracts with peers
-- `recovery`: Recover older requester revisions and manage recovery mode
 - `config`: Read or update daemon configuration
 
 ## `bbcli state`
@@ -37,12 +36,13 @@ Usage: bbcli state
 
 ## `bbcli init`
 
-Initialize daemon storage with the main password
+Initialize daemon storage with the main password or complete one recovery-mode initialization
 
 ### Usage
 
 ```text
 Usage: bbcli init [OPTIONS] [PASSWORD]
+       init <COMMAND>
 ```
 
 ### Options
@@ -52,6 +52,20 @@ Usage: bbcli init [OPTIONS] [PASSWORD]
 - `--wait-seconds <WAIT_SECONDS>`: wait_seconds is how long to wait for daemon startup readiness (default: `30`)
 - `--recovery-mode`: recovery_mode blocks outgoing publication until recovery is finished
 - `password <PASSWORD>`: password is the inline main password or seed string
+
+### Subcommands
+
+- `complete`: Complete recovery-mode initialization and allow publication
+
+### `bbcli init complete`
+
+Complete recovery-mode initialization and allow publication
+
+#### Usage
+
+```text
+Usage: bbcli init complete
+```
 
 ## `bbcli unlock`
 
@@ -278,41 +292,6 @@ Usage: bbcli contract check <ONION_SERVICE_ID>
 #### Options
 
 - `onion_service_id <ONION_SERVICE_ID>`: onion_service_id is the peer onion service identifier
-
-## `bbcli recovery`
-
-Recover older requester revisions and manage recovery mode
-
-### Usage
-
-```text
-Usage: bbcli recovery <COMMAND>
-```
-
-### Subcommands
-
-- `run`: Recover older requester revisions from peers and merge them locally
-- `finish`: Finish recovery mode and allow publication from the current generation
-
-### `bbcli recovery run`
-
-Recover older requester revisions from peers and merge them locally
-
-#### Usage
-
-```text
-Usage: bbcli recovery run
-```
-
-### `bbcli recovery finish`
-
-Finish recovery mode and allow publication from the current generation
-
-#### Usage
-
-```text
-Usage: bbcli recovery finish
-```
 
 ## `bbcli config`
 

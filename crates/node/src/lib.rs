@@ -1696,6 +1696,19 @@ impl Node {
         peer_onion: &str,
         client: &mut transport::PeerClient,
     ) {
+        match self.publication_lineage_window() {
+            Ok(Some(_)) => {}
+            Ok(None) => return,
+            Err(error) => {
+                warn!(
+                    peer = %peer_onion,
+                    %error,
+                    "live peer-contact recovery probe skipped because lineage state is unavailable"
+                );
+                return;
+            }
+        }
+
         if !self.begin_live_recovery_probe_if_due(peer_onion) {
             return;
         }
@@ -3207,8 +3220,8 @@ impl Node {
         })
     }
 
-    /// Disable recovery mode and advance the recovery watermark.
-    fn finish_recovery_mode(&self) -> Result<(), Status> {
+    /// Complete recovery-mode initialization and advance the recovery watermark.
+    fn complete_initialization(&self) -> Result<(), Status> {
         self.with_store(|store| store.finish_recovery_mode())
     }
 
@@ -3232,7 +3245,7 @@ impl Node {
     fn publish_blocked_reason(&self) -> Result<Option<String>, Status> {
         if self.recovery_mode_enabled()? {
             return Ok(Some(
-                "recovery mode is enabled; finish recovery before publishing".to_string(),
+                "recovery mode is enabled; run `bbcli init complete` before publishing".to_string(),
             ));
         }
 
@@ -3279,6 +3292,9 @@ impl Node {
             match store.read_mirrored_blob(&cached_content.content_id) {
                 Ok(blob) => Ok(i64::try_from(blob.len()).unwrap_or(i64::MAX)),
                 Err(StorageError::FileNotFound) => Ok(0),
+                // Treat corrupt cached mirror bytes as absent here so proposal
+                // and inventory paths can continue into the refresh logic.
+                Err(StorageError::Message(_)) => Ok(0),
                 Err(error) => Err(error),
             }
         })
@@ -4871,13 +4887,6 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         Box<dyn Stream<Item = Result<clirpc::CheckContractUpdate, tonic::Status>> + Send + 'static>,
     >;
 
-    /// RecoverContentStream is the streaming response for recovery events.
-    type RecoverContentStream = Pin<
-        Box<
-            dyn Stream<Item = Result<clirpc::RecoverContentUpdate, tonic::Status>> + Send + 'static,
-        >,
-    >;
-
     async fn state(
         &self,
         _request: tonic::Request<clirpc::StateRequest>,
@@ -5171,20 +5180,12 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         Ok(Response::new(Box::pin(stream::iter(updates))))
     }
 
-    async fn recover_content(
+    async fn init_complete(
         &self,
-        _request: tonic::Request<clirpc::RecoverContentRequest>,
-    ) -> Result<tonic::Response<Self::RecoverContentStream>, tonic::Status> {
-        let update = self.node.recover_content_update().await?;
-        Ok(Response::new(Box::pin(stream::iter(vec![Ok(update)]))))
-    }
-
-    async fn finish_recovery(
-        &self,
-        _request: tonic::Request<clirpc::FinishRecoveryRequest>,
-    ) -> Result<tonic::Response<clirpc::FinishRecoveryResponse>, tonic::Status> {
-        self.node.finish_recovery_mode()?;
-        Ok(Response::new(clirpc::FinishRecoveryResponse {}))
+        _request: tonic::Request<clirpc::InitCompleteRequest>,
+    ) -> Result<tonic::Response<clirpc::InitCompleteResponse>, tonic::Status> {
+        self.node.complete_initialization()?;
+        Ok(Response::new(clirpc::InitCompleteResponse {}))
     }
 }
 
@@ -6428,6 +6429,47 @@ mod tests {
             .await
     }
 
+    /// Publish the requester's current content to the responder with the
+    /// compare-and-swap field set from the responder's stored peer metadata.
+    async fn publish_current_content_to_peer(
+        requester_node: Arc<Node>,
+        responder_node: Arc<Node>,
+        connector: &netmock::MockPeerConnector,
+    ) -> anyhow::Result<()> {
+        if !responder_node
+            .known_peers()
+            .contains(&requester_node.address().to_string())
+        {
+            responder_node.add_known_peer(requester_node.address())?;
+        }
+        let _tracked = responder_node
+            .connect_peer_client_with_timeout_and_tracking(
+                requester_node.address(),
+                Duration::from_secs(5),
+                true,
+            )
+            .await?;
+        let mut client = connect_p2p_client(
+            requester_node.clone(),
+            responder_node.clone(),
+            connector,
+        )
+        .await?;
+        let previous_requester_content = peer_entry(responder_node.as_ref(), requester_node.address())?
+            .and_then(|peer| peer_latest_known_content(&peer))
+            .map(|content| bbrpc::ContentInfo {
+                content_id: content.content_id,
+                content_length: content.content_length,
+            });
+        client
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content,
+                requester_content: requester_node.responder_content()?,
+            })
+            .await?;
+        Ok(())
+    }
+
     /// Return the persisted score for `peer_onion` from the node store.
     fn peer_score_seconds(node: &Node, peer_onion: &str) -> anyhow::Result<i64> {
         let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)?;
@@ -6536,10 +6578,10 @@ mod tests {
         assert_eq!(recovery.recovery_watermark_at_ns, 0);
         assert_eq!(
             recovery.publish_blocked_reason,
-            "recovery mode is enabled; finish recovery before publishing"
+            "recovery mode is enabled; run `bbcli init complete` before publishing"
         );
 
-        node.finish_recovery_mode()?;
+        node.complete_initialization()?;
 
         let summary = node
             .local_state_summary()?
@@ -8240,6 +8282,7 @@ mod tests {
             filesystem,
             clock.clone(),
         )?);
+        node.initialize_lineage((100, 0), false)?;
         let peer_identity = Node::new("live-probe-session-peer")?;
         let connector = Arc::new(PlainPeerConnector::new());
         node.set_peer_connector(connector.clone());
@@ -8275,6 +8318,7 @@ mod tests {
             "live-probe-retry-owner",
             filesystem,
         )?);
+        node.initialize_lineage((1, 0), false)?;
         let peer_identity = Node::new("live-probe-retry-peer")?;
         let connector = Arc::new(PlainPeerConnector::new());
         node.set_peer_connector(connector.clone());
@@ -8562,7 +8606,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn propose_contract_updates_refuse_to_overwrite_older_requester_lineage(
+    async fn propose_contract_updates_auto_recovers_empty_owner_before_publication(
     ) -> anyhow::Result<()> {
         let old_owner_clock = Arc::new(ManualClock::new(Timestamp::new(90, 0).unwrap()));
         let new_owner_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
@@ -8607,20 +8651,27 @@ mod tests {
             spawn_registered_p2p_server(old_owner.clone(), connector.as_ref()).await?;
         let responder_server =
             spawn_registered_p2p_server(responder.clone(), connector.as_ref()).await?;
-        old_owner
-            .propose_contract_updates(responder.address())
+        publish_current_content_to_peer(old_owner.clone(), responder.clone(), connector.as_ref())
             .await?;
         old_owner_server.abort();
 
         new_owner.initialize_lineage((100, 0), false)?;
-        let error = new_owner
+        let new_owner_server =
+            spawn_registered_p2p_server(new_owner.clone(), connector.as_ref()).await?;
+        let updates = new_owner
             .propose_contract_updates(responder.address())
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), Code::FailedPrecondition);
-        assert!(error.message().contains("recover it before publishing"));
-        assert!(error.message().contains(responder.address()));
+            .await?;
+        assert_eq!(updates.last().map(|update| update.success), Some(true));
 
+        let listed = new_owner.with_store(|store| Ok(store.list_file_info()))?;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "alpha.txt");
+        assert_eq!(
+            new_owner.with_store(|store| store.get_file("alpha.txt"))?,
+            b"alpha-body".to_vec()
+        );
+
+        new_owner_server.abort();
         responder_server.abort();
         Ok(())
     }
@@ -8774,10 +8825,12 @@ mod tests {
             .with_store(|store| store.read_mirrored_blob(&requester_content.content_id))
             .is_err());
 
-        let updates = responder_node
-            .propose_contract_updates(requester_node.address())
-            .await?;
-        assert_eq!(updates.last().map(|update| update.success), Some(true));
+        publish_current_content_to_peer(
+            requester_node.clone(),
+            responder_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
         assert_eq!(
             responder_node
                 .with_store(|store| store.read_mirrored_blob(&requester_content.content_id))?,
@@ -9302,10 +9355,15 @@ mod tests {
             spawn_registered_p2p_server(best_effort_node.clone(), connector.as_ref()).await?;
         let reserved_server =
             spawn_registered_p2p_server(reserved_node.clone(), connector.as_ref()).await?;
+        let local_server =
+            spawn_registered_p2p_server(local_node.clone(), connector.as_ref()).await?;
 
-        local_node
-            .propose_contract_updates(best_effort_node.address())
-            .await?;
+        publish_current_content_to_peer(
+            best_effort_node.clone(),
+            local_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
         let best_effort_content = best_effort_node.current_content_info()?.unwrap();
         assert!(cached_peer_blob(
             local_node.as_ref(),
@@ -9320,9 +9378,12 @@ mod tests {
         local_node
             .with_store(|store| store.set_peer_score(reserved_public_key.as_bytes(), 10, 100))?;
 
-        local_node
-            .propose_contract_updates(reserved_node.address())
-            .await?;
+        publish_current_content_to_peer(
+            reserved_node.clone(),
+            local_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
         let reserved_content = reserved_node.current_content_info()?.unwrap();
         assert!(!cached_peer_blob(
             local_node.as_ref(),
@@ -9339,6 +9400,7 @@ mod tests {
 
         best_effort_server.abort();
         reserved_server.abort();
+        local_server.abort();
         Ok(())
     }
 
@@ -9391,10 +9453,15 @@ mod tests {
             spawn_registered_p2p_server(best_effort_node.clone(), connector.as_ref()).await?;
         let pinned_server =
             spawn_registered_p2p_server(pinned_node.clone(), connector.as_ref()).await?;
+        let local_server =
+            spawn_registered_p2p_server(local_node.clone(), connector.as_ref()).await?;
 
-        local_node
-            .propose_contract_updates(best_effort_node.address())
-            .await?;
+        publish_current_content_to_peer(
+            best_effort_node.clone(),
+            local_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
         let best_effort_content = best_effort_node.current_content_info()?.unwrap();
         assert!(cached_peer_blob(
             local_node.as_ref(),
@@ -9409,6 +9476,12 @@ mod tests {
         local_node
             .propose_contract_updates(pinned_node.address())
             .await?;
+        publish_current_content_to_peer(
+            pinned_node.clone(),
+            local_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
         let pinned_content = pinned_node.current_content_info()?.unwrap();
         assert!(!cached_peer_blob(
             local_node.as_ref(),
@@ -9421,6 +9494,7 @@ mod tests {
 
         best_effort_server.abort();
         pinned_server.abort();
+        local_server.abort();
         Ok(())
     }
 
@@ -9458,8 +9532,19 @@ mod tests {
 
         let remote_server =
             spawn_registered_p2p_server(remote_node.clone(), connector.as_ref()).await?;
-        let error = local_node
-            .propose_contract_updates(remote_node.address())
+        let local_server =
+            spawn_registered_p2p_server(local_node.clone(), connector.as_ref()).await?;
+        let mut remote_to_local = connect_p2p_client(
+            remote_node.clone(),
+            local_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
+        let error = remote_to_local
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
+                requester_content: Some(remote_node.responder_content()?.unwrap()),
+            })
             .await
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
@@ -9484,6 +9569,7 @@ mod tests {
         assert!(peer.latest_cached_content.is_none());
 
         remote_server.abort();
+        local_server.abort();
         Ok(())
     }
 
@@ -9518,9 +9604,14 @@ mod tests {
 
         let remote_server =
             spawn_registered_p2p_server(remote_node.clone(), connector.as_ref()).await?;
-        local_node
-            .propose_contract_updates(remote_node.address())
-            .await?;
+        let local_server =
+            spawn_registered_p2p_server(local_node.clone(), connector.as_ref()).await?;
+        publish_current_content_to_peer(
+            remote_node.clone(),
+            local_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
         let version_1 = remote_node.current_content_info()?.unwrap();
         assert!(cached_peer_blob(
             local_node.as_ref(),
@@ -9547,8 +9638,17 @@ mod tests {
         let version_2 = remote_node.current_content_info()?.unwrap();
         assert!(version_2.content_length > version_1.content_length);
 
-        let error = local_node
-            .propose_contract_updates(remote_node.address())
+        let mut remote_to_local = connect_p2p_client(
+            remote_node.clone(),
+            local_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
+        let error = remote_to_local
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: Some(version_1.clone()),
+                requester_content: Some(version_2.clone()),
+            })
             .await
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
@@ -9577,6 +9677,7 @@ mod tests {
         );
 
         remote_server.abort();
+        local_server.abort();
         Ok(())
     }
 
@@ -9612,9 +9713,14 @@ mod tests {
 
         let remote_server =
             spawn_registered_p2p_server(remote_node.clone(), connector.as_ref()).await?;
-        local_node
-            .propose_contract_updates(remote_node.address())
-            .await?;
+        let local_server =
+            spawn_registered_p2p_server(local_node.clone(), connector.as_ref()).await?;
+        publish_current_content_to_peer(
+            remote_node.clone(),
+            local_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
         let version_1 = remote_node.current_content_info()?.unwrap();
         assert!(cached_peer_blob(
             local_node.as_ref(),
@@ -9638,8 +9744,17 @@ mod tests {
         let version_2 = remote_node.current_content_info()?.unwrap();
         assert!(version_2.content_length > version_1.content_length);
 
-        let error = local_node
-            .propose_contract_updates(remote_node.address())
+        let mut remote_to_local = connect_p2p_client(
+            remote_node.clone(),
+            local_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
+        let error = remote_to_local
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: Some(version_1.clone()),
+                requester_content: Some(version_2.clone()),
+            })
             .await
             .unwrap_err();
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
@@ -9668,6 +9783,7 @@ mod tests {
         );
 
         remote_server.abort();
+        local_server.abort();
         Ok(())
     }
 
@@ -9789,6 +9905,12 @@ mod tests {
         local_node
             .propose_contract_updates(pinned_node.address())
             .await?;
+        publish_current_content_to_peer(
+            pinned_node.clone(),
+            local_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
         let pinned_length = pinned_node
             .current_content_info()?
             .ok_or_else(|| anyhow::anyhow!("missing pinned peer content"))?
@@ -9796,6 +9918,12 @@ mod tests {
         local_node
             .propose_contract_updates(protected_node.address())
             .await?;
+        publish_current_content_to_peer(
+            protected_node.clone(),
+            local_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
         let protected_length = protected_node
             .current_content_info()?
             .ok_or_else(|| anyhow::anyhow!("missing protected peer content"))?
@@ -9803,6 +9931,12 @@ mod tests {
         local_node
             .propose_contract_updates(disposable_node.address())
             .await?;
+        publish_current_content_to_peer(
+            disposable_node.clone(),
+            local_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
         let disposable_length = disposable_node
             .current_content_info()?
             .ok_or_else(|| anyhow::anyhow!("missing disposable peer content"))?
@@ -9824,8 +9958,17 @@ mod tests {
             min_replicas: 0,
         };
 
-        let track_only_error = local_node
-            .propose_contract_updates(tracked_only_node.address())
+        let mut tracked_only_to_local = connect_p2p_client(
+            tracked_only_node.clone(),
+            local_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
+        let track_only_error = tracked_only_to_local
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
+                requester_content: Some(tracked_only_node.responder_content()?.unwrap()),
+            })
             .await
             .unwrap_err();
         assert_eq!(track_only_error.code(), tonic::Code::ResourceExhausted);
@@ -10989,7 +11132,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn propose_contract_syncs_both_sides() -> anyhow::Result<()> {
+    async fn propose_contract_publishes_our_side_and_accepts_peer_publication(
+    ) -> anyhow::Result<()> {
         let left_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let left_node = Arc::new(Node::with_local_storage("left", left_filesystem)?);
         let right_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
@@ -11039,6 +11183,8 @@ mod tests {
             .try_collect::<Vec<_>>()
             .await?;
         assert_eq!(updates.last().map(|update| update.success), Some(true));
+        publish_current_content_to_peer(right_node.clone(), left_node.clone(), connector.as_ref())
+            .await?;
 
         let right_content = right_node.responder_content()?.unwrap();
         let mirrored_right_blob =
@@ -11098,7 +11244,7 @@ mod tests {
             .propose_contract_updates(right_node.address())
             .await?;
         assert_eq!(updates.last().map(|update| update.success), Some(true));
-        assert_eq!(flaky_connector.dial_count(), 3);
+        assert_eq!(flaky_connector.dial_count(), 4);
         let inventory = peer_inventory_entry(left_node.as_ref(), right_node.address())?
             .expect("missing peer inventory entry");
         assert_eq!(

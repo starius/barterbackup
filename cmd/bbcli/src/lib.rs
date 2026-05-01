@@ -19,11 +19,10 @@ use futures_util::{stream, TryStreamExt};
 use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
 use protos::clirpc::{
     CheckContractRequest, ConnectPeerRequest, DeleteFileRequest, ExportBuiltInPeersRequest, File,
-    FileInfo, FinishRecoveryRequest, GetContractsRequest, GetFileRequest, GetStorageConfigRequest,
+    FileInfo, GetContractsRequest, GetFileRequest, GetStorageConfigRequest, InitCompleteRequest,
     InitRequest, ListFilesRequest, PeerInfo, PeerStatus, PeersRequest, PeersResponse,
-    PinPeerRequest, ProposeContractRequest, RecoverContentRequest, RecoverContentUpdate,
-    SetStorageConfigRequest, StateRequest, StateResponse, StopRequest, StorageConfig,
-    UnlockRequest, UnpinPeerRequest,
+    PinPeerRequest, ProposeContractRequest, SetStorageConfigRequest, StateRequest, StateResponse,
+    StopRequest, StorageConfig, UnlockRequest, UnpinPeerRequest,
 };
 use tlsutil::{connect_pinned_channel, read_keys};
 use tokio::time::sleep;
@@ -141,8 +140,17 @@ enum Command {
     /// Print daemon state.
     State,
 
-    /// Initialize daemon storage with the main password.
+    /// Initialize daemon storage with the main password or complete one
+    /// recovery-mode initialization.
+    #[command(
+        args_conflicts_with_subcommands = true,
+        subcommand_precedence_over_arg = true
+    )]
     Init {
+        /// cmd is the optional `bbcli init` subcommand.
+        #[command(subcommand)]
+        cmd: Option<InitCommand>,
+
         /// password_stdin reads the main password from standard input.
         #[arg(long)]
         password_stdin: bool,
@@ -198,17 +206,18 @@ enum Command {
         cmd: ContractCommand,
     },
 
-    /// Recover older requester revisions and manage recovery mode.
-    Recovery {
-        #[command(subcommand)]
-        cmd: RecoveryCommand,
-    },
-
     /// Read or update daemon configuration.
     Config {
         #[command(subcommand)]
         cmd: ConfigCommand,
     },
+}
+
+/// InitCommand is one `bbcli init` subcommand.
+#[derive(Subcommand, Debug)]
+enum InitCommand {
+    /// Complete recovery-mode initialization and allow publication.
+    Complete,
 }
 
 /// PeerCommand is one `bbcli peer` subcommand.
@@ -301,16 +310,6 @@ enum ContractCommand {
         /// onion_service_id is the peer onion service identifier.
         onion_service_id: String,
     },
-}
-
-/// RecoveryCommand is one `bbcli recovery` subcommand.
-#[derive(Subcommand, Debug)]
-enum RecoveryCommand {
-    /// Recover older requester revisions from peers and merge them locally.
-    Run,
-
-    /// Finish recovery mode and allow publication from the current generation.
-    Finish,
 }
 
 /// ConfigCommand is one `bbcli config` subcommand.
@@ -463,21 +462,25 @@ async fn run_parsed(args: Args) -> Result<()> {
     let result = match args.cmd {
         Command::State => state(&target).await,
         Command::Init {
+            cmd,
             password_stdin,
             allow_weak_password,
             wait_seconds,
             recovery_mode,
             password,
-        } => {
-            run_init_command(
-                &target,
-                Duration::from_secs(wait_seconds),
-                || resolve_init_password(password, password_stdin),
-                allow_weak_password,
-                recovery_mode,
-            )
-            .await
-        }
+        } => match cmd {
+            Some(InitCommand::Complete) => init_complete(&target).await,
+            None => {
+                run_init_command(
+                    &target,
+                    Duration::from_secs(wait_seconds),
+                    || resolve_init_password(password, password_stdin),
+                    allow_weak_password,
+                    recovery_mode,
+                )
+                .await
+            }
+        },
         Command::Unlock {
             password_stdin,
             wait_seconds,
@@ -520,10 +523,6 @@ async fn run_parsed(args: Args) -> Result<()> {
             ContractCommand::Check { onion_service_id } => {
                 check_contract(&target, &onion_service_id).await
             }
-        },
-        Command::Recovery { cmd } => match cmd {
-            RecoveryCommand::Run => recover_content(&target).await,
-            RecoveryCommand::Finish => finish_recovery(&target).await,
         },
         Command::Config { cmd } => match cmd {
             ConfigCommand::Get {
@@ -1802,97 +1801,10 @@ fn check_contract_failure_reason(state: protos::clirpc::ContractState) -> &'stat
     }
 }
 
-/// Print the streamed updates for one recovery pass.
-async fn recover_content(target: &LocalCliTarget) -> Result<()> {
+/// Complete recovery-mode initialization for the current node generation.
+async fn init_complete(target: &LocalCliTarget) -> Result<()> {
     let mut client = connect_client(target).await?;
-    let updates = recover_content_with_client(&mut client).await?;
-    let final_update = updates
-        .last()
-        .context("daemon returned no recovery updates")?;
-    write_recovery_summary(&mut io::stdout().lock(), final_update)?;
-    Ok(())
-}
-
-/// Finish recovery mode for the current node generation.
-async fn finish_recovery(target: &LocalCliTarget) -> Result<()> {
-    let mut client = connect_client(target).await?;
-    client.finish_recovery(FinishRecoveryRequest {}).await?;
-    Ok(())
-}
-
-/// Print one operator-facing recovery summary for the last recovery update.
-fn write_recovery_summary(writer: &mut impl Write, update: &RecoverContentUpdate) -> Result<()> {
-    if update.total_versions_found <= 0 {
-        bail!("recovery found no content versions on any known peer");
-    }
-
-    let headline = if update.applied_versions > 0 {
-        "recovery: merged older-lineage revisions into the local file set"
-    } else if update.older_lineage_versions_found <= 0 {
-        "recovery: no older-lineage revisions were needed"
-    } else if update.older_lineage_recoverable_versions_found <= 0 {
-        "recovery: found older-lineage revisions, but none were still stored by peers"
-    } else {
-        "recovery: found older-lineage revisions, but none were merged"
-    };
-    writeln!(writer, "{headline}").context("write recovery summary")?;
-    writeln!(writer, "versions_found: {}", update.total_versions_found)
-        .context("write recovery summary")?;
-    writeln!(
-        writer,
-        "peers_with_any_versions: {}",
-        update.peers_with_any_versions
-    )
-    .context("write recovery summary")?;
-    writeln!(
-        writer,
-        "older_lineage_versions_found: {}",
-        update.older_lineage_versions_found
-    )
-    .context("write recovery summary")?;
-    writeln!(
-        writer,
-        "older_lineage_recoverable_versions_found: {}",
-        update.older_lineage_recoverable_versions_found
-    )
-    .context("write recovery summary")?;
-    writeln!(writer, "applied_versions: {}", update.applied_versions)
-        .context("write recovery summary")?;
-    writeln!(writer, "downloaded_bytes: {}", update.downloaded_bytes)
-        .context("write recovery summary")?;
-    writeln!(writer, "added_files: {}", update.added_files).context("write recovery summary")?;
-    writeln!(writer, "renamed_files: {}", update.renamed_files)
-        .context("write recovery summary")?;
-    writeln!(writer, "unchanged_files: {}", update.unchanged_files)
-        .context("write recovery summary")?;
-    if !update.newest_found_content_id.is_empty() {
-        writeln!(
-            writer,
-            "newest_found: {} @ {}.{:09}",
-            hex::encode(&update.newest_found_content_id),
-            update.newest_found_ts,
-            update.newest_found_ts_ns,
-        )
-        .context("write recovery summary")?;
-    }
-    if !update.latest_applied_content_id.is_empty() {
-        writeln!(
-            writer,
-            "latest_applied: {} @ {}.{:09}",
-            hex::encode(&update.latest_applied_content_id),
-            update.latest_applied_ts,
-            update.latest_applied_ts_ns,
-        )
-        .context("write recovery summary")?;
-    }
-    if !update.publication_blocked_reason.is_empty() {
-        writeln!(
-            writer,
-            "publication_blocked_reason: {}",
-            update.publication_blocked_reason
-        )
-        .context("write recovery summary")?;
-    }
+    client.init_complete(InitCompleteRequest {}).await?;
     Ok(())
 }
 
@@ -2473,14 +2385,6 @@ pub async fn check_contract_with_client(
     Ok(response.into_inner().try_collect().await?)
 }
 
-/// Stream one recovery pass through an already connected client.
-pub async fn recover_content_with_client(
-    client: &mut BarterBackupClientClient<Channel>,
-) -> Result<Vec<protos::clirpc::RecoverContentUpdate>> {
-    let response = client.recover_content(RecoverContentRequest {}).await?;
-    Ok(response.into_inner().try_collect().await?)
-}
-
 /// Return the default local CLI key directory.
 fn default_keys_dir(data_dir: Option<&Path>) -> Result<PathBuf> {
     if let Ok(path) = std::env::var("BBCLI_CLI_KEYS_DIR") {
@@ -2969,150 +2873,6 @@ mod tests {
     }
 
     #[test]
-    fn write_recovery_summary_rejects_missing_versions() {
-        let mut output = Vec::new();
-        let error =
-            write_recovery_summary(&mut output, &RecoverContentUpdate::default()).unwrap_err();
-
-        assert_eq!(
-            error.to_string(),
-            "recovery found no content versions on any known peer"
-        );
-        assert!(output.is_empty());
-    }
-
-    #[test]
-    fn write_recovery_summary_formats_applied_recovery() {
-        let mut output = Vec::new();
-        write_recovery_summary(
-            &mut output,
-            &RecoverContentUpdate {
-                total_versions_found: 2,
-                peers_with_any_versions: 2,
-                older_lineage_versions_found: 2,
-                older_lineage_recoverable_versions_found: 1,
-                applied_versions: 1,
-                downloaded_bytes: 4096,
-                added_files: 1,
-                renamed_files: 1,
-                unchanged_files: 1,
-                newest_found_content_id: vec![0x22; 4],
-                newest_found_ts: 200,
-                newest_found_ts_ns: 7,
-                latest_applied_content_id: vec![0x11; 4],
-                latest_applied_ts: 100,
-                latest_applied_ts_ns: 5,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        assert_eq!(
-            String::from_utf8(output).unwrap(),
-            concat!(
-                "recovery: merged older-lineage revisions into the local file set\n",
-                "versions_found: 2\n",
-                "peers_with_any_versions: 2\n",
-                "older_lineage_versions_found: 2\n",
-                "older_lineage_recoverable_versions_found: 1\n",
-                "applied_versions: 1\n",
-                "downloaded_bytes: 4096\n",
-                "added_files: 1\n",
-                "renamed_files: 1\n",
-                "unchanged_files: 1\n",
-                "newest_found: 22222222 @ 200.000000007\n",
-                "latest_applied: 11111111 @ 100.000000005\n"
-            )
-        );
-    }
-
-    #[test]
-    fn write_recovery_summary_formats_no_older_lineage_needed() {
-        let mut output = Vec::new();
-        write_recovery_summary(
-            &mut output,
-            &RecoverContentUpdate {
-                total_versions_found: 2,
-                peers_with_any_versions: 1,
-                newest_found_content_id: vec![0xaa; 2],
-                newest_found_ts: 200,
-                newest_found_ts_ns: 9,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        assert_eq!(
-            String::from_utf8(output).unwrap(),
-            concat!(
-                "recovery: no older-lineage revisions were needed\n",
-                "versions_found: 2\n",
-                "peers_with_any_versions: 1\n",
-                "older_lineage_versions_found: 0\n",
-                "older_lineage_recoverable_versions_found: 0\n",
-                "applied_versions: 0\n",
-                "downloaded_bytes: 0\n",
-                "added_files: 0\n",
-                "renamed_files: 0\n",
-                "unchanged_files: 0\n",
-                "newest_found: aaaa @ 200.000000009\n"
-            )
-        );
-    }
-
-    #[test]
-    fn write_recovery_summary_formats_unstored_older_lineage_versions() {
-        let mut output = Vec::new();
-        write_recovery_summary(
-            &mut output,
-            &RecoverContentUpdate {
-                total_versions_found: 2,
-                peers_with_any_versions: 2,
-                older_lineage_versions_found: 2,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let rendered = String::from_utf8(output).unwrap();
-        assert!(rendered.contains(
-            "recovery: found older-lineage revisions, but none were still stored by peers\n"
-        ));
-        assert!(rendered.contains("older_lineage_versions_found: 2\n"));
-        assert!(rendered.contains("older_lineage_recoverable_versions_found: 0\n"));
-    }
-
-    #[test]
-    fn write_recovery_summary_formats_blocked_recovery() {
-        let mut output = Vec::new();
-        write_recovery_summary(
-            &mut output,
-            &RecoverContentUpdate {
-                total_versions_found: 2,
-                peers_with_any_versions: 2,
-                older_lineage_versions_found: 2,
-                older_lineage_recoverable_versions_found: 2,
-                publication_blocked_reason:
-                    "current content exceeds the fixed 4 MiB publication limit".to_string(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let rendered = String::from_utf8(output).unwrap();
-        assert!(
-            rendered.contains("recovery: found older-lineage revisions, but none were merged\n")
-        );
-        assert!(rendered.contains("versions_found: 2\n"));
-        assert!(rendered.contains("peers_with_any_versions: 2\n"));
-        assert!(rendered.contains("older_lineage_recoverable_versions_found: 2\n"));
-        assert!(rendered.contains("downloaded_bytes: 0\n"));
-        assert!(rendered.contains(
-            "publication_blocked_reason: current content exceeds the fixed 4 MiB publication limit\n"
-        ));
-    }
-
-    #[test]
     fn get_file_stdout_helper_allows_text_and_pipes() {
         assert_eq!(
             get_file_stdout_bytes("hello\n".as_bytes().to_vec(), true).unwrap(),
@@ -3392,7 +3152,7 @@ mod tests {
     }
 
     #[test]
-    fn args_parse_grouped_contract_and_recovery_commands() {
+    fn args_parse_grouped_contract_and_init_commands() {
         let args = Args::parse_from(["bbcli", "contract", "propose", "peer.onion"]);
         assert!(matches!(
             args.cmd,
@@ -3401,11 +3161,12 @@ mod tests {
             }
         ));
 
-        let args = Args::parse_from(["bbcli", "recovery", "finish"]);
+        let args = Args::parse_from(["bbcli", "init", "complete"]);
         assert!(matches!(
             args.cmd,
-            Command::Recovery {
-                cmd: RecoveryCommand::Finish
+            Command::Init {
+                cmd: Some(InitCommand::Complete),
+                ..
             }
         ));
     }
@@ -4029,21 +3790,17 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn contract_and_recovery_helpers_round_trip() -> anyhow::Result<()> {
+    async fn contract_and_init_complete_helpers_round_trip() -> anyhow::Result<()> {
         let local_filesystem: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
         let local_node = Arc::new(Node::with_local_storage("local", local_filesystem)?);
         let remote_filesystem: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
         let remote_node = Arc::new(Node::with_local_storage("remote", remote_filesystem)?);
-        let recovered_filesystem: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
-        let recovered_node = Arc::new(Node::with_local_storage("local", recovered_filesystem)?);
         let connector = Arc::new(netmock::MockPeerConnector::new());
         local_node.set_peer_connector(connector.clone());
         remote_node.set_peer_connector(connector.clone());
-        recovered_node.set_peer_connector(connector.clone());
 
         let mut local_client = spawn_cli_server_for_node(local_node.clone()).await?;
         let mut remote_client = spawn_cli_server_for_node(remote_node.clone()).await?;
-        let mut recovered_client = spawn_cli_server_for_node(recovered_node.clone()).await?;
         set_file_with_client(
             &mut remote_client,
             "remote.txt",
@@ -4060,7 +3817,6 @@ mod tests {
         let remote_server =
             spawn_registered_p2p_server(remote_node.clone(), connector.as_ref()).await?;
         connect_peer_with_client(&mut local_client, remote_node.address()).await?;
-        connect_peer_with_client(&mut recovered_client, remote_node.address()).await?;
 
         let propose_updates =
             propose_contract_with_client(&mut local_client, remote_node.address()).await?;
@@ -4086,13 +3842,27 @@ mod tests {
             Some(true)
         );
 
-        let recover_updates = recover_content_with_client(&mut recovered_client).await?;
-        assert!(recover_updates
-            .last()
-            .map(|update| update.applied_versions > 0)
-            .unwrap_or(false));
-        let recovered = get_file_with_client(&mut recovered_client, "local.txt").await?;
-        assert_eq!(recovered, b"local-body".to_vec());
+        let recovered_filesystem: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let recovered_node = Arc::new(Node::with_local_storage("local", recovered_filesystem)?);
+        recovered_node.set_peer_connector(connector.clone());
+        recovered_node.initialize_lineage((i64::MAX / 4, 0), true)?;
+        let mut recovered_client = spawn_cli_server_for_node(recovered_node.clone()).await?;
+        let initial_state = state_response_with_client(&mut recovered_client).await?;
+        assert!(initial_state
+            .local_summary
+            .as_ref()
+            .and_then(|summary| summary.recovery.as_ref())
+            .is_some_and(|recovery| recovery.recovery_mode_enabled));
+        recovered_client
+            .init_complete(InitCompleteRequest {})
+            .await?
+            .into_inner();
+        let completed_state = state_response_with_client(&mut recovered_client).await?;
+        assert!(completed_state
+            .local_summary
+            .as_ref()
+            .and_then(|summary| summary.recovery.as_ref())
+            .is_some_and(|recovery| !recovery.recovery_mode_enabled));
 
         remote_server.abort();
         local_server.abort();

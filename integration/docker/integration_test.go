@@ -564,7 +564,7 @@ func TestDockerRecoveryModeBlocksPublicationUntilFinished(t *testing.T) {
 		t,
 		err,
 		codes.FailedPrecondition,
-		"recovery mode is enabled; finish recovery before publishing",
+		"recovery mode is enabled; run `bbcli init complete` before publishing",
 	)
 
 	ctx, cancel = context.WithTimeout(context.Background(), harnessDefaultTimeout())
@@ -581,7 +581,7 @@ func TestDockerRecoveryModeBlocksPublicationUntilFinished(t *testing.T) {
 	assertFileEquals(t, scenario.recovered, "payload.bin", scenario.payloadV1)
 }
 
-func TestDockerRecoveryMergesOlderLineagesAndPublishesAfterFinish(t *testing.T) {
+func TestDockerRecoveryMergesOlderLineagesAndPublishesAfterInitComplete(t *testing.T) {
 	scenario := prepareRecoveryMergeScenarioBase(t)
 
 	startLockedNode(t, scenario.peerC)
@@ -595,7 +595,7 @@ func TestDockerRecoveryMergesOlderLineagesAndPublishesAfterFinish(t *testing.T) 
 	assertFileContentEquals(t, scenario.recovered, "payload.bin", scenario.payloadV1)
 	assertFileContentEquals(t, scenario.recovered, recoveredName, scenario.payloadV2)
 
-	finishRecovery(t, scenario.recovered)
+	initComplete(t, scenario.recovered)
 
 	startLockedNode(t, scenario.peerB)
 	waitForReadyNode(t, scenario.peerB)
@@ -618,7 +618,7 @@ func TestDockerRecoveryMergesOlderLineagesAndPublishesAfterFinish(t *testing.T) 
 	}
 }
 
-func TestDockerFinishRecoverySuppressesFurtherOlderLineageMerges(t *testing.T) {
+func TestDockerInitCompleteSuppressesFurtherOlderLineageMerges(t *testing.T) {
 	scenario := prepareRecoveryMergeScenarioBase(t)
 
 	startLockedNode(t, scenario.peerC)
@@ -635,16 +635,19 @@ func TestDockerFinishRecoverySuppressesFurtherOlderLineageMerges(t *testing.T) {
 	setNodeTime(t, scenario.peerB, 1050, 0)
 	unlockTestClockAndWaitReady(t, scenario.peerB)
 
-	finishRecovery(t, scenario.recovered)
+	initComplete(t, scenario.recovered)
+	connectPeer(t, scenario.recovered, scenario.peerBOnion)
 
-	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	defer cancel()
-	update, err := scenario.recovered.RecoverContentOnce(ctx)
-	if err != nil {
-		t.Fatalf("run post-finish recovery on %s: %v", scenario.recovered.Name(), err)
-	}
-	if update.GetAppliedVersions() != 0 || update.GetOlderLineageRecoverableVersionsFound() != 0 {
-		t.Fatalf("expected no further older-lineage recovery after finish, got %+v", update)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		response := listFiles(t, scenario.recovered)
+		if len(response.GetFile()) != 2 {
+			t.Fatalf(
+				"expected no further older-lineage merge after init complete; current files=%v",
+				listFileNames(response),
+			)
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
 }
 
@@ -1050,15 +1053,6 @@ func TestDockerOperatorErrorsAreHuman(t *testing.T) {
 	err = connectPeerRPC(t, node, state.GetServerOnion())
 	assertStatusMessage(t, err, codes.FailedPrecondition, "local node cannot act as its own peer")
 
-	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	update, err := node.RecoverContentOnce(ctx)
-	cancel()
-	if err != nil {
-		t.Fatalf("recover content with no peers: %v", err)
-	}
-	if update.GetAppliedVersions() != 0 || update.GetTotalVersionsFound() != 0 || update.GetPeersWithAnyVersions() != 0 {
-		t.Fatalf("unexpected recovery result without peers: %+v", update)
-	}
 }
 
 func TestDockerLocalSharedBlobLimitRejectsOversizedMutation(t *testing.T) {
@@ -1713,12 +1707,12 @@ func unlockTestClockAndWaitReady(t *testing.T, node *harness.Node) *clirpc.State
 	return waitForTestClockNodesReady(t, node)[0]
 }
 
-func finishRecovery(t *testing.T, node *harness.Node) {
+func initComplete(t *testing.T, node *harness.Node) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
 	defer cancel()
-	if err := node.FinishRecovery(ctx); err != nil {
-		t.Fatalf("finish recovery on %s: %v", node.Name(), err)
+	if err := node.InitComplete(ctx); err != nil {
+		t.Fatalf("complete initialization on %s: %v", node.Name(), err)
 	}
 }
 
@@ -2291,17 +2285,6 @@ func peerInfoFromResponse(
 	return nil
 }
 
-func runRecoveryPass(t *testing.T, node *harness.Node) *clirpc.RecoverContentUpdate {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	defer cancel()
-	update, err := node.RecoverContentOnce(ctx)
-	if err != nil {
-		t.Fatalf("run recovery on %s: %v", node.Name(), err)
-	}
-	return update
-}
-
 func peerInfoByOnion(t *testing.T, node *harness.Node, peerOnion string) *clirpc.PeerInfo {
 	t.Helper()
 	return peerInfoFromResponse(t, getPeers(t, node), peerOnion)
@@ -2618,7 +2601,6 @@ func recoverFileUntilEquals(t *testing.T, node *harness.Node, name string, expec
 
 	deadline := time.Now().Add(harnessDefaultTimeout())
 	for {
-		runRecoveryPass(t, node)
 		ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
 		file, err := node.GetFile(ctx, name)
 		cancel()
@@ -2644,7 +2626,6 @@ func recoverUntilVariant(
 
 	deadline := time.Now().Add(harnessDefaultTimeout())
 	for {
-		runRecoveryPass(t, node)
 		response := listFiles(t, node)
 		if len(response.GetFile()) == 2 {
 			for _, file := range response.GetFile() {

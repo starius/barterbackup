@@ -329,8 +329,7 @@ bbcli config get --resource-policy
 bbcli contract list
 bbcli contract propose <peer-onion-id>
 bbcli contract check <peer-onion-id>
-bbcli recovery run
-bbcli recovery finish
+bbcli init complete
 bbcli stop
 ```
 
@@ -382,11 +381,12 @@ Recovery workflow:
 - correct local wall-clock time matters when a node is initialized, because the
   recovery boundary compares authenticated revision timestamps against the
   node's local initialization time
-- `bbcli recovery run` scans known peers, looks at both the newest revision a
-  peer knows about and the newest revision it can still serve, and merges every
-  downloadable older-lineage revision whose authenticated timestamp is older
-  than the current node generation but newer than the last applied recovery
-  watermark
+- older-lineage recovery now runs automatically after new live peer contact
+  and during background maintenance; it scans known peers, looks at both the
+  newest revision a peer knows about and the newest revision it can still
+  serve, and merges every downloadable older-lineage revision whose
+  authenticated timestamp is older than the current node generation but newer
+  than the last applied recovery watermark
 - if the freshest known older-lineage revision is unavailable everywhere,
   recovery still uses an older stored revision when that is the newest replica
   any peer can actually serve
@@ -402,8 +402,8 @@ Recovery workflow:
   `publish_blocked_reason`; at that point the operator must delete enough files
   locally before publication can resume
 - once you have recovered everything you still want from older replicas, run
-  `bbcli recovery finish`
-- `bbcli recovery finish` disables recovery mode, advances the effective
+  `bbcli init complete`
+- `bbcli init complete` disables recovery mode, advances the effective
   recovery watermark to the current node-generation boundary, and allows
   publication again; after that point, older unseen lineages are ignored
   automatically

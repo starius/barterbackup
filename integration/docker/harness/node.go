@@ -551,40 +551,17 @@ func (n *Node) CheckContractUntilSuccess(ctx context.Context, peerOnion string) 
 	}
 }
 
-// RecoverContentUntilApplied retries recovery until one update merges at least
-// one older-lineage revision locally.
-func (n *Node) RecoverContentUntilApplied(ctx context.Context) (*clirpc.RecoverContentUpdate, error) {
-	deadline, cancel := context.WithTimeout(ctx, defaultLongTimeout)
-	defer cancel()
-
-	for {
-		update, err := n.recoverContentOnce(deadline)
-		if err == nil && update.GetAppliedVersions() > 0 {
-			return update, nil
-		}
-		if err := ctxErr(deadline); err != nil {
-			return nil, err
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-}
-
-// RecoverContentOnce runs one recovery pass and returns the last streamed update.
-func (n *Node) RecoverContentOnce(ctx context.Context) (*clirpc.RecoverContentUpdate, error) {
-	return n.recoverContentOnce(ctx)
-}
-
-// FinishRecovery disables recovery mode and advances the recovery watermark to
+// InitComplete disables recovery mode and advances the recovery watermark to
 // the current generation boundary.
-func (n *Node) FinishRecovery(ctx context.Context) error {
+func (n *Node) InitComplete(ctx context.Context) error {
 	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	_, err = client.FinishRecovery(ctx, &clirpc.FinishRecoveryRequest{})
+	_, err = client.InitComplete(ctx, &clirpc.InitCompleteRequest{})
 	if err != nil {
-		return fmt.Errorf("finish recovery on %s: %w", n.name, err)
+		return fmt.Errorf("complete initialization on %s: %w", n.name, err)
 	}
 	return nil
 }
@@ -676,34 +653,6 @@ func (n *Node) checkContractOnce(ctx context.Context, peerOnion string) (*clirpc
 	}
 	if last == nil || !last.Success {
 		return nil, fmt.Errorf("contract check from %s to %s did not finish successfully", n.name, peerOnion)
-	}
-	return last, nil
-}
-
-func (n *Node) recoverContentOnce(ctx context.Context) (*clirpc.RecoverContentUpdate, error) {
-	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-
-	stream, err := client.RecoverContent(ctx, &clirpc.RecoverContentRequest{})
-	if err != nil {
-		return nil, fmt.Errorf("recover content on %s: %w", n.name, err)
-	}
-	var last *clirpc.RecoverContentUpdate
-	for {
-		update, recvErr := stream.Recv()
-		if errors.Is(recvErr, io.EOF) {
-			break
-		}
-		if recvErr != nil {
-			return nil, fmt.Errorf("receive recovery update from %s: %w", n.name, recvErr)
-		}
-		last = update
-	}
-	if last == nil {
-		return nil, fmt.Errorf("recovery stream on %s returned no updates", n.name)
 	}
 	return last, nil
 }

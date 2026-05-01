@@ -310,9 +310,6 @@ func recoverManualEnvFileUntilPresent(
 
 	deadline := time.Now().Add(harnessDefaultTimeout())
 	for {
-		if _, err := node.RecoverContentOnce(ctx); err != nil {
-			t.Fatalf("run one recovery pass on %s: %v", node.Name(), err)
-		}
 		response, err := node.ListFiles(ctx)
 		if err != nil {
 			t.Fatalf("list files on %s after recovery: %v", node.Name(), err)

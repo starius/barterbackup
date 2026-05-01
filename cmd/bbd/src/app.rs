@@ -1155,9 +1155,6 @@ impl BarterBackupClient for DaemonService {
     /// CheckContractStream streams contract verification progress updates.
     type CheckContractStream = <CliService as BarterBackupClient>::CheckContractStream;
 
-    /// RecoverContentStream streams recovery progress updates.
-    type RecoverContentStream = <CliService as BarterBackupClient>::RecoverContentStream;
-
     async fn state(
         &self,
         _request: tonic::Request<clirpc::StateRequest>,
@@ -1548,21 +1545,12 @@ impl BarterBackupClient for DaemonService {
             .await
     }
 
-    async fn recover_content(
+    async fn init_complete(
         &self,
-        request: tonic::Request<clirpc::RecoverContentRequest>,
-    ) -> Result<Response<Self::RecoverContentStream>, Status> {
-        CliService::new(self.unlocked_node().await?)
-            .recover_content(request)
-            .await
-    }
-
-    async fn finish_recovery(
-        &self,
-        request: tonic::Request<clirpc::FinishRecoveryRequest>,
-    ) -> Result<Response<clirpc::FinishRecoveryResponse>, Status> {
+        request: tonic::Request<clirpc::InitCompleteRequest>,
+    ) -> Result<Response<clirpc::InitCompleteResponse>, Status> {
         let response = CliService::new(self.unlocked_node().await?)
-            .finish_recovery(request)
+            .init_complete(request)
             .await?;
         self.wake_maintenance();
         Ok(response)
@@ -1582,9 +1570,6 @@ impl BarterBackupClient for DaemonRpcService {
 
     /// CheckContractStream streams contract verification progress updates.
     type CheckContractStream = <DaemonService as BarterBackupClient>::CheckContractStream;
-
-    /// RecoverContentStream streams recovery progress updates.
-    type RecoverContentStream = <DaemonService as BarterBackupClient>::RecoverContentStream;
 
     async fn state(
         &self,
@@ -1740,18 +1725,11 @@ impl BarterBackupClient for DaemonRpcService {
         self.daemon.check_contract(request).await
     }
 
-    async fn recover_content(
+    async fn init_complete(
         &self,
-        request: tonic::Request<clirpc::RecoverContentRequest>,
-    ) -> Result<Response<Self::RecoverContentStream>, Status> {
-        self.daemon.recover_content(request).await
-    }
-
-    async fn finish_recovery(
-        &self,
-        request: tonic::Request<clirpc::FinishRecoveryRequest>,
-    ) -> Result<Response<clirpc::FinishRecoveryResponse>, Status> {
-        self.daemon.finish_recovery(request).await
+        request: tonic::Request<clirpc::InitCompleteRequest>,
+    ) -> Result<Response<clirpc::InitCompleteResponse>, Status> {
+        self.daemon.init_complete(request).await
     }
 }
 
@@ -3953,8 +3931,7 @@ mod tests {
             daemon_addr.as_str(),
             "--data-dir",
             data_dir.as_str(),
-            "recovery",
-            "conflicts",
+            "state",
         ])
         .await?;
 
@@ -4920,6 +4897,7 @@ mod tests {
             .await
             .address()
             .to_string();
+        let owner_onion = unlocked_node(&owner_service).await.address().to_string();
         let refill_peer_onion = unlocked_node(&refill_peer_service)
             .await
             .address()
@@ -4936,6 +4914,20 @@ mod tests {
             .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: refill_peer_onion.clone(),
+                }),
+            }))
+            .await?;
+        first_peer_service
+            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: owner_onion.clone(),
+                }),
+            }))
+            .await?;
+        refill_peer_service
+            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: owner_onion.clone(),
                 }),
             }))
             .await?;
@@ -4970,31 +4962,37 @@ mod tests {
             .into_inner()
             .for_each(|_| async {})
             .await;
-
-        first_peer_service.shutdown().await?;
+        let owner_content_length = unlocked_node(&owner_service)
+            .await
+            .current_content_info()?
+            .ok_or_else(|| anyhow!("owner content missing after initial proposal"))?
+            .content_length;
+        set_storage_config(&owner_service, 4 * 1024 * 1024, 2).await?;
 
         wait_for_async(Duration::from_secs(10), || {
-            let owner_service = &owner_service;
-            let refill_peer_onion = refill_peer_onion.clone();
+            let refill_peer_service = &refill_peer_service;
+            let owner_onion = owner_onion.clone();
+            let owner_content_length = owner_content_length;
             async move {
-                let contracts = owner_service
-                    .get_contracts(tonic::Request::new(clirpc::GetContractsRequest {}))
+                let peers = refill_peer_service
+                    .peers(tonic::Request::new(clirpc::PeersRequest {}))
                     .await?
                     .into_inner()
-                    .contracts;
-                Ok(contracts.into_iter().any(|contract| {
-                    contract
+                    .peers;
+                let refilled = peers.into_iter().any(|peer| {
+                    peer
                         .peer
                         .as_ref()
-                        .is_some_and(|peer| peer.onion_service_id == refill_peer_onion)
-                        && contract.online
-                        && contract.our_content_synced
-                }))
+                        .is_some_and(|peer_id| peer_id.onion_service_id == owner_onion)
+                        && peer.stored_content_bytes == owner_content_length
+                });
+                Ok(refilled)
             }
         })
         .await?;
 
         owner_service.shutdown().await?;
+        first_peer_service.shutdown().await?;
         refill_peer_service.shutdown().await?;
         Ok(())
     }

@@ -97,8 +97,7 @@ nix develop --command make docker-dev-env ARGS='--name lab recreate owner'
 nix develop --command make docker-dev-env ARGS='--name lab cli owner -- state'
 nix develop --command make docker-dev-env ARGS='--name lab cli owner -- init --recovery-mode hunter2'
 nix develop --command make docker-dev-env ARGS='--name lab cli owner -- unlock hunter2'
-nix develop --command make docker-dev-env ARGS='--name lab cli owner -- recovery run'
-nix develop --command make docker-dev-env ARGS='--name lab cli owner -- recovery finish'
+nix develop --command make docker-dev-env ARGS='--name lab cli owner -- init complete'
 ```
 
 `recreate` wipes one node's container and data directory, then starts a fresh

@@ -43,7 +43,49 @@ _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
 '--help[Print help]' \
 '::password -- password is the inline main password or seed string:_default' \
+":: :_bbcli__subcmd__init_commands" \
+"*::: :->init" \
 && ret=0
+
+    case $state in
+    (init)
+        words=($line[2] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:bbcli-init-command-$line[2]:"
+        case $line[2] in
+            (complete)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_bbcli__subcmd__init__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:bbcli-init-help-command-$line[1]:"
+        case $line[1] in
+            (complete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
 ;;
 (unlock)
 _arguments "${_arguments_options[@]}" : \
@@ -299,64 +341,6 @@ esac
     ;;
 esac
 ;;
-(recovery)
-_arguments "${_arguments_options[@]}" : \
-'-h[Print help]' \
-'--help[Print help]' \
-":: :_bbcli__subcmd__recovery_commands" \
-"*::: :->recovery" \
-&& ret=0
-
-    case $state in
-    (recovery)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:bbcli-recovery-command-$line[1]:"
-        case $line[1] in
-            (run)
-_arguments "${_arguments_options[@]}" : \
-'-h[Print help]' \
-'--help[Print help]' \
-&& ret=0
-;;
-(finish)
-_arguments "${_arguments_options[@]}" : \
-'-h[Print help]' \
-'--help[Print help]' \
-&& ret=0
-;;
-(help)
-_arguments "${_arguments_options[@]}" : \
-":: :_bbcli__subcmd__recovery__subcmd__help_commands" \
-"*::: :->help" \
-&& ret=0
-
-    case $state in
-    (help)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:bbcli-recovery-help-command-$line[1]:"
-        case $line[1] in
-            (run)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(finish)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(help)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-        esac
-    ;;
-esac
-;;
-        esac
-    ;;
-esac
-;;
 (config)
 _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
@@ -438,7 +422,23 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (init)
 _arguments "${_arguments_options[@]}" : \
+":: :_bbcli__subcmd__help__subcmd__init_commands" \
+"*::: :->init" \
 && ret=0
+
+    case $state in
+    (init)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:bbcli-help-init-command-$line[1]:"
+        case $line[1] in
+            (complete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
 ;;
 (unlock)
 _arguments "${_arguments_options[@]}" : \
@@ -540,30 +540,6 @@ _arguments "${_arguments_options[@]}" : \
     ;;
 esac
 ;;
-(recovery)
-_arguments "${_arguments_options[@]}" : \
-":: :_bbcli__subcmd__help__subcmd__recovery_commands" \
-"*::: :->recovery" \
-&& ret=0
-
-    case $state in
-    (recovery)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:bbcli-help-recovery-command-$line[1]:"
-        case $line[1] in
-            (run)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(finish)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-        esac
-    ;;
-esac
-;;
 (config)
 _arguments "${_arguments_options[@]}" : \
 ":: :_bbcli__subcmd__help__subcmd__config_commands" \
@@ -605,13 +581,12 @@ esac
 _bbcli_commands() {
     local commands; commands=(
 'state:Print daemon state' \
-'init:Initialize daemon storage with the main password' \
+'init:Initialize daemon storage with the main password or complete one recovery-mode initialization' \
 'unlock:Send the main password to the daemon unlock path' \
 'stop:Ask the daemon to shut down gracefully' \
 'peer:Manage known peers' \
 'file:Manage files in the latest encrypted content blob' \
 'contract:Inspect and drive contracts with peers' \
-'recovery:Recover older requester revisions and manage recovery mode' \
 'config:Read or update daemon configuration' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -786,13 +761,12 @@ _bbcli__subcmd__file__subcmd__set_commands() {
 _bbcli__subcmd__help_commands() {
     local commands; commands=(
 'state:Print daemon state' \
-'init:Initialize daemon storage with the main password' \
+'init:Initialize daemon storage with the main password or complete one recovery-mode initialization' \
 'unlock:Send the main password to the daemon unlock path' \
 'stop:Ask the daemon to shut down gracefully' \
 'peer:Manage known peers' \
 'file:Manage files in the latest encrypted content blob' \
 'contract:Inspect and drive contracts with peers' \
-'recovery:Recover older requester revisions and manage recovery mode' \
 'config:Read or update daemon configuration' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -877,8 +851,15 @@ _bbcli__subcmd__help__subcmd__help_commands() {
 }
 (( $+functions[_bbcli__subcmd__help__subcmd__init_commands] )) ||
 _bbcli__subcmd__help__subcmd__init_commands() {
-    local commands; commands=()
+    local commands; commands=(
+'complete:Complete recovery-mode initialization and allow publication' \
+    )
     _describe -t commands 'bbcli help init commands' commands "$@"
+}
+(( $+functions[_bbcli__subcmd__help__subcmd__init__subcmd__complete_commands] )) ||
+_bbcli__subcmd__help__subcmd__init__subcmd__complete_commands() {
+    local commands; commands=()
+    _describe -t commands 'bbcli help init complete commands' commands "$@"
 }
 (( $+functions[_bbcli__subcmd__help__subcmd__peer_commands] )) ||
 _bbcli__subcmd__help__subcmd__peer_commands() {
@@ -910,24 +891,6 @@ _bbcli__subcmd__help__subcmd__peer__subcmd__unpin_commands() {
     local commands; commands=()
     _describe -t commands 'bbcli help peer unpin commands' commands "$@"
 }
-(( $+functions[_bbcli__subcmd__help__subcmd__recovery_commands] )) ||
-_bbcli__subcmd__help__subcmd__recovery_commands() {
-    local commands; commands=(
-'run:Recover older requester revisions from peers and merge them locally' \
-'finish:Finish recovery mode and allow publication from the current generation' \
-    )
-    _describe -t commands 'bbcli help recovery commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__help__subcmd__recovery__subcmd__finish_commands] )) ||
-_bbcli__subcmd__help__subcmd__recovery__subcmd__finish_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli help recovery finish commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__help__subcmd__recovery__subcmd__run_commands] )) ||
-_bbcli__subcmd__help__subcmd__recovery__subcmd__run_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli help recovery run commands' commands "$@"
-}
 (( $+functions[_bbcli__subcmd__help__subcmd__state_commands] )) ||
 _bbcli__subcmd__help__subcmd__state_commands() {
     local commands; commands=()
@@ -945,8 +908,34 @@ _bbcli__subcmd__help__subcmd__unlock_commands() {
 }
 (( $+functions[_bbcli__subcmd__init_commands] )) ||
 _bbcli__subcmd__init_commands() {
-    local commands; commands=()
+    local commands; commands=(
+'complete:Complete recovery-mode initialization and allow publication' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
     _describe -t commands 'bbcli init commands' commands "$@"
+}
+(( $+functions[_bbcli__subcmd__init__subcmd__complete_commands] )) ||
+_bbcli__subcmd__init__subcmd__complete_commands() {
+    local commands; commands=()
+    _describe -t commands 'bbcli init complete commands' commands "$@"
+}
+(( $+functions[_bbcli__subcmd__init__subcmd__help_commands] )) ||
+_bbcli__subcmd__init__subcmd__help_commands() {
+    local commands; commands=(
+'complete:Complete recovery-mode initialization and allow publication' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'bbcli init help commands' commands "$@"
+}
+(( $+functions[_bbcli__subcmd__init__subcmd__help__subcmd__complete_commands] )) ||
+_bbcli__subcmd__init__subcmd__help__subcmd__complete_commands() {
+    local commands; commands=()
+    _describe -t commands 'bbcli init help complete commands' commands "$@"
+}
+(( $+functions[_bbcli__subcmd__init__subcmd__help__subcmd__help_commands] )) ||
+_bbcli__subcmd__init__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'bbcli init help help commands' commands "$@"
 }
 (( $+functions[_bbcli__subcmd__peer_commands] )) ||
 _bbcli__subcmd__peer_commands() {
@@ -1014,49 +1003,6 @@ _bbcli__subcmd__peer__subcmd__pin_commands() {
 _bbcli__subcmd__peer__subcmd__unpin_commands() {
     local commands; commands=()
     _describe -t commands 'bbcli peer unpin commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__recovery_commands] )) ||
-_bbcli__subcmd__recovery_commands() {
-    local commands; commands=(
-'run:Recover older requester revisions from peers and merge them locally' \
-'finish:Finish recovery mode and allow publication from the current generation' \
-'help:Print this message or the help of the given subcommand(s)' \
-    )
-    _describe -t commands 'bbcli recovery commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__recovery__subcmd__finish_commands] )) ||
-_bbcli__subcmd__recovery__subcmd__finish_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli recovery finish commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__recovery__subcmd__help_commands] )) ||
-_bbcli__subcmd__recovery__subcmd__help_commands() {
-    local commands; commands=(
-'run:Recover older requester revisions from peers and merge them locally' \
-'finish:Finish recovery mode and allow publication from the current generation' \
-'help:Print this message or the help of the given subcommand(s)' \
-    )
-    _describe -t commands 'bbcli recovery help commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__recovery__subcmd__help__subcmd__finish_commands] )) ||
-_bbcli__subcmd__recovery__subcmd__help__subcmd__finish_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli recovery help finish commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__recovery__subcmd__help__subcmd__help_commands] )) ||
-_bbcli__subcmd__recovery__subcmd__help__subcmd__help_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli recovery help help commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__recovery__subcmd__help__subcmd__run_commands] )) ||
-_bbcli__subcmd__recovery__subcmd__help__subcmd__run_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli recovery help run commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__recovery__subcmd__run_commands] )) ||
-_bbcli__subcmd__recovery__subcmd__run_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli recovery run commands' commands "$@"
 }
 (( $+functions[_bbcli__subcmd__state_commands] )) ||
 _bbcli__subcmd__state_commands() {

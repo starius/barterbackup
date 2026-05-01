@@ -102,13 +102,9 @@ service BarterBackupClient {
     rpc CheckContract(CheckContractRequest)
         returns (stream CheckContractUpdate);
 
-    // RecoverContent triggers one explicit older-lineage recovery pass.
-    rpc RecoverContent(RecoverContentRequest)
-        returns (stream RecoverContentUpdate);
-
-    // FinishRecovery disables recovery mode and advances the effective
+    // InitComplete disables recovery mode and advances the effective
     // recovery watermark to the current node-generation boundary.
-    rpc FinishRecovery(FinishRecoveryRequest) returns (FinishRecoveryResponse);
+    rpc InitComplete(InitCompleteRequest) returns (InitCompleteResponse);
 }
 
 // StateRequest is an empty local state request.
@@ -375,9 +371,9 @@ message UnlockRequest {
 
 message UnlockResponse {}
 
-message FinishRecoveryRequest {}
+message InitCompleteRequest {}
 
-message FinishRecoveryResponse {}
+message InitCompleteResponse {}
 
 message StopRequest {}
 
@@ -881,9 +877,6 @@ message CheckContractUpdate {
     // our_content_section_length is the length of the sampled section.
     int64 our_content_section_length = 5;
 }
-
-// RecoverContentRequest triggers content recovery workflow.
-message RecoverContentRequest {}
 
 // RecoverContentUpdate reports one automatic recovery pass and its result.
 message RecoverContentUpdate {
