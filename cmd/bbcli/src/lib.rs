@@ -19,9 +19,9 @@ use futures_util::{stream, TryStreamExt};
 use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
 use protos::clirpc::{
     CheckContractRequest, CheckoutRevisionRequest, ConnectPeerRequest, DeleteFileRequest,
-    ExportBuiltInPeersRequest, File, FileInfo, GetContractsRequest, GetFileRequest,
-    GetStorageConfigRequest, InitRequest, ListConflictsRequest, ListFilesRequest, PeerInfo,
-    PeerStatus, PeersRequest, PeersResponse, PinPeerRequest, ProposeContractRequest,
+    ExportBuiltInPeersRequest, File, FileInfo, FinishRecoveryRequest, GetContractsRequest,
+    GetFileRequest, GetStorageConfigRequest, InitRequest, ListConflictsRequest, ListFilesRequest,
+    PeerInfo, PeerStatus, PeersRequest, PeersResponse, PinPeerRequest, ProposeContractRequest,
     RecoverContentRequest, RecoverContentUpdate, ResolveConflictRequest, SetStorageConfigRequest,
     StateRequest, StateResponse, StopRequest, StorageConfig, UnlockRequest, UnpinPeerRequest,
 };
@@ -154,6 +154,10 @@ enum Command {
         /// wait_seconds is how long to wait for daemon startup readiness.
         #[arg(long, default_value_t = DEFAULT_UNLOCK_WAIT_SECS)]
         wait_seconds: u64,
+
+        /// recovery_mode blocks outgoing publication until recovery is finished.
+        #[arg(long)]
+        recovery_mode: bool,
 
         /// password is the inline main password or seed string.
         password: Option<String>,
@@ -304,6 +308,9 @@ enum ContractCommand {
 enum RecoveryCommand {
     /// Recover the newest known local content version from peers.
     Run,
+
+    /// Finish recovery mode and allow publication from the current generation.
+    Finish,
 
     /// List unresolved and archived conflicting revisions.
     Conflicts,
@@ -477,6 +484,7 @@ async fn run_parsed(args: Args) -> Result<()> {
             password_stdin,
             allow_weak_password,
             wait_seconds,
+            recovery_mode,
             password,
         } => {
             run_init_command(
@@ -484,6 +492,7 @@ async fn run_parsed(args: Args) -> Result<()> {
                 Duration::from_secs(wait_seconds),
                 || resolve_init_password(password, password_stdin),
                 allow_weak_password,
+                recovery_mode,
             )
             .await
         }
@@ -532,6 +541,7 @@ async fn run_parsed(args: Args) -> Result<()> {
         },
         Command::Recovery { cmd } => match cmd {
             RecoveryCommand::Run => recover_content(&target).await,
+            RecoveryCommand::Finish => finish_recovery(&target).await,
             RecoveryCommand::Conflicts => list_conflicts(&target).await,
             RecoveryCommand::Checkout {
                 content_id,
@@ -812,6 +822,42 @@ fn format_state_response(response: &StateResponse) -> Vec<String> {
                 ));
             }
         }
+        if let Some(recovery) = local_summary.recovery.as_ref() {
+            lines.push(format!(
+                "recovery_mode_enabled: {}",
+                recovery.recovery_mode_enabled
+            ));
+            lines.push(format!(
+                "node_initialized_at: {}",
+                if recovery.node_initialized_at != 0 || recovery.node_initialized_at_ns != 0 {
+                    format!(
+                        "{}.{:09}",
+                        recovery.node_initialized_at,
+                        recovery.node_initialized_at_ns.max(0)
+                    )
+                } else {
+                    "unknown".to_string()
+                }
+            ));
+            lines.push(format!(
+                "recovery_watermark_at: {}",
+                if recovery.recovery_watermark_at != 0 || recovery.recovery_watermark_at_ns != 0 {
+                    format!(
+                        "{}.{:09}",
+                        recovery.recovery_watermark_at,
+                        recovery.recovery_watermark_at_ns.max(0)
+                    )
+                } else {
+                    "unknown".to_string()
+                }
+            ));
+            if !recovery.publish_blocked_reason.is_empty() {
+                lines.push(format!(
+                    "publish_blocked_reason: {}",
+                    recovery.publish_blocked_reason
+                ));
+            }
+        }
     }
 
     lines
@@ -823,6 +869,7 @@ async fn run_init_command<F>(
     wait_timeout: Duration,
     read_password: F,
     allow_weak_password: bool,
+    recovery_mode: bool,
 ) -> Result<()>
 where
     F: FnOnce() -> Result<String>,
@@ -834,6 +881,7 @@ where
         state,
         read_password,
         allow_weak_password,
+        recovery_mode,
     )
     .await
 }
@@ -845,6 +893,7 @@ async fn continue_init_command<F>(
     state: StateResponse,
     read_password: F,
     allow_weak_password: bool,
+    recovery_mode: bool,
 ) -> Result<()>
 where
     F: FnOnce() -> Result<String>,
@@ -855,7 +904,7 @@ where
         allow_weak_password,
         &mut io::stderr().lock(),
     )?;
-    init(target, &password, wait_timeout).await?;
+    init(target, &password, recovery_mode, wait_timeout).await?;
     write_init_success_message(&mut io::stdout().lock(), io::stdout().is_terminal())?;
     Ok(())
 }
@@ -1088,8 +1137,20 @@ fn password_score_number(score: Score) -> u8 {
 }
 
 /// Initialize daemon storage, waiting briefly if it is still starting up.
-async fn init(target: &LocalCliTarget, password: &str, wait_timeout: Duration) -> Result<()> {
-    init_with_keys_dir(&target.local_addr, password, &target.keys_dir, wait_timeout).await
+async fn init(
+    target: &LocalCliTarget,
+    password: &str,
+    recovery_mode: bool,
+    wait_timeout: Duration,
+) -> Result<()> {
+    init_with_keys_dir(
+        &target.local_addr,
+        password,
+        recovery_mode,
+        &target.keys_dir,
+        wait_timeout,
+    )
+    .await
 }
 
 /// Unlock the daemon, waiting briefly if it is still starting up.
@@ -1839,6 +1900,13 @@ async fn recover_content(target: &LocalCliTarget) -> Result<()> {
     Ok(())
 }
 
+/// Finish recovery mode for the current node generation.
+async fn finish_recovery(target: &LocalCliTarget) -> Result<()> {
+    let mut client = connect_client(target).await?;
+    client.finish_recovery(FinishRecoveryRequest {}).await?;
+    Ok(())
+}
+
 /// Print one operator-facing recovery summary for the last recovery update.
 fn write_recovery_summary(writer: &mut impl Write, update: &RecoverContentUpdate) -> Result<()> {
     if update.total_versions_found <= 0 {
@@ -2029,6 +2097,7 @@ pub async fn state_response_with_keys_dir(
 pub async fn init_with_keys_dir(
     addr: &str,
     password: &str,
+    recovery_mode: bool,
     keys_dir: &Path,
     wait_timeout: Duration,
 ) -> Result<()> {
@@ -2038,7 +2107,7 @@ pub async fn init_with_keys_dir(
 
     loop {
         match connect_client_with_keys_dir(addr, keys_dir).await {
-            Ok(mut client) => match init_with_client(&mut client, password).await {
+            Ok(mut client) => match init_with_client(&mut client, password, recovery_mode).await {
                 Ok(()) => return Ok(()),
                 Err(error) if is_retryable_unlock_error(&error) && Instant::now() < deadline => {
                     last_error = error;
@@ -2277,10 +2346,12 @@ fn is_retryable_unlock_error(error: &anyhow::Error) -> bool {
 pub async fn init_with_client(
     client: &mut BarterBackupClientClient<Channel>,
     password: &str,
+    recovery_mode: bool,
 ) -> Result<()> {
     client
         .init(InitRequest {
             main_password: password.to_string(),
+            recovery_mode,
         })
         .await?;
     Ok(())
@@ -2856,6 +2927,14 @@ mod tests {
                         never: false,
                     }],
                 }),
+                recovery: Some(protos::clirpc::StateRecoverySummary {
+                    recovery_mode_enabled: true,
+                    node_initialized_at: 100,
+                    node_initialized_at_ns: 7,
+                    recovery_watermark_at: 90,
+                    recovery_watermark_at_ns: 8,
+                    publish_blocked_reason: "recovery mode is enabled".to_string(),
+                }),
             }),
         };
 
@@ -2867,6 +2946,12 @@ mod tests {
             .iter()
             .any(|line| line == "self_peer_check_state: healthy"));
         assert!(lines.iter().any(|line| line == "files_count: 2"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "recovery_mode_enabled: true"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "publish_blocked_reason: recovery mode is enabled"));
         assert!(lines
             .iter()
             .any(|line| line == "files_total_size_bytes: 99"));
@@ -3409,6 +3494,7 @@ mod tests {
                 called_clone.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok("password".to_string())
             },
+            false,
             false,
         )
         .await

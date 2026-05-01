@@ -267,6 +267,10 @@ pub struct Store {
     peers: Vec<storedpb::Peer>,
     active_conflict: Option<storedpb::ActiveConflict>,
     archived_conflicts: Vec<storedpb::ConflictRevision>,
+    node_initialized_at: Option<(i64, i64)>,
+    latest_recovered_revision: Option<storedpb::RecoveredRevision>,
+    recovery_watermark: Option<(i64, i64)>,
+    recovery_mode_enabled: bool,
     current: Option<CurrentContent>,
 }
 
@@ -288,6 +292,11 @@ fn peer_content_id(content: Option<&storedpb::PeerContent>) -> Option<Vec<u8>> {
     content
         .filter(|content| !content.content_id.is_empty())
         .map(|content| content.content_id.clone())
+}
+
+/// Return one optional persisted timestamp from whole-second and nanosecond fields.
+fn optional_metadata_timestamp(secs: i64, nanos: i64) -> Option<(i64, i64)> {
+    ((secs != 0) || (nanos != 0)).then_some((secs, nanos))
 }
 
 /// Migrate one older peer record into the richer current representation.
@@ -383,6 +392,10 @@ impl Store {
             peers: Vec::new(),
             active_conflict: None,
             archived_conflicts: Vec::new(),
+            node_initialized_at: None,
+            latest_recovered_revision: None,
+            recovery_watermark: None,
+            recovery_mode_enabled: false,
             current: None,
         };
         store.load()?;
@@ -417,6 +430,89 @@ impl Store {
                 modified_at_nanos: i64::from(file.modified_at_nanos),
             })
             .collect()
+    }
+
+    /// Return the stored node-initialization boundary, if one is known.
+    pub fn node_initialized_at(&self) -> Option<(i64, i64)> {
+        self.node_initialized_at
+    }
+
+    /// Return the newest recovered older-lineage revision that was applied locally.
+    pub fn latest_recovered_revision(&self) -> Option<storedpb::RecoveredRevision> {
+        self.latest_recovered_revision.clone()
+    }
+
+    /// Return the effective recovery watermark used to suppress older lineage.
+    pub fn recovery_watermark(&self) -> Option<(i64, i64)> {
+        self.recovery_watermark
+    }
+
+    /// Report whether recovery mode currently blocks owner-originated publication.
+    pub fn recovery_mode_enabled(&self) -> bool {
+        self.recovery_mode_enabled
+    }
+
+    /// Initialize the persisted lineage state once for this store.
+    pub fn initialize_lineage(
+        &mut self,
+        node_initialized_at: (i64, i64),
+        recovery_mode_enabled: bool,
+    ) -> Result<(), StorageError> {
+        if !(0..1_000_000_000).contains(&node_initialized_at.1) {
+            return Err(StorageError::InvalidTimestamp);
+        }
+        if self.node_initialized_at.is_some() {
+            return Err(StorageError::Message(
+                "lineage metadata is already initialized".to_string(),
+            ));
+        }
+
+        self.node_initialized_at = Some(node_initialized_at);
+        self.recovery_watermark = None;
+        self.recovery_mode_enabled = recovery_mode_enabled;
+        self.persist_peer_state()
+    }
+
+    /// Persist one newer recovered revision and advance the recovery watermark.
+    pub fn record_recovered_revision(
+        &mut self,
+        revision: storedpb::RecoveredRevision,
+    ) -> Result<(), StorageError> {
+        if revision.content_id.is_empty() {
+            return Err(StorageError::InvalidFileName);
+        }
+        if !(0..1_000_000_000).contains(&revision.created_at_ns) {
+            return Err(StorageError::InvalidTimestamp);
+        }
+
+        self.latest_recovered_revision = Some(revision.clone());
+        self.recovery_watermark = Some((revision.created_at, revision.created_at_ns));
+        self.persist_peer_state()
+    }
+
+    /// Disable recovery mode and advance the watermark to the node boundary.
+    pub fn finish_recovery_mode(&mut self) -> Result<(), StorageError> {
+        let Some(node_initialized_at) = self.node_initialized_at else {
+            return Err(StorageError::Message(
+                "lineage metadata is not initialized".to_string(),
+            ));
+        };
+
+        self.recovery_mode_enabled = false;
+        self.recovery_watermark = Some(node_initialized_at);
+        self.persist_peer_state()
+    }
+
+    /// Persist whether recovery mode blocks owner-originated publication.
+    pub fn set_recovery_mode_enabled(
+        &mut self,
+        recovery_mode_enabled: bool,
+    ) -> Result<(), StorageError> {
+        if self.recovery_mode_enabled == recovery_mode_enabled {
+            return Ok(());
+        }
+        self.recovery_mode_enabled = recovery_mode_enabled;
+        self.persist_peer_state()
     }
 
     /// Return the number of logical user files in the active revision.
@@ -1213,7 +1309,7 @@ impl Store {
 
     /// Load the encrypted content blobs and sidecar state from disk.
     fn load(&mut self) -> Result<(), StorageError> {
-        self.load_peer_state()?;
+        let had_peer_state = self.load_peer_state()?;
         let foreign_files = self.foreign_content_files()?;
         let legacy_foreign_content_ids = self.legacy_foreign_content_ids();
 
@@ -1259,6 +1355,9 @@ impl Store {
         // Accept the common crash-safe case of two valid versions and drop the older one.
         if valid.is_empty() {
             if invalid.is_empty() {
+                if had_peer_state {
+                    self.ensure_legacy_lineage_initialized()?;
+                }
                 return Ok(());
             }
             return Err(StorageError::RecoveryRequired(format!(
@@ -1268,6 +1367,7 @@ impl Store {
         }
         if valid.len() == 1 && invalid.is_empty() {
             self.adopt(valid.pop().unwrap());
+            self.ensure_legacy_lineage_initialized()?;
             return Ok(());
         }
         if valid.len() == 2 && invalid.is_empty() {
@@ -1276,6 +1376,7 @@ impl Store {
             let older = valid.pop().unwrap();
             let _ = self.fs.remove(&older.name);
             self.adopt(newest);
+            self.ensure_legacy_lineage_initialized()?;
             return Ok(());
         }
 
@@ -1383,7 +1484,7 @@ impl Store {
     }
 
     /// Return the current projected shared blob length from in-memory state.
-    fn current_projected_blob_len(&self) -> Result<Option<usize>, StorageError> {
+    pub fn current_projected_blob_len(&self) -> Result<Option<usize>, StorageError> {
         let files = self.current_plain_files();
         if files.is_empty() {
             return Ok(None);
@@ -1431,6 +1532,24 @@ impl Store {
             peers: self.peers.clone(),
             active_conflict: self.active_conflict.clone(),
             archived_conflicts: self.archived_conflicts.clone(),
+            node_initialized_at: self
+                .node_initialized_at
+                .map(|timestamp| timestamp.0)
+                .unwrap_or(0),
+            node_initialized_at_ns: self
+                .node_initialized_at
+                .map(|timestamp| timestamp.1)
+                .unwrap_or(0),
+            latest_recovered_revision: self.latest_recovered_revision.clone(),
+            recovery_watermark_at: self
+                .recovery_watermark
+                .map(|timestamp| timestamp.0)
+                .unwrap_or(0),
+            recovery_watermark_at_ns: self
+                .recovery_watermark
+                .map(|timestamp| timestamp.1)
+                .unwrap_or(0),
+            recovery_mode_enabled: self.recovery_mode_enabled,
         };
         let plaintext = metadata.encode_to_vec();
         let ciphertext = encrypt_sidecar(&self.peer_cipher, &plaintext);
@@ -1438,10 +1557,10 @@ impl Store {
     }
 
     /// Load the encrypted peer sidecar if it exists.
-    fn load_peer_state(&mut self) -> Result<(), StorageError> {
+    fn load_peer_state(&mut self) -> Result<bool, StorageError> {
         let ciphertext = match self.fs.read(PEER_STATE_FILE) {
             Ok(ciphertext) => ciphertext,
-            Err(StorageError::FileNotFound) => return Ok(()),
+            Err(StorageError::FileNotFound) => return Ok(false),
             Err(err) => return Err(err),
         };
         let plaintext = decrypt_sidecar(&self.peer_cipher, &ciphertext)?;
@@ -1456,6 +1575,44 @@ impl Store {
             .collect();
         self.active_conflict = metadata.active_conflict;
         self.archived_conflicts = metadata.archived_conflicts;
+        self.node_initialized_at = optional_metadata_timestamp(
+            metadata.node_initialized_at,
+            metadata.node_initialized_at_ns,
+        );
+        self.latest_recovered_revision = metadata.latest_recovered_revision;
+        self.recovery_watermark = optional_metadata_timestamp(
+            metadata.recovery_watermark_at,
+            metadata.recovery_watermark_at_ns,
+        )
+        .or_else(|| {
+            self.latest_recovered_revision
+                .as_ref()
+                .map(|revision| (revision.created_at, revision.created_at_ns))
+        });
+        self.recovery_mode_enabled = metadata.recovery_mode_enabled;
+        Ok(true)
+    }
+
+    /// Backfill lineage metadata for stores created before recovery metadata existed.
+    fn ensure_legacy_lineage_initialized(&mut self) -> Result<(), StorageError> {
+        if self.node_initialized_at.is_some() {
+            return Ok(());
+        }
+
+        let fallback = if let Some(current) = self.current.as_ref() {
+            (
+                i64::try_from(current.revision.created_at_secs).unwrap_or(i64::MAX),
+                i64::from(current.revision.created_at_nanos),
+            )
+        } else {
+            let now = self.time_source.now();
+            (
+                i64::try_from(now.secs).unwrap_or(i64::MAX),
+                i64::from(now.nanos),
+            )
+        };
+        self.node_initialized_at = Some(fallback);
+        self.recovery_watermark = None;
         Ok(())
     }
 
@@ -2016,6 +2173,12 @@ mod tests {
             }],
             active_conflict: None,
             archived_conflicts: Vec::new(),
+            node_initialized_at: 0,
+            node_initialized_at_ns: 0,
+            latest_recovered_revision: None,
+            recovery_watermark_at: 0,
+            recovery_watermark_at_ns: 0,
+            recovery_mode_enabled: false,
         };
         let peer_state_key = keys::derive_key(&master(), "bb/storage/peer-state", 32).unwrap();
         let peer_cipher = Aes256GcmSiv::new_from_slice(&peer_state_key).unwrap();
@@ -2087,6 +2250,64 @@ mod tests {
         );
         assert_eq!(reloaded.archived_conflicts()[0].resolved_at, 50);
         assert_eq!(reloaded.archived_conflicts()[0].resolved_at_ns, 60);
+    }
+
+    #[test]
+    fn lineage_metadata_round_trips_and_finishes_recovery() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+
+        store.initialize_lineage((100, 7), true).unwrap();
+        assert_eq!(store.node_initialized_at(), Some((100, 7)));
+        assert_eq!(store.recovery_watermark(), None);
+        assert!(store.recovery_mode_enabled());
+
+        store
+            .record_recovered_revision(storedpb::RecoveredRevision {
+                content_id: vec![0x55; content::CONTENT_ID_LEN],
+                created_at: 90,
+                created_at_ns: 8,
+            })
+            .unwrap();
+        assert_eq!(store.recovery_watermark(), Some((90, 8)));
+        assert_eq!(
+            store.latest_recovered_revision(),
+            Some(storedpb::RecoveredRevision {
+                content_id: vec![0x55; content::CONTENT_ID_LEN],
+                created_at: 90,
+                created_at_ns: 8,
+            })
+        );
+
+        let reloaded = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+        assert_eq!(reloaded.node_initialized_at(), Some((100, 7)));
+        assert_eq!(reloaded.recovery_watermark(), Some((90, 8)));
+        assert!(reloaded.recovery_mode_enabled());
+
+        let mut finished = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        finished.finish_recovery_mode().unwrap();
+        assert_eq!(finished.recovery_watermark(), Some((100, 7)));
+        assert!(!finished.recovery_mode_enabled());
+    }
+
+    #[test]
+    fn legacy_store_bootstraps_lineage_without_recovery_watermark() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+        store.set_file("alpha.txt", b"secret".to_vec()).unwrap();
+        store.ensure_peer(b"peer-a").unwrap();
+
+        let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        let current = reloaded.current_content().unwrap();
+        assert_eq!(
+            reloaded.node_initialized_at(),
+            Some((
+                i64::try_from(current.revision.created_at_secs).unwrap_or(i64::MAX),
+                i64::from(current.revision.created_at_nanos),
+            ))
+        );
+        assert!(reloaded.latest_recovered_revision().is_none());
+        assert_eq!(reloaded.recovery_watermark(), None);
     }
 
     #[test]

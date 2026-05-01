@@ -183,6 +183,19 @@ message ActiveConflict {
     repeated ConflictRevision revisions = 1;
 }
 
+// RecoveredRevision records one authenticated older-lineage revision that was
+// already merged into the local file set.
+message RecoveredRevision {
+    // content_id is the encrypted revision identifier.
+    bytes content_id = 1;
+
+    // created_at is the authenticated Unix timestamp from the revision id.
+    int64 created_at = 2;
+
+    // created_at_ns is the authenticated nanosecond component.
+    int64 created_at_ns = 3;
+}
+
 // Metadata is short data that is stored together with the main content on
 // other peers and survives a node reset.
 message Metadata {
@@ -206,4 +219,29 @@ message Metadata {
     // archived_conflicts are the non-selected revisions kept forever after a
     // conflict was resolved.
     repeated ConflictRevision archived_conflicts = 4;
+
+    // node_initialized_at is the local node-generation boundary recorded
+    // when `bbcli init` succeeded.
+    int64 node_initialized_at = 5;
+
+    // node_initialized_at_ns is the nanosecond component of
+    // node_initialized_at.
+    int64 node_initialized_at_ns = 6;
+
+    // latest_recovered_revision is the newest older-lineage revision that was
+    // actually merged locally, if any.
+    RecoveredRevision latest_recovered_revision = 7;
+
+    // recovery_watermark_at is the newest older-lineage timestamp already
+    // applied locally, or the initialization boundary after recovery mode is
+    // finished.
+    int64 recovery_watermark_at = 8;
+
+    // recovery_watermark_at_ns is the nanosecond component of
+    // recovery_watermark_at.
+    int64 recovery_watermark_at_ns = 9;
+
+    // recovery_mode_enabled blocks owner-originated publication until the
+    // operator explicitly finishes recovery mode.
+    bool recovery_mode_enabled = 10;
 }

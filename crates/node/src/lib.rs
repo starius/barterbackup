@@ -329,6 +329,12 @@ struct LocalStoreSnapshot {
     file_count: i64,
     /// total_file_bytes is the total plaintext size of all logical user files.
     total_file_bytes: i64,
+    /// node_initialized_at is the persisted generation boundary, if any.
+    node_initialized_at: Option<(i64, i64)>,
+    /// recovery_watermark is the persisted older-lineage watermark, if any.
+    recovery_watermark: Option<(i64, i64)>,
+    /// recovery_mode_enabled reports whether outgoing publication is blocked.
+    recovery_mode_enabled: bool,
 }
 
 /// Build the default local storage policy.
@@ -2310,11 +2316,6 @@ impl Node {
         })
     }
 
-    /// Report whether a valid mirrored peer blob is already stored locally.
-    fn has_mirrored_blob(&self, content_id: &[u8]) -> Result<bool, Status> {
-        self.with_store(|store| store.has_mirrored_blob(content_id))
-    }
-
     /// Report whether a mirrored peer blob is present, missing, or corrupt.
     fn mirrored_blob_state(&self, content_id: &[u8]) -> Result<MirroredBlobState, Status> {
         self.with_store(|store| match store.has_mirrored_blob(content_id) {
@@ -2819,6 +2820,69 @@ impl Node {
         self.refresh_known_peers_from_store()
     }
 
+    /// Persist the local lineage boundary once during daemon initialization.
+    pub fn initialize_lineage(
+        &self,
+        node_initialized_at: (i64, i64),
+        recovery_mode_enabled: bool,
+    ) -> Result<(), Status> {
+        self.with_store(|store| {
+            store.initialize_lineage(node_initialized_at, recovery_mode_enabled)
+        })
+    }
+
+    /// Disable recovery mode and advance the recovery watermark.
+    fn finish_recovery_mode(&self) -> Result<(), Status> {
+        self.with_store(|store| store.finish_recovery_mode())
+    }
+
+    /// Report whether recovery mode blocks owner-originated publication.
+    fn recovery_mode_enabled(&self) -> Result<bool, Status> {
+        self.with_store(|store| Ok(store.recovery_mode_enabled()))
+    }
+
+    /// Reject one local file mutation while recovery mode is enabled.
+    fn ensure_local_file_mutations_allowed(&self) -> Result<(), Status> {
+        if self.recovery_mode_enabled()? {
+            return Err(Status::failed_precondition(
+                "local file edits are blocked while recovery mode is enabled",
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Return the current owner-publication guard reason, if any.
+    fn publish_blocked_reason(&self) -> Result<Option<String>, Status> {
+        if self.recovery_mode_enabled()? {
+            return Ok(Some(
+                "recovery mode is enabled; finish recovery before publishing".to_string(),
+            ));
+        }
+
+        let oversized = self.with_store(|store| {
+            Ok(store
+                .current_projected_blob_len()?
+                .is_some_and(|len| len > storage::MAX_SHARED_CONTENT_BLOB_BYTES))
+        })?;
+        if oversized {
+            return Ok(Some(
+                "current content exceeds the fixed 4 MiB publication limit".to_string(),
+            ));
+        }
+
+        Ok(None)
+    }
+
+    /// Reject one owner-originated publish attempt when safety guards are active.
+    fn ensure_owner_publication_allowed(&self) -> Result<(), Status> {
+        if let Some(reason) = self.publish_blocked_reason()? {
+            return Err(Status::failed_precondition(reason));
+        }
+
+        Ok(())
+    }
+
     /// Return the unresolved active conflict, if any.
     fn active_conflict(&self) -> Result<Option<storedpb::ActiveConflict>, Status> {
         self.with_store(|store| Ok(store.active_conflict()))
@@ -3107,6 +3171,9 @@ impl Node {
                 tracked_peers: store.peers(),
                 file_count: store.file_count(),
                 total_file_bytes: store.total_file_bytes(),
+                node_initialized_at: store.node_initialized_at(),
+                recovery_watermark: store.recovery_watermark(),
+                recovery_mode_enabled: store.recovery_mode_enabled(),
             }))
         })
     }
@@ -3277,6 +3344,7 @@ impl Node {
             .unwrap_or(0);
         let min_replicas_target = self.storage_config.lock().unwrap().min_replicas.max(0);
         let desired_synced_replicas = working_contracts.max(min_replicas_target);
+        let publish_blocked_reason = self.publish_blocked_reason()?.unwrap_or_default();
         let predicted_replica_horizon = current_content_id
             .as_ref()
             .map(|current_content_id| {
@@ -3331,6 +3399,26 @@ impl Node {
                     .unwrap_or(i64::MAX),
                 predicted_min_replicas_target: min_replicas_target,
                 predicted_replica_horizon: replica_horizon_points(&predicted_replica_horizon),
+            }),
+            recovery: Some(clirpc::StateRecoverySummary {
+                recovery_mode_enabled: snapshot.recovery_mode_enabled,
+                node_initialized_at: snapshot
+                    .node_initialized_at
+                    .map(|timestamp| timestamp.0)
+                    .unwrap_or_default(),
+                node_initialized_at_ns: snapshot
+                    .node_initialized_at
+                    .map(|timestamp| i32::try_from(timestamp.1).unwrap_or(i32::MAX))
+                    .unwrap_or_default(),
+                recovery_watermark_at: snapshot
+                    .recovery_watermark
+                    .map(|timestamp| timestamp.0)
+                    .unwrap_or_default(),
+                recovery_watermark_at_ns: snapshot
+                    .recovery_watermark
+                    .map(|timestamp| i32::try_from(timestamp.1).unwrap_or(i32::MAX))
+                    .unwrap_or_default(),
+                publish_blocked_reason,
             }),
         }))
     }
@@ -3415,22 +3503,9 @@ impl Node {
                     let _ =
                         self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned);
                     our_remaining_seconds = revision.requester_remaining_seconds;
-                    our_content_synced =
-                        self.our_content_synced_with_peer(revision.requester_content.as_ref())?;
-                    if let Err(error) = self
-                        .sync_peer_content_info(
-                            &peer_onion,
-                            &peer_public_key,
-                            revision.responder_content.as_ref(),
-                        )
-                        .await
-                    {
-                        warn!(
-                            peer = %peer_onion,
-                            %error,
-                            "failed to refresh mirrored peer content while building contracts"
-                        );
-                    }
+                    our_content_synced = self.our_content_synced_with_peer(
+                        revision.requester_latest_stored_content.as_ref(),
+                    )?;
                 } else {
                     let _ = self.note_peer_offline(&peer_onion);
                 }
@@ -3622,6 +3697,7 @@ impl Node {
         let min_replicas_target = self.storage_config.lock().unwrap().min_replicas.max(0);
         let missing_fresh_replicas = (min_replicas_target - fresh_replica_count).max(0);
         let mut remaining_deficit = usize::try_from(missing_fresh_replicas).unwrap_or(usize::MAX);
+        let publication_allowed = self.publish_blocked_reason()?.is_none();
 
         let mut action_by_onion = BTreeMap::<String, BackgroundMaintenancePeerAction>::new();
 
@@ -3658,7 +3734,8 @@ impl Node {
             }
 
             let contributes_fresh_replica = fresh_replica_peers.contains(&peer.onion_service_id);
-            let needs_unsynced_fill = current_content.is_some()
+            let needs_unsynced_fill = publication_allowed
+                && current_content.is_some()
                 && !contributes_fresh_replica
                 && !contract.our_content_synced
                 && remaining_deficit > 0;
@@ -3698,6 +3775,7 @@ impl Node {
         &self,
         peer_onion: &str,
     ) -> Result<Vec<clirpc::ProposeContractUpdate>, Status> {
+        self.ensure_owner_publication_allowed()?;
         self.retry_peer_operation(
             peer_onion,
             transport::PeerRetryPolicy::for_operation(transport::PeerOperation::Proposal),
@@ -3741,27 +3819,8 @@ impl Node {
             )
             .await?;
         self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned)?;
-        let their_content_length = revision
-            .responder_content
-            .as_ref()
-            .map(|content_info| content_info.content_length)
-            .unwrap_or(0);
-        let downloaded_their_content = revision
-            .responder_content
-            .as_ref()
-            .filter(|content_info| {
-                self.has_mirrored_blob(&content_info.content_id)
-                    .map(|present| !present)
-                    .unwrap_or(false)
-            })
-            .map(|content_info| content_info.content_length)
-            .unwrap_or(0);
-        self.sync_peer_content_info(
-            peer_onion,
-            &peer_public_key,
-            revision.responder_content.as_ref(),
-        )
-        .await?;
+        let their_content_length = self.mirrored_peer_content_length(&peer_public_key)?;
+        let downloaded_their_content = 0;
 
         updates.push(clirpc::ProposeContractUpdate {
             state: clirpc::ContractState::ProposingContract as i32,
@@ -3781,7 +3840,7 @@ impl Node {
             .unwrap_or(0);
         let mut uploaded_our_content = 0;
         let peer_has_our_content = revision
-            .requester_content
+            .requester_latest_stored_content
             .as_ref()
             .map(|content_info| content_info.content_id.clone());
         let desired_content_id = our_content
@@ -3793,6 +3852,7 @@ impl Node {
                 "set content revision",
                 policy.rpc_timeout,
                 client.set_content_revision(bbrpc::SetContentRevisionRequest {
+                    previous_requester_content: revision.requester_latest_known_content.clone(),
                     requester_content: our_content.clone(),
                 }),
             )
@@ -3955,12 +4015,6 @@ impl Node {
             .await?;
         if peer_was_tracked {
             self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned)?;
-            self.sync_peer_content_info(
-                peer_onion,
-                &peer_public_key,
-                revision.responder_content.as_ref(),
-            )
-            .await?;
         }
 
         updates.push(clirpc::CheckContractUpdate {
@@ -3999,7 +4053,7 @@ impl Node {
         };
 
         if revision
-            .requester_content
+            .requester_latest_stored_content
             .as_ref()
             .map(|content_info| content_info.content_id.as_slice())
             != Some(our_content.content_id.as_slice())
@@ -4131,7 +4185,7 @@ impl Node {
             if let Some(content_info) = revision
                 .requester_latest_known_content
                 .clone()
-                .or_else(|| revision.requester_content.clone())
+                .or_else(|| revision.requester_latest_stored_content.clone())
             {
                 let key = match self.revision_key(&content_info.content_id) {
                     Ok(key) => key,
@@ -4150,7 +4204,7 @@ impl Node {
                     });
             }
 
-            if let Some(content_info) = revision.requester_content {
+            if let Some(content_info) = revision.requester_latest_stored_content {
                 let key = match self.revision_key(&content_info.content_id) {
                     Ok(key) => key,
                     Err(_) => continue,
@@ -4455,6 +4509,7 @@ impl CliService {
         request: tonic::Request<clirpc::SetFileRequest>,
     ) -> Result<tonic::Response<clirpc::SetFileResponse>, tonic::Status> {
         self.node.ensure_no_active_conflict()?;
+        self.node.ensure_local_file_mutations_allowed()?;
         let request = request.into_inner();
         let file = request
             .file
@@ -4712,6 +4767,7 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         request: tonic::Request<tonic::Streaming<clirpc::SetFileChunk>>,
     ) -> Result<tonic::Response<clirpc::SetFileResponse>, tonic::Status> {
         self.node.ensure_no_active_conflict()?;
+        self.node.ensure_local_file_mutations_allowed()?;
         let file = collect_set_file_upload(request.into_inner()).await?;
         self.node.with_store(|store| {
             store.set_file_with_modified_at(
@@ -4729,6 +4785,7 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         request: tonic::Request<clirpc::DeleteFileRequest>,
     ) -> Result<tonic::Response<clirpc::DeleteFileResponse>, tonic::Status> {
         self.node.ensure_no_active_conflict()?;
+        self.node.ensure_local_file_mutations_allowed()?;
         let request = request.into_inner();
         if request.name.is_empty() {
             return Err(Status::invalid_argument("file name is required"));
@@ -4860,6 +4917,14 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         let update = self.node.recover_content_update().await?;
         Ok(Response::new(Box::pin(stream::iter(vec![Ok(update)]))))
     }
+
+    async fn finish_recovery(
+        &self,
+        _request: tonic::Request<clirpc::FinishRecoveryRequest>,
+    ) -> Result<tonic::Response<clirpc::FinishRecoveryResponse>, tonic::Status> {
+        self.node.finish_recovery_mode()?;
+        Ok(Response::new(clirpc::FinishRecoveryResponse {}))
+    }
 }
 
 /// P2pService exposes the peer-to-peer RPC surface.
@@ -4975,9 +5040,8 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
             .transpose()?
             .unwrap_or(false);
         Ok(Response::new(bbrpc::GetContentRevisionResponse {
-            requester_content,
+            requester_latest_stored_content: requester_content,
             requester_remaining_seconds,
-            responder_content: self.node.responder_content()?,
             requester_latest_known_content,
             requester_pinned,
         }))
@@ -4996,7 +5060,12 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
             peer_origin_code(false, false),
             storedpb::FirstContactDirection::Inbound as i32,
         )?;
-        let requester_content = request.into_inner().requester_content;
+        let request = request.into_inner();
+        let previous_requester_content = request.previous_requester_content;
+        let requester_content = request.requester_content;
+        if let Some(content_info) = previous_requester_content.as_ref() {
+            validate_peer_content_info(content_info)?;
+        }
         if let Some(content_info) = requester_content.as_ref() {
             validate_peer_content_info(content_info)?;
         }
@@ -5524,9 +5593,8 @@ mod tests {
             _request: Request<bbrpc::GetContentRevisionRequest>,
         ) -> std::result::Result<Response<bbrpc::GetContentRevisionResponse>, Status> {
             Ok(Response::new(bbrpc::GetContentRevisionResponse {
-                requester_content: self.state.requester_content(),
+                requester_latest_stored_content: self.state.requester_content(),
                 requester_remaining_seconds: 0,
-                responder_content: None,
                 requester_latest_known_content: self.state.requester_content(),
                 requester_pinned: false,
             }))
@@ -5622,9 +5690,8 @@ mod tests {
             _request: Request<bbrpc::GetContentRevisionRequest>,
         ) -> std::result::Result<Response<bbrpc::GetContentRevisionResponse>, Status> {
             Ok(Response::new(bbrpc::GetContentRevisionResponse {
-                requester_content: Some(self.state.requester_content.clone()),
+                requester_latest_stored_content: Some(self.state.requester_content.clone()),
                 requester_remaining_seconds: 0,
-                responder_content: None,
                 requester_latest_known_content: Some(self.state.requester_content.clone()),
                 requester_pinned: false,
             }))
@@ -5772,9 +5839,8 @@ mod tests {
             _request: Request<bbrpc::GetContentRevisionRequest>,
         ) -> std::result::Result<Response<bbrpc::GetContentRevisionResponse>, Status> {
             Ok(Response::new(bbrpc::GetContentRevisionResponse {
-                requester_content: Some(self.requester_content.clone()),
+                requester_latest_stored_content: Some(self.requester_content.clone()),
                 requester_remaining_seconds: 0,
-                responder_content: None,
                 requester_latest_known_content: Some(self.requester_content.clone()),
                 requester_pinned: false,
             }))
@@ -6089,6 +6155,54 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn local_state_reports_recovery_metadata_and_publication_blockers() -> anyhow::Result<()>
+    {
+        let clock = Arc::new(ManualClock::new(Timestamp::new(100, 7).unwrap()));
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage_and_clock(
+            "state-recovery-owner",
+            filesystem,
+            clock.clone(),
+        )?);
+
+        node.initialize_lineage((100, 7), true)?;
+
+        let summary = node
+            .local_state_summary()?
+            .ok_or_else(|| anyhow::anyhow!("missing local state summary"))?;
+        let recovery = summary
+            .recovery
+            .ok_or_else(|| anyhow::anyhow!("missing recovery summary"))?;
+
+        assert!(recovery.recovery_mode_enabled);
+        assert_eq!(recovery.node_initialized_at, 100);
+        assert_eq!(recovery.node_initialized_at_ns, 7);
+        assert_eq!(recovery.recovery_watermark_at, 0);
+        assert_eq!(recovery.recovery_watermark_at_ns, 0);
+        assert_eq!(
+            recovery.publish_blocked_reason,
+            "recovery mode is enabled; finish recovery before publishing"
+        );
+
+        node.finish_recovery_mode()?;
+
+        let summary = node
+            .local_state_summary()?
+            .ok_or_else(|| anyhow::anyhow!("missing local state summary"))?;
+        let recovery = summary
+            .recovery
+            .ok_or_else(|| anyhow::anyhow!("missing recovery summary"))?;
+
+        assert!(!recovery.recovery_mode_enabled);
+        assert_eq!(recovery.node_initialized_at, 100);
+        assert_eq!(recovery.node_initialized_at_ns, 7);
+        assert_eq!(recovery.recovery_watermark_at, 100);
+        assert_eq!(recovery.recovery_watermark_at_ns, 7);
+        assert!(recovery.publish_blocked_reason.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn local_state_reports_local_content_and_peer_summary() -> anyhow::Result<()> {
         let owner_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
         let peer_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
@@ -6165,8 +6279,8 @@ mod tests {
         assert_eq!(peers.storing_latest_our_data, 1);
         assert_eq!(peers.working_contracts, 1);
         assert_eq!(peers.mean_working_contract_score_seconds, 3_600);
-        assert_eq!(peers.mirrored_peers, 1);
-        assert!(peers.mirrored_total_size_bytes > 0);
+        assert_eq!(peers.mirrored_peers, 0);
+        assert_eq!(peers.mirrored_total_size_bytes, 0);
 
         assert_eq!(durability.predicted_fresh_replicas_now, 1);
         assert_eq!(durability.predicted_min_replicas_target, 1);
@@ -7078,7 +7192,9 @@ mod tests {
             .get_content_revision(tonic::Request::new(bbrpc::GetContentRevisionRequest {}))
             .await?
             .into_inner();
-        let responder = revision.responder_content.unwrap();
+        assert!(revision.requester_latest_stored_content.is_none());
+        assert!(revision.requester_latest_known_content.is_none());
+        let responder = server_node.responder_content()?.unwrap();
         assert!(!responder.content_id.is_empty());
         assert!(responder.content_length > 0);
 
@@ -7856,6 +7972,7 @@ mod tests {
         let requester_content = requester_node.responder_content()?.unwrap();
         requester_to_responder
             .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
                 requester_content: Some(requester_content.clone()),
             })
             .await?;
@@ -7864,7 +7981,10 @@ mod tests {
             .get_content_revision(bbrpc::GetContentRevisionRequest {})
             .await?
             .into_inner();
-        assert_eq!(revision.requester_content, Some(requester_content.clone()));
+        assert_eq!(
+            revision.requester_latest_stored_content,
+            Some(requester_content.clone())
+        );
 
         let requester_blob = requester_node.with_store(|store| store.current_blob())?;
         let mirrored_blob = responder_node
@@ -7917,6 +8037,7 @@ mod tests {
         let requester_content = requester_node.responder_content()?.unwrap();
         requester_to_responder
             .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
                 requester_content: Some(requester_content.clone()),
             })
             .await?;
@@ -7927,6 +8048,7 @@ mod tests {
 
         requester_to_responder
             .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
                 requester_content: None,
             })
             .await?;
@@ -8021,6 +8143,7 @@ mod tests {
 
         let error = client
             .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
                 requester_content: None,
             })
             .await
@@ -8074,6 +8197,7 @@ mod tests {
         let requester_content = requester_node.responder_content()?.unwrap();
         requester_to_responder
             .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
                 requester_content: Some(requester_content.clone()),
             })
             .await?;
@@ -8154,6 +8278,7 @@ mod tests {
 
             let error = client
                 .set_content_revision(bbrpc::SetContentRevisionRequest {
+                    previous_requester_content: None,
                     requester_content: Some(case.content.clone()),
                 })
                 .await
@@ -8189,12 +8314,7 @@ mod tests {
         let mut p2p =
             connect_p2p_client(client_node.clone(), server_node.clone(), connector.as_ref())
                 .await?;
-        let responder = p2p
-            .get_content_revision(tonic::Request::new(bbrpc::GetContentRevisionRequest {}))
-            .await?
-            .into_inner()
-            .responder_content
-            .unwrap();
+        let responder = server_node.responder_content()?.unwrap();
 
         let error = p2p
             .download(tonic::Request::new(bbrpc::DownloadRequest {
@@ -8234,12 +8354,7 @@ mod tests {
         let mut p2p =
             connect_p2p_client(client_node.clone(), server_node.clone(), connector.as_ref())
                 .await?;
-        let responder = p2p
-            .get_content_revision(tonic::Request::new(bbrpc::GetContentRevisionRequest {}))
-            .await?
-            .into_inner()
-            .responder_content
-            .unwrap();
+        let responder = server_node.responder_content()?.unwrap();
 
         let negative = p2p
             .download(tonic::Request::new(bbrpc::DownloadRequest {
@@ -8406,6 +8521,7 @@ mod tests {
         let requester_content = requester_node.responder_content()?.unwrap();
         requester_to_responder
             .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
                 requester_content: Some(requester_content.clone()),
             })
             .await?;
@@ -8470,6 +8586,7 @@ mod tests {
         let requester_content = requester_node.responder_content()?.unwrap();
         requester_to_responder
             .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
                 requester_content: Some(requester_content.clone()),
             })
             .await?;
@@ -8478,7 +8595,7 @@ mod tests {
             .get_content_revision(bbrpc::GetContentRevisionRequest {})
             .await?
             .into_inner();
-        assert_eq!(revision.requester_content, None);
+        assert_eq!(revision.requester_latest_stored_content, None);
         assert_eq!(revision.requester_latest_known_content, None);
 
         requester_server.abort();
@@ -9537,6 +9654,7 @@ mod tests {
         .await?;
         requester_to_responder
             .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
                 requester_content: Some(requester_node.responder_content()?.unwrap()),
             })
             .await?;
@@ -9736,6 +9854,7 @@ mod tests {
         .await?;
         requester_to_responder
             .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
                 requester_content: Some(requester_node.responder_content()?.unwrap()),
             })
             .await?;
@@ -10091,6 +10210,7 @@ mod tests {
         .await?;
         requester_to_responder
             .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
                 requester_content: Some(requester_node.responder_content()?.unwrap()),
             })
             .await?;
@@ -10170,9 +10290,8 @@ mod tests {
         // Return the right sampled bytes and hash but lie about total_length.
         let static_service = StaticPeerService::new(
             bbrpc::GetContentRevisionResponse {
-                requester_content: Some(content_info.clone()),
+                requester_latest_stored_content: Some(content_info.clone()),
                 requester_remaining_seconds: 0,
-                responder_content: None,
                 requester_latest_known_content: Some(content_info.clone()),
                 requester_pinned: false,
             },
@@ -10531,6 +10650,7 @@ mod tests {
         .await?;
         owner_to_peer
             .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
                 requester_content: Some(owner_node.responder_content()?.unwrap()),
             })
             .await?;
@@ -10644,11 +10764,13 @@ mod tests {
         let version_1 = owner_node.responder_content()?.unwrap();
         owner_to_a
             .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
                 requester_content: Some(version_1.clone()),
             })
             .await?;
         owner_to_b
             .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
                 requester_content: Some(version_1.clone()),
             })
             .await?;
@@ -10665,6 +10787,7 @@ mod tests {
         let version_2 = owner_node.responder_content()?.unwrap();
         owner_to_a
             .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
                 requester_content: Some(version_2.clone()),
             })
             .await?;
@@ -10745,9 +10868,8 @@ mod tests {
 
         let stale_service = StaticPeerService::new(
             bbrpc::GetContentRevisionResponse {
-                requester_content: Some(version_1.clone()),
+                requester_latest_stored_content: Some(version_1.clone()),
                 requester_remaining_seconds: 0,
-                responder_content: None,
                 requester_latest_known_content: Some(version_2.clone()),
                 requester_pinned: false,
             },
@@ -10816,9 +10938,8 @@ mod tests {
 
         let stale_service = StaticPeerService::new(
             bbrpc::GetContentRevisionResponse {
-                requester_content: Some(version_1.clone()),
+                requester_latest_stored_content: Some(version_1.clone()),
                 requester_remaining_seconds: 0,
-                responder_content: None,
                 requester_latest_known_content: Some(version_1.clone()),
                 requester_pinned: false,
             },
@@ -10913,9 +11034,8 @@ mod tests {
 
         let (endpoint_a, server_a) = spawn_plain_peer_server(StaticPeerService::new(
             bbrpc::GetContentRevisionResponse {
-                requester_content: Some(version_a.clone()),
+                requester_latest_stored_content: Some(version_a.clone()),
                 requester_remaining_seconds: 0,
-                responder_content: None,
                 requester_latest_known_content: Some(version_a.clone()),
                 requester_pinned: false,
             },
@@ -10932,9 +11052,8 @@ mod tests {
         .await?;
         let (endpoint_b, server_b) = spawn_plain_peer_server(StaticPeerService::new(
             bbrpc::GetContentRevisionResponse {
-                requester_content: Some(version_b.clone()),
+                requester_latest_stored_content: Some(version_b.clone()),
                 requester_remaining_seconds: 0,
-                responder_content: None,
                 requester_latest_known_content: Some(version_b.clone()),
                 requester_pinned: false,
             },
@@ -11056,9 +11175,8 @@ mod tests {
 
         let (endpoint_b, server_b) = spawn_plain_peer_server(StaticPeerService::new(
             bbrpc::GetContentRevisionResponse {
-                requester_content: Some(version_1.clone()),
+                requester_latest_stored_content: Some(version_1.clone()),
                 requester_remaining_seconds: 0,
-                responder_content: None,
                 requester_latest_known_content: Some(version_1.clone()),
                 requester_pinned: false,
             },
@@ -11104,9 +11222,8 @@ mod tests {
 
         let (endpoint_c, server_c) = spawn_plain_peer_server(StaticPeerService::new(
             bbrpc::GetContentRevisionResponse {
-                requester_content: Some(version_2.clone()),
+                requester_latest_stored_content: Some(version_2.clone()),
                 requester_remaining_seconds: 0,
-                responder_content: None,
                 requester_latest_known_content: Some(version_2.clone()),
                 requester_pinned: false,
             },
@@ -11210,9 +11327,8 @@ mod tests {
 
         let (endpoint_b, server_b) = spawn_plain_peer_server(StaticPeerService::new(
             bbrpc::GetContentRevisionResponse {
-                requester_content: Some(version_1.clone()),
+                requester_latest_stored_content: Some(version_1.clone()),
                 requester_remaining_seconds: 0,
-                responder_content: None,
                 requester_latest_known_content: Some(version_1.clone()),
                 requester_pinned: false,
             },
@@ -11254,9 +11370,8 @@ mod tests {
 
         let (endpoint_c, server_c) = spawn_plain_peer_server(StaticPeerService::new(
             bbrpc::GetContentRevisionResponse {
-                requester_content: Some(version_2.clone()),
+                requester_latest_stored_content: Some(version_2.clone()),
                 requester_remaining_seconds: 0,
-                responder_content: None,
                 requester_latest_known_content: Some(version_2.clone()),
                 requester_pinned: false,
             },
@@ -11334,9 +11449,8 @@ mod tests {
             .await?;
         let (content_info, blob) = current_content_snapshot(owner_node.as_ref())?;
         let revision_response = bbrpc::GetContentRevisionResponse {
-            requester_content: Some(content_info.clone()),
+            requester_latest_stored_content: Some(content_info.clone()),
             requester_remaining_seconds: 0,
-            responder_content: None,
             requester_latest_known_content: Some(content_info.clone()),
             requester_pinned: false,
         };

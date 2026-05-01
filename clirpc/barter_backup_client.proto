@@ -121,6 +121,10 @@ service BarterBackupClient {
     // it. The stream works forever sending new recovery events.
     rpc RecoverContent(RecoverContentRequest)
         returns (stream RecoverContentUpdate);
+
+    // FinishRecovery disables recovery mode and advances the effective
+    // recovery watermark to the current node-generation boundary.
+    rpc FinishRecovery(FinishRecoveryRequest) returns (FinishRecoveryResponse);
 }
 
 // StateRequest is an empty local state request.
@@ -292,6 +296,34 @@ message StateDurabilitySummary {
     repeated ReplicaHorizonPoint predicted_replica_horizon = 3;
 }
 
+// StateRecoverySummary reports persisted lineage and publication safety data.
+message StateRecoverySummary {
+    // recovery_mode_enabled reports whether outgoing publication is currently
+    // blocked so the node can collect older lineage safely.
+    bool recovery_mode_enabled = 1;
+
+    // node_initialized_at is the local node-generation boundary recorded when
+    // `bbcli init` succeeded.
+    int64 node_initialized_at = 2;
+
+    // node_initialized_at_ns is the nanosecond component of
+    // node_initialized_at.
+    int32 node_initialized_at_ns = 3;
+
+    // recovery_watermark_at is the newest older-lineage revision timestamp
+    // already applied locally, or the initialization boundary after recovery
+    // mode is finished.
+    int64 recovery_watermark_at = 4;
+
+    // recovery_watermark_at_ns is the nanosecond component of
+    // recovery_watermark_at.
+    int32 recovery_watermark_at_ns = 5;
+
+    // publish_blocked_reason describes why owner-originated publication is
+    // currently blocked, if any.
+    string publish_blocked_reason = 6;
+}
+
 // StateLocalSummary groups all local-only state data that can be reported
 // immediately without probing peers live over the network.
 message StateLocalSummary {
@@ -304,6 +336,9 @@ message StateLocalSummary {
     // durability summarizes the locally predicted durability of the active
     // local content revision.
     StateDurabilitySummary durability = 3;
+
+    // recovery summarizes the persisted lineage and publication guard state.
+    StateRecoverySummary recovery = 4;
 }
 
 // StateResponse returns local daemon status information.
@@ -341,6 +376,10 @@ message StateResponse {
 message InitRequest {
     // main_password is the main password used to derive the master secret.
     string main_password = 1;
+
+    // recovery_mode keeps owner-originated publication disabled until the
+    // operator explicitly finishes recovery.
+    bool recovery_mode = 2;
 }
 
 message InitResponse {}
@@ -351,6 +390,10 @@ message UnlockRequest {
 }
 
 message UnlockResponse {}
+
+message FinishRecoveryRequest {}
+
+message FinishRecoveryResponse {}
 
 message StopRequest {}
 

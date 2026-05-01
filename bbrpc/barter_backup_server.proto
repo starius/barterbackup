@@ -61,30 +61,30 @@ message ContentInfo {
 message GetContentRevisionRequest {}
 
 message GetContentRevisionResponse {
-    // requester_content is the newest requester revision that the responder
-    // currently caches and can return on Download, if any.
-    ContentInfo requester_content = 1;
+    // requester_latest_stored_content is the newest requester revision that
+    // the responder currently caches and can return on Download, if any.
+    ContentInfo requester_latest_stored_content = 1;
 
     // requester_remaining_seconds is the amount of time the responder will
     // store the content of the requester if the requester does not store the
     // content of the responder.
     int64 requester_remaining_seconds = 2;
 
-    // responder_content is the description of the responder's content which
-    // the requester has to store to fulfill the conditions of the contract.
-    // Can be empty if the responder does not store anything at the moment.
-    ContentInfo responder_content = 3;
-
     // requester_latest_known_content is the newest requester revision the
     // responder knows about, even if it no longer caches that revision.
-    ContentInfo requester_latest_known_content = 4;
+    ContentInfo requester_latest_known_content = 3;
 
     // requester_pinned reports whether the responder operator currently pins
     // the requester locally.
-    bool requester_pinned = 5;
+    bool requester_pinned = 4;
 }
 
 message SetContentRevisionRequest {
+    // previous_requester_content is the newest requester revision the caller
+    // believes the responder currently considers authoritative for this
+    // identity. Callers use it as a compare-and-swap guard.
+    ContentInfo previous_requester_content = 1;
+
     // requester_content is the description of the requester's content which
     // the requester wants the responder to download and store. Can be empty
     // if the requester wants to delete their content.
@@ -93,7 +93,21 @@ message SetContentRevisionRequest {
     //   must be set and content_length must be positive.
     // - If requester_content is omitted (not set), the responder clears any
     //   previously recorded requester content.
-    ContentInfo requester_content = 1;
+    ContentInfo requester_content = 2;
+}
+
+enum SetContentRevisionFailureReason
+{
+    SET_CONTENT_REVISION_FAILURE_REASON_UNKNOWN = 0;
+
+    // PREVIOUS_REQUESTER_CONTENT_MISMATCH means the compare-and-swap guard
+    // did not match the responder's latest known requester revision.
+    SET_CONTENT_REVISION_FAILURE_REASON_PREVIOUS_REQUESTER_CONTENT_MISMATCH = 1;
+}
+
+message SetContentRevisionFailure {
+    // reason is the machine-readable failure code for the rejected request.
+    SetContentRevisionFailureReason reason = 1;
 }
 
 message SetContentRevisionResponse {}

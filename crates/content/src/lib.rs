@@ -513,6 +513,12 @@ fn build_metadata(files: &[PlainFile], peers: &[storedpb::Peer]) -> storedpb::Me
         peers: peers.to_vec(),
         active_conflict: None,
         archived_conflicts: Vec::new(),
+        node_initialized_at: 0,
+        node_initialized_at_ns: 0,
+        latest_recovered_revision: None,
+        recovery_watermark_at: 0,
+        recovery_watermark_at_ns: 0,
+        recovery_mode_enabled: false,
     }
 }
 

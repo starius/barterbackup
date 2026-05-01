@@ -1288,7 +1288,9 @@ impl BarterBackupClient for DaemonService {
             ));
         }
 
-        let password = request.into_inner().main_password;
+        let request = request.into_inner();
+        let password = request.main_password;
+        let recovery_mode = request.recovery_mode;
         if password.is_empty() {
             return Err(Status::invalid_argument("main password is required"));
         }
@@ -1310,6 +1312,29 @@ impl BarterBackupClient for DaemonService {
 
         self.initialize_fingerprint(&password)
             .map_err(|error| Status::internal(error.to_string()))?;
+        let lineage_result = (|| -> Result<()> {
+            let store_dir = self.data_dir.join("local");
+            let filesystem = Arc::new(OsFilesystem::new(&store_dir)?);
+            let node = Node::with_local_storage_and_clock_and_flush_delay(
+                &password,
+                filesystem,
+                self.clock.clone(),
+                self.peer_metadata_flush_delay,
+            )?;
+            let now = self.clock.now();
+            node.initialize_lineage(
+                (
+                    i64::try_from(now.secs).unwrap_or(i64::MAX),
+                    i64::from(now.nanos),
+                ),
+                recovery_mode,
+            )?;
+            Ok(())
+        })();
+        if let Err(error) = lineage_result {
+            let _ = fs::remove_file(self.fingerprint_path());
+            return Err(Status::internal(error.to_string()));
+        }
 
         Ok(Response::new(clirpc::InitResponse {}))
     }
@@ -1562,6 +1587,17 @@ impl BarterBackupClient for DaemonService {
             .recover_content(request)
             .await
     }
+
+    async fn finish_recovery(
+        &self,
+        request: tonic::Request<clirpc::FinishRecoveryRequest>,
+    ) -> Result<Response<clirpc::FinishRecoveryResponse>, Status> {
+        let response = CliService::new(self.unlocked_node().await?)
+            .finish_recovery(request)
+            .await?;
+        self.wake_maintenance();
+        Ok(response)
+    }
 }
 
 #[tonic::async_trait]
@@ -1765,6 +1801,13 @@ impl BarterBackupClient for DaemonRpcService {
         request: tonic::Request<clirpc::RecoverContentRequest>,
     ) -> Result<Response<Self::RecoverContentStream>, Status> {
         self.daemon.recover_content(request).await
+    }
+
+    async fn finish_recovery(
+        &self,
+        request: tonic::Request<clirpc::FinishRecoveryRequest>,
+    ) -> Result<Response<clirpc::FinishRecoveryResponse>, Status> {
+        self.daemon.finish_recovery(request).await
     }
 }
 
@@ -2885,6 +2928,7 @@ mod tests {
         service
             .init(tonic::Request::new(clirpc::InitRequest {
                 main_password: password.to_string(),
+                recovery_mode: false,
             }))
             .await?;
         Ok(())
@@ -3381,6 +3425,7 @@ mod tests {
         service
             .init(tonic::Request::new(clirpc::InitRequest {
                 main_password: "correct horse battery staple".to_string(),
+                recovery_mode: false,
             }))
             .await?;
         service
@@ -3749,6 +3794,7 @@ mod tests {
         init_with_keys_dir(
             &daemon_addr,
             "correct horse battery staple",
+            false,
             &keys_dir,
             Duration::from_secs(5),
         )
@@ -4089,6 +4135,7 @@ mod tests {
         init_with_keys_dir(
             &daemon_addr,
             "correct horse battery staple",
+            false,
             &keys_dir,
             Duration::from_secs(5),
         )
@@ -4572,6 +4619,7 @@ mod tests {
         let error = second_service
             .init(tonic::Request::new(clirpc::InitRequest {
                 main_password: "wrong password".to_string(),
+                recovery_mode: false,
             }))
             .await
             .unwrap_err();
@@ -4581,6 +4629,7 @@ mod tests {
         let error = second_service
             .init(tonic::Request::new(clirpc::InitRequest {
                 main_password: "correct horse battery staple".to_string(),
+                recovery_mode: false,
             }))
             .await
             .unwrap_err();

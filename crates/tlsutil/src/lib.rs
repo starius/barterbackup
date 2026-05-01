@@ -884,6 +884,13 @@ mod tests {
         ) -> std::result::Result<tonic::Response<Self::RecoverContentStream>, Status> {
             Err(Status::unimplemented(""))
         }
+        async fn finish_recovery(
+            &self,
+            _: Request<protos::clirpc::FinishRecoveryRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::FinishRecoveryResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
