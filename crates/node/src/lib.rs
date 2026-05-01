@@ -10,6 +10,7 @@ use anyhow::Result;
 use clock::{Clock, SystemClock, Timestamp};
 use content::{PlainFile, CONTENT_ID_LEN};
 use futures::{stream, Stream};
+use prost::Message;
 use protos::{bbrpc, clirpc, storedpb};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -73,6 +74,28 @@ struct RecentPeerFailure {
     last_error_class: i32,
     /// last_error_message stores the failure summary.
     last_error_message: String,
+}
+
+/// RecoverableRequesterRevisionSource explains which responder-side view
+/// revealed an older requester revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoverableRequesterRevisionSource {
+    /// LatestStored means the peer can still serve the older requester revision.
+    LatestStored,
+    /// LatestKnown means the peer only knows the older requester revision exists.
+    LatestKnown,
+}
+
+/// RecoverableRequesterRevision is one older requester revision that must be
+/// recovered before the owner can safely publish.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecoverableRequesterRevision {
+    /// content is the older requester revision metadata.
+    content: bbrpc::ContentInfo,
+    /// timestamp is the authenticated revision timestamp.
+    timestamp: (i64, i64),
+    /// source explains whether the peer can still serve the revision.
+    source: RecoverableRequesterRevisionSource,
 }
 
 /// DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY is the default delay before
@@ -2104,10 +2127,12 @@ impl Node {
         match tokio::time::timeout(rpc_timeout, future).await {
             Ok(Ok(response)) => Ok(response.into_inner()),
             Ok(Err(error)) => {
-                let status = Status::new(
-                    error.code(),
-                    format!("{operation} from {peer_onion}: {}", error.message()),
-                );
+                let message = format!("{operation} from {peer_onion}: {}", error.message());
+                let status = if error.details().is_empty() {
+                    Status::new(error.code(), message)
+                } else {
+                    Status::with_details(error.code(), message, error.details().to_vec().into())
+                };
                 if transport::is_retryable_peer_status(&status) {
                     self.evict_cached_peer_client(peer_onion);
                 }
@@ -2812,6 +2837,121 @@ impl Node {
                 revision.metadata_ciphertext_len,
             ))
         })
+    }
+
+    /// Return the authenticated timestamp encoded in one content identifier.
+    fn content_info_timestamp(&self, content_info: &bbrpc::ContentInfo) -> Result<(i64, i64), Status> {
+        let (_, secs, nanos, _) = self.revision_key(&content_info.content_id)?;
+        Ok((
+            i64::try_from(secs).unwrap_or(i64::MAX),
+            i64::from(nanos),
+        ))
+    }
+
+    /// Decode one machine-readable set-content failure from gRPC status details.
+    fn set_content_revision_failure(status: &Status) -> Option<bbrpc::SetContentRevisionFailure> {
+        (!status.details().is_empty())
+            .then(|| bbrpc::SetContentRevisionFailure::decode(status.details()).ok())
+            .flatten()
+    }
+
+    /// Build one failed-precondition status with a machine-readable set-content failure reason.
+    fn set_content_revision_failure_status(
+        reason: bbrpc::SetContentRevisionFailureReason,
+        message: impl Into<String>,
+    ) -> Status {
+        Status::with_details(
+            Code::FailedPrecondition,
+            message.into(),
+            bbrpc::SetContentRevisionFailure {
+                reason: reason as i32,
+            }
+            .encode_to_vec()
+            .into(),
+        )
+    }
+
+    /// Return the local recovery generation boundary and recovery watermark.
+    fn publication_lineage_window(
+        &self,
+    ) -> Result<Option<((i64, i64), Option<(i64, i64)>)>, Status> {
+        self.with_store(|store| {
+            Ok(store
+                .node_initialized_at()
+                .map(|node_initialized_at| (node_initialized_at, store.recovery_watermark())))
+        })
+    }
+
+    /// Report whether one authenticated revision timestamp still requires recovery.
+    fn timestamp_requires_recovery(
+        &self,
+        timestamp: (i64, i64),
+        node_initialized_at: (i64, i64),
+        recovery_watermark: Option<(i64, i64)>,
+    ) -> bool {
+        timestamp < node_initialized_at
+            && recovery_watermark.is_none_or(|watermark| timestamp > watermark)
+    }
+
+    /// Select one requester revision from a peer response that must be recovered
+    /// before owner-side publication may proceed.
+    fn recoverable_requester_revision(
+        &self,
+        revision: &bbrpc::GetContentRevisionResponse,
+    ) -> Result<Option<RecoverableRequesterRevision>, Status> {
+        let Some((node_initialized_at, recovery_watermark)) = self.publication_lineage_window()?
+        else {
+            return Ok(None);
+        };
+
+        if let Some(content_info) = revision.requester_latest_stored_content.as_ref() {
+            let timestamp = self.content_info_timestamp(content_info)?;
+            if self.timestamp_requires_recovery(timestamp, node_initialized_at, recovery_watermark) {
+                return Ok(Some(RecoverableRequesterRevision {
+                    content: content_info.clone(),
+                    timestamp,
+                    source: RecoverableRequesterRevisionSource::LatestStored,
+                }));
+            }
+        }
+
+        if let Some(content_info) = revision.requester_latest_known_content.as_ref() {
+            let timestamp = self.content_info_timestamp(content_info)?;
+            if self.timestamp_requires_recovery(timestamp, node_initialized_at, recovery_watermark) {
+                return Ok(Some(RecoverableRequesterRevision {
+                    content: content_info.clone(),
+                    timestamp,
+                    source: RecoverableRequesterRevisionSource::LatestKnown,
+                }));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Reject owner-side publication until an older requester lineage has been recovered.
+    fn ensure_peer_revision_does_not_require_recovery(
+        &self,
+        peer_onion: &str,
+        revision: &bbrpc::GetContentRevisionResponse,
+    ) -> Result<(), Status> {
+        let Some(recoverable_revision) = self.recoverable_requester_revision(revision)? else {
+            return Ok(());
+        };
+        let source_message = match recoverable_revision.source {
+            RecoverableRequesterRevisionSource::LatestStored => {
+                "peer still stores an older requester revision"
+            }
+            RecoverableRequesterRevisionSource::LatestKnown => {
+                "peer still knows an older requester revision"
+            }
+        };
+        Err(Status::failed_precondition(format!(
+            "{source_message} from before this node was initialized; recover it before publishing to {peer_onion} (content_id={}, timestamp={}.{:09})",
+            content_id_hex(&recoverable_revision.content.content_id),
+            recoverable_revision.timestamp.0,
+            recoverable_revision.timestamp.1,
+        )))
     }
 
     /// Restore an encrypted blob as our current local content.
@@ -3818,6 +3958,7 @@ impl Node {
                 client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
             )
             .await?;
+        self.ensure_peer_revision_does_not_require_recovery(peer_onion, &revision)?;
         self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned)?;
         let their_content_length = self.mirrored_peer_content_length(&peer_public_key)?;
         let downloaded_their_content = 0;
@@ -3847,16 +3988,34 @@ impl Node {
             .as_ref()
             .map(|content_info| content_info.content_id.clone());
         if peer_has_our_content != desired_content_id {
-            self.peer_rpc_with_timeout(
+            let set_request = bbrpc::SetContentRevisionRequest {
+                previous_requester_content: revision.requester_latest_known_content.clone(),
+                requester_content: our_content.clone(),
+            };
+            match self
+                .peer_rpc_with_timeout(
                 peer_onion,
                 "set content revision",
                 policy.rpc_timeout,
-                client.set_content_revision(bbrpc::SetContentRevisionRequest {
-                    previous_requester_content: revision.requester_latest_known_content.clone(),
-                    requester_content: our_content.clone(),
-                }),
+                client.set_content_revision(set_request),
             )
-            .await?;
+            .await
+            {
+                Ok(_) => {}
+                Err(status)
+                    if matches!(
+                        Self::set_content_revision_failure(&status).map(|failure| failure.reason()),
+                        Some(
+                            bbrpc::SetContentRevisionFailureReason::PreviousRequesterContentMismatch
+                        )
+                    ) =>
+                {
+                    return Err(Status::failed_precondition(format!(
+                        "peer requester revision changed while publishing to {peer_onion}; inspect recovery state before retrying"
+                    )));
+                }
+                Err(status) => return Err(status),
+            }
             if our_content.is_none() {
                 let previous_content_id = peer_has_our_content
                     .as_ref()
@@ -5068,6 +5227,15 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         }
         if let Some(content_info) = requester_content.as_ref() {
             validate_peer_content_info(content_info)?;
+        }
+        let responder_latest_known = self
+            .node
+            .requester_latest_known_content(&peer_identity.public_key)?;
+        if previous_requester_content != responder_latest_known {
+            return Err(Node::set_content_revision_failure_status(
+                bbrpc::SetContentRevisionFailureReason::PreviousRequesterContentMismatch,
+                "previous_requester_content did not match the responder's latest known requester revision",
+            ));
         }
 
         self.node
@@ -8048,7 +8216,7 @@ mod tests {
 
         requester_to_responder
             .set_content_revision(bbrpc::SetContentRevisionRequest {
-                previous_requester_content: None,
+                previous_requester_content: Some(requester_content.clone()),
                 requester_content: None,
             })
             .await?;
@@ -8063,6 +8231,142 @@ mod tests {
         )?);
 
         requester_server.abort();
+        responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_content_revision_rejects_previous_requester_content_mismatch(
+    ) -> anyhow::Result<()> {
+        let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let requester_node = Arc::new(Node::with_local_storage(
+            "requester-cas-mismatch",
+            requester_filesystem,
+        )?);
+        let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let responder_node = Arc::new(Node::with_local_storage(
+            "responder-cas-mismatch",
+            responder_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        requester_node.set_peer_connector(connector.clone());
+        responder_node.set_peer_connector(connector.clone());
+
+        CliService::new(requester_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+
+        let requester_server =
+            spawn_registered_p2p_server(requester_node.clone(), connector.as_ref()).await?;
+        let responder_server =
+            spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
+        let mut requester_to_responder = connect_p2p_client(
+            requester_node.clone(),
+            responder_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
+
+        let requester_content = requester_node.responder_content()?.unwrap();
+        requester_to_responder
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
+                requester_content: Some(requester_content.clone()),
+            })
+            .await?;
+
+        let error = requester_to_responder
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
+                requester_content: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::FailedPrecondition);
+        let failure = Node::set_content_revision_failure(&error)
+            .context("missing machine-readable set-content failure")?;
+        assert_eq!(
+            failure.reason(),
+            bbrpc::SetContentRevisionFailureReason::PreviousRequesterContentMismatch
+        );
+
+        let peer = peer_entry(responder_node.as_ref(), requester_node.address())?
+            .context("missing tracked requester peer")?;
+        assert_eq!(
+            peer_latest_known_content(&peer)
+                .map(|content| content.content_id),
+            Some(requester_content.content_id.clone())
+        );
+
+        requester_server.abort();
+        responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn propose_contract_updates_refuse_to_overwrite_older_requester_lineage(
+    ) -> anyhow::Result<()> {
+        let old_owner_clock = Arc::new(ManualClock::new(Timestamp::new(90, 0).unwrap()));
+        let new_owner_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let responder_clock = Arc::new(ManualClock::new(Timestamp::new(90, 0).unwrap()));
+        let old_owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let new_owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let old_owner = Arc::new(Node::with_local_storage_and_clock(
+            "lineage-owner",
+            old_owner_filesystem,
+            old_owner_clock,
+        )?);
+        let new_owner = Arc::new(Node::with_local_storage_and_clock(
+            "lineage-owner",
+            new_owner_filesystem,
+            new_owner_clock,
+        )?);
+        let responder = Arc::new(Node::with_local_storage_and_clock(
+            "lineage-responder",
+            responder_filesystem,
+            responder_clock,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        old_owner.set_peer_connector(connector.clone());
+        new_owner.set_peer_connector(connector.clone());
+        responder.set_peer_connector(connector.clone());
+        old_owner.add_known_peer(responder.address())?;
+        new_owner.add_known_peer(responder.address())?;
+        responder.add_known_peer(old_owner.address())?;
+
+        CliService::new(old_owner.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+
+        let old_owner_server =
+            spawn_registered_p2p_server(old_owner.clone(), connector.as_ref()).await?;
+        let responder_server =
+            spawn_registered_p2p_server(responder.clone(), connector.as_ref()).await?;
+        old_owner.propose_contract_updates(responder.address()).await?;
+        old_owner_server.abort();
+
+        new_owner.initialize_lineage((100, 0), false)?;
+        let error = new_owner
+            .propose_contract_updates(responder.address())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::FailedPrecondition);
+        assert!(error.message().contains("recover it before publishing"));
+        assert!(error.message().contains(responder.address()));
+
         responder_server.abort();
         Ok(())
     }
