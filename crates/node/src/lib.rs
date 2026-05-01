@@ -61,8 +61,26 @@ pub struct Node {
     peer_client_cache: Mutex<BTreeMap<String, CachedPeerClient>>,
     /// peer_exchange_last_attempt records the last in-memory peer exchange attempt.
     peer_exchange_last_attempt: Mutex<BTreeMap<String, i64>>,
+    /// peer_live_recovery_probe_state tracks whether one live-contact recovery
+    /// probe already ran for the current in-memory peer session.
+    peer_live_recovery_probe_state: Mutex<BTreeMap<String, LiveRecoveryProbeState>>,
     /// recent_peer_failures stores the latest operator-facing failure summary per peer.
     recent_peer_failures: Mutex<BTreeMap<String, RecentPeerFailure>>,
+}
+
+/// LiveRecoveryProbeState records whether one peer already triggered the
+/// best-effort live-contact recovery probe for the current in-memory session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LiveRecoveryProbeState {
+    /// last_contact_at_secs is when the peer most recently had one live
+    /// contact that refreshed this in-memory session state.
+    last_contact_at_secs: i64,
+    /// probe_in_progress reports whether one background or inline probe is
+    /// already running for this peer session.
+    probe_in_progress: bool,
+    /// probe_completed reports whether one full probe already analyzed this
+    /// peer session successfully.
+    probe_completed: bool,
 }
 
 /// RecentPeerFailure is the latest operator-facing failure summary for one peer.
@@ -1221,6 +1239,7 @@ impl Node {
             peer_connector: Mutex::new(None),
             peer_client_cache: Mutex::new(BTreeMap::new()),
             peer_exchange_last_attempt: Mutex::new(BTreeMap::new()),
+            peer_live_recovery_probe_state: Mutex::new(BTreeMap::new()),
             recent_peer_failures: Mutex::new(BTreeMap::new()),
         };
 
@@ -1555,6 +1574,7 @@ impl Node {
         *self.peer_connector.lock().unwrap() = None;
         self.peer_client_cache.lock().unwrap().clear();
         self.peer_exchange_last_attempt.lock().unwrap().clear();
+        self.peer_live_recovery_probe_state.lock().unwrap().clear();
     }
 
     /// Return the current node-clock second for cache bookkeeping.
@@ -1573,6 +1593,175 @@ impl Node {
             .retain(|_, last_attempt| {
                 now_secs.saturating_sub(*last_attempt) <= PEER_EXCHANGE_COOLDOWN_SECS
             });
+        self.peer_live_recovery_probe_state
+            .lock()
+            .unwrap()
+            .retain(|_, state| {
+                state.probe_in_progress
+                    || now_secs.saturating_sub(state.last_contact_at_secs)
+                        <= PEER_CLIENT_CACHE_IDLE_TTL_SECS
+            });
+    }
+
+    /// Mark one peer live-contact session and report whether one best-effort
+    /// recovery probe should run for it now.
+    fn begin_live_recovery_probe_if_due(&self, peer_onion: &str) -> bool {
+        if self.is_our_onion(peer_onion) {
+            return false;
+        }
+
+        let now_secs = self.cache_now_secs();
+        self.prune_peer_runtime_state(now_secs);
+        let mut state_by_peer = self.peer_live_recovery_probe_state.lock().unwrap();
+        let state = state_by_peer
+            .entry(peer_onion.to_string())
+            .or_insert(LiveRecoveryProbeState {
+                last_contact_at_secs: now_secs,
+                probe_in_progress: false,
+                probe_completed: false,
+            });
+        state.last_contact_at_secs = now_secs;
+        if state.probe_in_progress || state.probe_completed {
+            return false;
+        }
+
+        state.probe_in_progress = true;
+        true
+    }
+
+    /// Record that one live-contact recovery probe finished for the peer's
+    /// current in-memory session.
+    fn finish_live_recovery_probe(&self, peer_onion: &str, completed: bool) {
+        if self.is_our_onion(peer_onion) {
+            return;
+        }
+
+        let now_secs = self.cache_now_secs();
+        self.prune_peer_runtime_state(now_secs);
+        let mut state_by_peer = self.peer_live_recovery_probe_state.lock().unwrap();
+        let Some(state) = state_by_peer.get_mut(peer_onion) else {
+            return;
+        };
+        state.last_contact_at_secs = now_secs;
+        state.probe_in_progress = false;
+        state.probe_completed = completed;
+    }
+
+    /// Probe one live peer contact for recoverable requester lineage.
+    async fn run_live_recovery_probe_with_client(
+        &self,
+        peer_onion: &str,
+        client: &mut transport::PeerClient,
+    ) -> Result<(), Status> {
+        let policy =
+            transport::PeerRetryPolicy::for_operation(transport::PeerOperation::RecoveryProbe);
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
+            .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+        let revision = self
+            .peer_rpc_with_timeout(
+                peer_onion,
+                "get content revision",
+                policy.rpc_timeout,
+                client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
+            )
+            .await?;
+        self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned)?;
+        self.maybe_exchange_peers_with_client(peer_onion, client)
+            .await?;
+        if let Some(recoverable_revision) = self.recoverable_requester_revision(&revision)? {
+            info!(
+                peer = %peer_onion,
+                content_id = %content_id_hex(&recoverable_revision.content.content_id),
+                timestamp_secs = recoverable_revision.timestamp.0,
+                timestamp_nanos = recoverable_revision.timestamp.1,
+                "running automatic recovery after a new live peer contact"
+            );
+            let recovery_update = self.recover_content_update().await?;
+            info!(
+                peer = %peer_onion,
+                applied_versions = recovery_update.applied_versions,
+                older_lineage_versions_found = recovery_update.older_lineage_versions_found,
+                older_lineage_recoverable_versions_found = recovery_update
+                    .older_lineage_recoverable_versions_found,
+                "finished automatic recovery after a new live peer contact"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Run one best-effort live-contact recovery probe on the provided client.
+    async fn maybe_run_live_recovery_probe_with_client(
+        &self,
+        peer_onion: &str,
+        client: &mut transport::PeerClient,
+    ) {
+        if !self.begin_live_recovery_probe_if_due(peer_onion) {
+            return;
+        }
+
+        match self
+            .run_live_recovery_probe_with_client(peer_onion, client)
+            .await
+        {
+            Ok(()) => self.finish_live_recovery_probe(peer_onion, true),
+            Err(error) => {
+                self.finish_live_recovery_probe(peer_onion, false);
+                warn!(
+                    peer = %peer_onion,
+                    %error,
+                    "live peer-contact recovery probe failed"
+                );
+            }
+        }
+    }
+
+    /// Track and react to one authenticated inbound peer contact.
+    fn note_authenticated_inbound_peer_contact(
+        self: &Arc<Self>,
+        peer_identity: &PeerIdentity,
+    ) -> Result<(), Status> {
+        if self.is_our_public_key(&peer_identity.public_key) {
+            return Ok(());
+        }
+
+        self.track_peer_identity(
+            &peer_identity.public_key,
+            peer_origin_code(false, false),
+            storedpb::FirstContactDirection::Inbound as i32,
+        )?;
+        self.note_peer_live(&peer_identity.onion_address)?;
+        if !self.begin_live_recovery_probe_if_due(&peer_identity.onion_address) {
+            return Ok(());
+        }
+
+        let node = Arc::clone(self);
+        let peer_onion = peer_identity.onion_address.clone();
+        tokio::spawn(async move {
+            let policy =
+                transport::PeerRetryPolicy::for_operation(transport::PeerOperation::RecoveryProbe);
+            let result = node
+                .retry_peer_operation(&peer_onion, policy, || async {
+                    let mut client = node
+                        .probe_peer_client_with_timeout(&peer_onion, policy.connect_timeout)
+                        .await?;
+                    node.run_live_recovery_probe_with_client(&peer_onion, &mut client)
+                        .await
+                })
+                .await;
+            match result {
+                Ok(()) => node.finish_live_recovery_probe(&peer_onion, true),
+                Err(error) => {
+                    node.finish_live_recovery_probe(&peer_onion, false);
+                    warn!(
+                        peer = %peer_onion,
+                        %error,
+                        "background live peer-contact recovery probe failed"
+                    );
+                }
+            }
+        });
+        Ok(())
     }
 
     /// Return one cached outbound peer client when it is still inside the idle TTL.
@@ -2042,12 +2231,35 @@ impl Node {
         peer_onion: &str,
         connect_timeout: Duration,
     ) -> Result<transport::PeerClient, Status> {
-        self.connect_peer_client_with_timeout_and_tracking(peer_onion, connect_timeout, false)
+        self.connect_peer_client_with_timeout_and_tracking_base(peer_onion, connect_timeout, false)
             .await
     }
 
-    /// Connect to another peer with optional tracked-peer side effects.
+    /// Connect to another peer with optional tracked-peer side effects and
+    /// automatic live-contact recovery probing.
     async fn connect_peer_client_with_timeout_and_tracking(
+        &self,
+        peer_onion: &str,
+        connect_timeout: Duration,
+        track_peer: bool,
+    ) -> Result<transport::PeerClient, Status> {
+        let mut client = self
+            .connect_peer_client_with_timeout_and_tracking_base(
+                peer_onion,
+                connect_timeout,
+                track_peer,
+            )
+            .await?;
+        if track_peer {
+            self.maybe_run_live_recovery_probe_with_client(peer_onion, &mut client)
+                .await;
+        }
+        Ok(client)
+    }
+
+    /// Connect to another peer with optional tracked-peer side effects but
+    /// without any automatic live-contact recovery probing.
+    async fn connect_peer_client_with_timeout_and_tracking_base(
         &self,
         peer_onion: &str,
         connect_timeout: Duration,
@@ -2197,7 +2409,7 @@ impl Node {
             transport::PeerRetryPolicy::for_operation(transport::PeerOperation::RecoveryProbe);
         self.retry_peer_operation(peer_onion, policy, || async move {
             let mut client = self
-                .connect_peer_client_with_timeout(peer_onion, policy.connect_timeout)
+                .probe_peer_client_with_timeout(peer_onion, policy.connect_timeout)
                 .await?;
             let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
                 .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
@@ -2234,7 +2446,9 @@ impl Node {
             return Err(Status::invalid_argument("expected content is too large"));
         }
 
-        let mut client = self.connect_peer_client(peer_onion).await?;
+        let mut client = self
+            .probe_peer_client_with_timeout(peer_onion, transport::PEER_CONNECT_TIMEOUT)
+            .await?;
         let response = self
             .peer_rpc(
                 peer_onion,
@@ -4224,12 +4438,16 @@ impl Node {
             false
         };
         let restores_missing_current_blob = current_matches_candidate && current_blob_missing;
-        let (blob, downloaded_bytes, source_peer) = if current_matches_candidate && !current_blob_missing
-        {
-            (self.with_store(|store| store.current_blob())?, 0, String::new())
-        } else {
-            self.download_recovery_candidate_blob(candidate).await?
-        };
+        let (blob, downloaded_bytes, source_peer) =
+            if current_matches_candidate && !current_blob_missing {
+                (
+                    self.with_store(|store| store.current_blob())?,
+                    0,
+                    String::new(),
+                )
+            } else {
+                self.download_recovery_candidate_blob(candidate).await?
+            };
 
         if restores_missing_current_blob {
             self.with_store(|store| store.restore_current_content_blob(&blob))?;
@@ -4359,8 +4577,8 @@ impl Node {
             }
 
             if let Some(content_info) = revision.requester_latest_stored_content {
-                let restores_missing_current_blob = self
-                    .current_content_needs_restore_from_peer(&content_info.content_id)?;
+                let restores_missing_current_blob =
+                    self.current_content_needs_restore_from_peer(&content_info.content_id)?;
                 let key = self.revision_key(&content_info.content_id)?;
                 let content_id = content_info.content_id.clone();
                 let content_length = content_info.content_length;
@@ -4990,6 +5208,8 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         request: tonic::Request<bbrpc::HealthCheckRequest>,
     ) -> Result<tonic::Response<bbrpc::HealthCheckResponse>, tonic::Status> {
         let peer_identity = self.node.peer_identity_from_request(&request)?;
+        self.node
+            .note_authenticated_inbound_peer_contact(&peer_identity)?;
         Ok(Response::new(bbrpc::HealthCheckResponse {
             client_onion: peer_identity.onion_address,
             server_onion: self.node.address().to_string(),
@@ -5004,11 +5224,8 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         if self.node.is_our_public_key(&peer_identity.public_key) {
             return Err(self.node.self_peer_error());
         }
-        self.node.track_peer_identity(
-            &peer_identity.public_key,
-            peer_origin_code(false, false),
-            storedpb::FirstContactDirection::Inbound as i32,
-        )?;
+        self.node
+            .note_authenticated_inbound_peer_contact(&peer_identity)?;
         let request = request.into_inner();
         for peer in request.peers {
             let public_key = match ed25519_dalek::PublicKey::from_bytes(&peer.onion_pubkey) {
@@ -5052,11 +5269,8 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
             if self.node.is_our_public_key(&peer_identity.public_key) {
                 return Err(self.node.self_peer_error());
             }
-            self.node.track_peer_identity(
-                &peer_identity.public_key,
-                peer_origin_code(false, false),
-                storedpb::FirstContactDirection::Inbound as i32,
-            )?;
+            self.node
+                .note_authenticated_inbound_peer_contact(peer_identity)?;
         }
         let requester_content = peer_identity
             .as_ref()
@@ -5098,11 +5312,8 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         if self.node.is_our_public_key(&peer_identity.public_key) {
             return Err(self.node.self_peer_error());
         }
-        self.node.track_peer_identity(
-            &peer_identity.public_key,
-            peer_origin_code(false, false),
-            storedpb::FirstContactDirection::Inbound as i32,
-        )?;
+        self.node
+            .note_authenticated_inbound_peer_contact(&peer_identity)?;
         let request = request.into_inner();
         let previous_requester_content = request.previous_requester_content;
         let requester_content = request.requester_content;
@@ -5142,11 +5353,8 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
             if self.node.is_our_public_key(&peer_identity.public_key) {
                 return Err(self.node.self_peer_error());
             }
-            self.node.track_peer_identity(
-                &peer_identity.public_key,
-                peer_origin_code(false, false),
-                storedpb::FirstContactDirection::Inbound as i32,
-            )?;
+            self.node
+                .note_authenticated_inbound_peer_contact(peer_identity)?;
         }
         let request = request.into_inner();
         validate_peer_content_id(&request.content_id)?;
@@ -5972,6 +6180,111 @@ mod tests {
             Err(Status::unimplemented(
                 "set content revision is not used in this test",
             ))
+        }
+
+        async fn download(
+            &self,
+            _request: Request<bbrpc::DownloadRequest>,
+        ) -> std::result::Result<Response<bbrpc::DownloadResponse>, Status> {
+            Err(Status::unimplemented("download is not used in this test"))
+        }
+    }
+
+    /// CountingRevisionPeerService tracks revision-probe calls and can fail a
+    /// configured number of initial requests.
+    #[derive(Clone)]
+    struct CountingRevisionPeerService {
+        /// state stores mutable counters and injected failure behavior.
+        state: Arc<CountingRevisionPeerServiceState>,
+    }
+
+    /// CountingRevisionPeerServiceState tracks probe-call state for tests.
+    struct CountingRevisionPeerServiceState {
+        /// get_content_revision_call_count records observed revision probes.
+        get_content_revision_call_count: AtomicUsize,
+        /// remaining_failures counts how many initial probes should fail.
+        remaining_failures: AtomicUsize,
+        /// revision_response is returned once injected failures are exhausted.
+        revision_response: bbrpc::GetContentRevisionResponse,
+    }
+
+    impl CountingRevisionPeerServiceState {
+        /// Build one counting revision-probe state.
+        fn new(
+            revision_response: bbrpc::GetContentRevisionResponse,
+            remaining_failures: usize,
+        ) -> Self {
+            Self {
+                get_content_revision_call_count: AtomicUsize::new(0),
+                remaining_failures: AtomicUsize::new(remaining_failures),
+                revision_response,
+            }
+        }
+
+        /// Report how many revision probes this service observed.
+        fn get_content_revision_call_count(&self) -> usize {
+            self.get_content_revision_call_count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl CountingRevisionPeerService {
+        /// Build one counting revision-probe service.
+        fn new(state: Arc<CountingRevisionPeerServiceState>) -> Self {
+            Self { state }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl bbrpc::barter_backup_server_server::BarterBackupServer for CountingRevisionPeerService {
+        async fn health_check(
+            &self,
+            _request: Request<bbrpc::HealthCheckRequest>,
+        ) -> std::result::Result<Response<bbrpc::HealthCheckResponse>, Status> {
+            Ok(Response::new(bbrpc::HealthCheckResponse {
+                client_onion: String::new(),
+                server_onion: String::new(),
+            }))
+        }
+
+        async fn peer_exchange(
+            &self,
+            _request: Request<bbrpc::PeerExchangeRequest>,
+        ) -> std::result::Result<Response<bbrpc::PeerExchangeResponse>, Status> {
+            Err(Status::unimplemented(
+                "peer exchange is not used in this test",
+            ))
+        }
+
+        async fn get_content_revision(
+            &self,
+            _request: Request<bbrpc::GetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::GetContentRevisionResponse>, Status> {
+            self.state
+                .get_content_revision_call_count
+                .fetch_add(1, Ordering::SeqCst);
+            if self
+                .state
+                .remaining_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    if remaining > 0 {
+                        Some(remaining - 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_ok()
+            {
+                return Err(Status::unavailable("injected transient revision failure"));
+            }
+
+            Ok(Response::new(self.state.revision_response.clone()))
+        }
+
+        async fn set_content_revision(
+            &self,
+            _request: Request<bbrpc::SetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::SetContentRevisionResponse>, Status> {
+            Ok(Response::new(bbrpc::SetContentRevisionResponse {}))
         }
 
         async fn download(
@@ -7913,6 +8226,72 @@ mod tests {
 
         let _redialed = node.connect_peer_client(&peer_onions[0]).await?;
         assert_eq!(counting_connector.dial_count(), MAX_CACHED_PEER_CLIENTS + 3);
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn live_recovery_probe_runs_once_per_cached_peer_session() -> anyhow::Result<()> {
+        let clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage_and_clock(
+            "live-probe-session-owner",
+            filesystem,
+            clock.clone(),
+        )?);
+        let peer_identity = Node::new("live-probe-session-peer")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        node.set_peer_connector(connector.clone());
+
+        let service_state = Arc::new(CountingRevisionPeerServiceState::new(
+            bbrpc::GetContentRevisionResponse::default(),
+            0,
+        ));
+        let (endpoint, server) =
+            spawn_plain_peer_server(CountingRevisionPeerService::new(service_state.clone()))
+                .await?;
+        connector.register_peer(peer_identity.address(), &endpoint);
+
+        let _first = node.connect_peer_client(peer_identity.address()).await?;
+        let _second = node.connect_peer_client(peer_identity.address()).await?;
+        assert_eq!(service_state.get_content_revision_call_count(), 1);
+
+        clock.advance(Duration::from_secs(
+            u64::try_from(PEER_CLIENT_CACHE_IDLE_TTL_SECS + 1).unwrap_or(u64::MAX),
+        ));
+        let _third = node.connect_peer_client(peer_identity.address()).await?;
+        assert_eq!(service_state.get_content_revision_call_count(), 2);
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn live_recovery_probe_retries_after_transient_failure_in_the_same_session(
+    ) -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage(
+            "live-probe-retry-owner",
+            filesystem,
+        )?);
+        let peer_identity = Node::new("live-probe-retry-peer")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        node.set_peer_connector(connector.clone());
+
+        let service_state = Arc::new(CountingRevisionPeerServiceState::new(
+            bbrpc::GetContentRevisionResponse::default(),
+            1,
+        ));
+        let (endpoint, server) =
+            spawn_plain_peer_server(CountingRevisionPeerService::new(service_state.clone()))
+                .await?;
+        connector.register_peer(peer_identity.address(), &endpoint);
+
+        let _first = node.connect_peer_client(peer_identity.address()).await?;
+        assert_eq!(service_state.get_content_revision_call_count(), 1);
+        let _second = node.connect_peer_client(peer_identity.address()).await?;
+        assert_eq!(service_state.get_content_revision_call_count(), 2);
 
         server.abort();
         Ok(())
@@ -10906,6 +11285,148 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn outbound_live_peer_contact_runs_automatic_recovery() -> anyhow::Result<()> {
+        let owner_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner_node = Arc::new(Node::with_local_storage_and_clock(
+            "live-contact-recovery-owner",
+            owner_filesystem,
+            owner_clock,
+        )?);
+        let peer_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer_node = Arc::new(Node::with_local_storage(
+            "live-contact-recovery-peer",
+            peer_filesystem,
+        )?);
+        let recovered_clock = Arc::new(ManualClock::new(Timestamp::new(250, 0).unwrap()));
+        let recovered_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let recovered_node = Arc::new(Node::with_local_storage_and_clock(
+            "live-contact-recovery-owner",
+            recovered_filesystem,
+            recovered_clock,
+        )?);
+        recovered_node.initialize_lineage((250, 0), true)?;
+        recovered_node.add_known_peer(peer_node.address())?;
+
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        owner_node.set_peer_connector(connector.clone());
+        peer_node.set_peer_connector(connector.clone());
+        recovered_node.set_peer_connector(connector.clone());
+
+        CliService::new(owner_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+
+        let owner_server =
+            spawn_registered_p2p_server(owner_node.clone(), connector.as_ref()).await?;
+        let peer_server =
+            spawn_registered_p2p_server(peer_node.clone(), connector.as_ref()).await?;
+        let mut owner_to_peer =
+            connect_p2p_client(owner_node.clone(), peer_node.clone(), connector.as_ref()).await?;
+        owner_to_peer
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
+                requester_content: Some(owner_node.responder_content()?.unwrap()),
+            })
+            .await?;
+
+        let _peer_client = recovered_node
+            .connect_peer_client(peer_node.address())
+            .await?;
+        assert_eq!(
+            recovered_node.with_store(|store| store.get_file("alpha.txt"))?,
+            b"alpha-body".to_vec()
+        );
+
+        owner_server.abort();
+        peer_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn inbound_live_peer_contact_runs_automatic_recovery() -> anyhow::Result<()> {
+        let owner_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner_node = Arc::new(Node::with_local_storage_and_clock(
+            "inbound-contact-recovery-owner",
+            owner_filesystem,
+            owner_clock,
+        )?);
+        let recovered_clock = Arc::new(ManualClock::new(Timestamp::new(250, 0).unwrap()));
+        let recovered_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let recovered_node = Arc::new(Node::with_local_storage_and_clock(
+            "inbound-contact-recovery-owner",
+            recovered_filesystem,
+            recovered_clock,
+        )?);
+        recovered_node.initialize_lineage((250, 0), true)?;
+        let peer_identity = Arc::new(Node::new("inbound-contact-recovery-peer")?);
+        let connector = Arc::new(PlainPeerConnector::new());
+        recovered_node.set_peer_connector(connector.clone());
+
+        CliService::new(owner_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+        let (content_info, blob) = current_content_snapshot(owner_node.as_ref())?;
+        let (peer_endpoint, peer_server) = spawn_plain_peer_server(StaticPeerService::new(
+            bbrpc::GetContentRevisionResponse {
+                requester_latest_stored_content: Some(content_info.clone()),
+                requester_remaining_seconds: 0,
+                requester_latest_known_content: Some(content_info.clone()),
+                requester_pinned: false,
+            },
+            DownloadBehavior::Response(bbrpc::DownloadResponse {
+                total_length: i64::try_from(blob.len()).unwrap_or(i64::MAX),
+                sha256: Sha256::digest(&blob).to_vec(),
+                section: Some(bbrpc::download_response::Section::RawBytes(
+                    bbrpc::RawBytes {
+                        value: blob.clone(),
+                    },
+                )),
+            }),
+        ))
+        .await?;
+        connector.register_peer(peer_identity.address(), &peer_endpoint);
+
+        let (recovered_endpoint, recovered_server) =
+            spawn_p2p_server(recovered_node.clone()).await?;
+        let channel = netmock::connect_peer_channel(
+            &recovered_endpoint,
+            recovered_node.address(),
+            &peer_identity.ed25519_keypair().secret,
+        )
+        .await?;
+        let mut peer_to_recovered = BarterBackupServerClient::new(channel);
+        let _response = peer_to_recovered
+            .health_check(bbrpc::HealthCheckRequest {})
+            .await?;
+
+        wait_until(|| {
+            recovered_node
+                .with_store(|store| store.get_file("alpha.txt"))
+                .map(|bytes| bytes == b"alpha-body".to_vec())
+                .unwrap_or(false)
+        })
+        .await;
+
+        peer_server.abort();
+        recovered_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn recover_content_restores_missing_current_blob_from_stored_peer_revision(
     ) -> anyhow::Result<()> {
         let local_filesystem = Arc::new(storage::MemoryFilesystem::new());
@@ -10969,14 +11490,14 @@ mod tests {
         assert_eq!(update.older_lineage_recoverable_versions_found, 0);
         assert_eq!(update.applied_versions, 1);
         assert_eq!(update.latest_applied_content_id, content_info.content_id);
-        assert_eq!(update.downloaded_bytes, i64::try_from(blob.len()).unwrap_or(i64::MAX));
+        assert_eq!(
+            update.downloaded_bytes,
+            i64::try_from(blob.len()).unwrap_or(i64::MAX)
+        );
         assert_eq!(update.added_files, 0);
         assert_eq!(update.renamed_files, 0);
         assert_eq!(update.unchanged_files, 0);
-        assert_eq!(
-            local_node.with_store(|store| store.current_blob())?,
-            blob
-        );
+        assert_eq!(local_node.with_store(|store| store.current_blob())?, blob);
         assert_eq!(
             local_node.with_store(|store| store.get_file("alpha.txt"))?,
             b"alpha-body".to_vec()
