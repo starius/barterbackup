@@ -318,17 +318,16 @@ Plaintext file I/O happens on the CLI side:
 - binary output is refused on a terminal unless you pass an output path or
   explicitly pipe stdout to another program
 
-Inspect contracts and recovery:
+Inspect peers, storage, and recovery:
 
 ```bash
 bbcli peer list
 bbcli peer pin <peer-onion-id>
 bbcli peer unpin <peer-onion-id>
+bbcli peer publish <peer-onion-id>
+bbcli peer verify <peer-onion-id>
 bbcli config get
 bbcli config get --resource-policy
-bbcli contract list
-bbcli contract propose <peer-onion-id>
-bbcli contract check <peer-onion-id>
 bbcli init complete
 bbcli stop
 ```
@@ -356,24 +355,36 @@ Recovery workflow:
   live, including pin state, storage protection class, tracked-only state,
   cached bytes, mirrored-peer staleness, and recent failure/backoff context
   when a peer is timing out or unavailable
+- every known peer always has one persisted sidecar record; only some peers
+  also have mirrored bytes cached locally
 - `bbcli peer pin` marks a friend or otherwise trusted peer as operator-pinned;
   pinned peers are never evicted from mirrored storage accounting and stay at
   the top of outbound connection-priority decisions
 - `bbcli peer unpin` removes that local operator override without changing the
   peer's current mirrored content directly
+- `bbcli peer publish` runs one manual owner-to-peer publication pass
+- `bbcli peer verify` checks one peer's current copy of our latest local
+  revision and updates that peer's local durability score
 - `bbcli config get` reports the current writable storage config plus derived
   storage information, including pinned/protected/disposable byte totals,
   tracked-only peer count, offline-blocking bytes, reclaimable bytes, and the
   current fresh-replica horizon for our own content
 - `bbd` maintains the configured `min_replicas` target in the background; when
-  verified fresh replicas drop below that target, it automatically proposes
-  and checks additional known peers without a manual `bbcli contract propose`
-  round
+  fresh online replicas drop below that target, it actively searches for more
+  peers to store our current revision on
+- candidate search is peer-centric and weighted:
+  - peers whose data we already store locally are tried first
+  - peers pinned by us or pinning us get strong weight boosts
+  - older first-seen peers get a moderate boost
+  - peers with better observed live success history get a moderate boost
+  - all eligible peers still keep some chance because selection remains
+    weighted-random rather than fixed-order
+- a peer may accept our sidecar update but decline to cache mirrored bytes when
+  its peer-storage budget is full; that is not a protocol failure, but such a
+  peer does not count as one of the current fresh replicas
 - `bbcli config get --resource-policy` reports the current fixed peer-content
   ceiling, peer transport message limit, retry timing policy, and related
   runtime resource bounds
-- `bbcli contract list` reports both the newest revision the daemon knows a
-  peer has and the newest revision it has cached locally for that peer
 - replacement nodes should start with `bbcli init --recovery-mode`; while
   recovery mode is enabled, owner-originated publication stays disabled and
   local file mutation commands such as `bbcli file set` and `bbcli file delete`
@@ -390,6 +401,9 @@ Recovery workflow:
 - if the freshest known older-lineage revision is unavailable everywhere,
   recovery still uses an older stored revision when that is the newest replica
   any peer can actually serve
+- while recovery mode remains enabled, `bbcli state` keeps showing both the
+  newest older-lineage revision already merged locally and any newer recoverable
+  requester revision that peers still know about but do not currently store
 - recovery is additive and conservative:
   - a new file name is added directly
   - identical file contents are skipped
