@@ -4980,8 +4980,7 @@ mod tests {
                     .into_inner()
                     .peers;
                 let refilled = peers.into_iter().any(|peer| {
-                    peer
-                        .peer
+                    peer.peer
                         .as_ref()
                         .is_some_and(|peer_id| peer_id.onion_service_id == owner_onion)
                         && peer.stored_content_bytes == owner_content_length

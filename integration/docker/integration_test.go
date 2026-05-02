@@ -578,7 +578,9 @@ func TestDockerRecoveryModeBlocksPublicationUntilFinished(t *testing.T) {
 	)
 
 	waitForPeerStorage(t, scenario.peerC, scenario.ownerOnion, int64(len(scenario.payloadV2)))
-	assertFileEquals(t, scenario.recovered, "payload.bin", scenario.payloadV1)
+	_, recoveredName := recoverUntilVariant(t, scenario.recovered, "payload.bin")
+	assertFileContentEquals(t, scenario.recovered, "payload.bin", scenario.payloadV1)
+	assertFileContentEquals(t, scenario.recovered, recoveredName, scenario.payloadV2)
 }
 
 func TestDockerRecoveryMergesOlderLineagesAndPublishesAfterInitComplete(t *testing.T) {
@@ -2596,10 +2598,14 @@ func assertFileEquals(t *testing.T, node *harness.Node, name string, expected []
 	}
 }
 
+func recoveryObservationTimeout() time.Duration {
+	return 90 * time.Second
+}
+
 func recoverFileUntilEquals(t *testing.T, node *harness.Node, name string, expected []byte) {
 	t.Helper()
 
-	deadline := time.Now().Add(harnessDefaultTimeout())
+	deadline := time.Now().Add(recoveryObservationTimeout())
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
 		file, err := node.GetFile(ctx, name)
@@ -2624,7 +2630,7 @@ func recoverUntilVariant(
 ) (*clirpc.ListFilesResponse, string) {
 	t.Helper()
 
-	deadline := time.Now().Add(harnessDefaultTimeout())
+	deadline := time.Now().Add(recoveryObservationTimeout())
 	for {
 		response := listFiles(t, node)
 		if len(response.GetFile()) == 2 {

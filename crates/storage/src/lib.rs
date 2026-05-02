@@ -2427,9 +2427,12 @@ mod tests {
     #[test]
     fn reload_without_local_blob_keeps_current_content_summary_from_peer_state() {
         let fs = Arc::new(MemoryFilesystem::new());
-        let mut store =
-            Store::new_with_time_source(fs.clone() as Arc<dyn Filesystem>, &master(), time_source())
-                .unwrap();
+        let mut store = Store::new_with_time_source(
+            fs.clone() as Arc<dyn Filesystem>,
+            &master(),
+            time_source(),
+        )
+        .unwrap();
 
         store.set_file("alpha.txt", b"alpha-body".to_vec()).unwrap();
         store.flush_peer_state().unwrap();

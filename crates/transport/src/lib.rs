@@ -38,9 +38,15 @@ pub const PEER_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(5);
 /// PEER_RETRY_TOTAL_BUDGET bounds one whole logical peer operation.
 pub const PEER_RETRY_TOTAL_BUDGET: Duration = Duration::from_secs(60);
 
+/// PEER_CONNECT_OPERATION_TOTAL_BUDGET gives explicit peer-connect requests a
+/// slightly longer budget so newly published onion descriptors can converge.
+pub const PEER_CONNECT_OPERATION_TOTAL_BUDGET: Duration = Duration::from_secs(120);
+
 /// PeerOperation names one logical peer workflow that can be retried.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PeerOperation {
+    /// ConnectPeer establishes one explicit live contact to a tracked peer.
+    ConnectPeer,
     /// HealthCheck validates that a peer onion service is reachable.
     HealthCheck,
     /// PeerExchange shares and receives known peer identities.
@@ -75,11 +81,15 @@ pub struct PeerRetryPolicy {
 impl PeerRetryPolicy {
     /// Build the default retry policy for one peer operation.
     pub const fn for_operation(operation: PeerOperation) -> Self {
+        let total_budget = match operation {
+            PeerOperation::ConnectPeer => PEER_CONNECT_OPERATION_TOTAL_BUDGET,
+            _ => PEER_RETRY_TOTAL_BUDGET,
+        };
         Self {
             operation,
             connect_timeout: PEER_CONNECT_TIMEOUT,
             rpc_timeout: PEER_RPC_TIMEOUT,
-            total_budget: PEER_RETRY_TOTAL_BUDGET,
+            total_budget,
             initial_backoff: PEER_RETRY_INITIAL_BACKOFF,
             max_backoff: PEER_RETRY_MAX_BACKOFF,
         }

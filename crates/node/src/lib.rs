@@ -1946,6 +1946,20 @@ impl Node {
         self.add_known_peer_with_origin(peer_onion, peer_origin_code(false, true))
     }
 
+    /// Track one peer and establish one immediate live contact to it.
+    pub async fn connect_known_peer(&self, peer_onion: &str) -> Result<(), Status> {
+        self.add_known_peer(peer_onion)?;
+        let policy =
+            transport::PeerRetryPolicy::for_operation(transport::PeerOperation::ConnectPeer);
+        self.retry_peer_operation(peer_onion, policy, || async {
+            let _client = self
+                .connect_peer_client_with_timeout(peer_onion, policy.connect_timeout)
+                .await?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Add a peer onion hostname to the configured peer set with an explicit origin.
     fn add_known_peer_with_origin(&self, peer_onion: &str, origin: i32) -> Result<(), Status> {
         if self.is_our_onion(peer_onion) {
@@ -4984,7 +4998,7 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
             return Err(Status::invalid_argument("peer onion is required"));
         }
 
-        self.node.add_known_peer(&peer.onion_service_id)?;
+        self.node.connect_known_peer(&peer.onion_service_id).await?;
         Ok(Response::new(clirpc::ConnectPeerResponse {}))
     }
 
@@ -6449,18 +6463,15 @@ mod tests {
                 true,
             )
             .await?;
-        let mut client = connect_p2p_client(
-            requester_node.clone(),
-            responder_node.clone(),
-            connector,
-        )
-        .await?;
-        let previous_requester_content = peer_entry(responder_node.as_ref(), requester_node.address())?
-            .and_then(|peer| peer_latest_known_content(&peer))
-            .map(|content| bbrpc::ContentInfo {
-                content_id: content.content_id,
-                content_length: content.content_length,
-            });
+        let mut client =
+            connect_p2p_client(requester_node.clone(), responder_node.clone(), connector).await?;
+        let previous_requester_content =
+            peer_entry(responder_node.as_ref(), requester_node.address())?
+                .and_then(|peer| peer_latest_known_content(&peer))
+                .map(|content| bbrpc::ContentInfo {
+                    content_id: content.content_id,
+                    content_length: content.content_length,
+                });
         client
             .set_content_revision(bbrpc::SetContentRevisionRequest {
                 previous_requester_content,
@@ -8342,6 +8353,44 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn cli_connect_peer_establishes_one_live_contact() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage(
+            "cli-connect-live-owner",
+            filesystem,
+        )?);
+        node.initialize_lineage((1, 0), false)?;
+        let peer_identity = Node::new("cli-connect-live-peer")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        node.set_peer_connector(connector.clone());
+
+        let service_state = Arc::new(CountingRevisionPeerServiceState::new(
+            bbrpc::GetContentRevisionResponse::default(),
+            0,
+        ));
+        let (endpoint, server) =
+            spawn_plain_peer_server(CountingRevisionPeerService::new(service_state.clone()))
+                .await?;
+        connector.register_peer(peer_identity.address(), &endpoint);
+
+        let cli = CliService::new(node.clone());
+        cli.connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+            peer: Some(clirpc::Peer {
+                onion_service_id: peer_identity.address().to_string(),
+            }),
+        }))
+        .await?;
+
+        assert_eq!(service_state.get_content_revision_call_count(), 1);
+        let peer = peer_entry(node.as_ref(), peer_identity.address())?
+            .context("peer was not tracked after connect")?;
+        assert!(peer.last_live_at > 0);
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn pinned_peer_client_survives_cache_pressure() -> anyhow::Result<()> {
         let clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
         let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
@@ -9534,12 +9583,8 @@ mod tests {
             spawn_registered_p2p_server(remote_node.clone(), connector.as_ref()).await?;
         let local_server =
             spawn_registered_p2p_server(local_node.clone(), connector.as_ref()).await?;
-        let mut remote_to_local = connect_p2p_client(
-            remote_node.clone(),
-            local_node.clone(),
-            connector.as_ref(),
-        )
-        .await?;
+        let mut remote_to_local =
+            connect_p2p_client(remote_node.clone(), local_node.clone(), connector.as_ref()).await?;
         let error = remote_to_local
             .set_content_revision(bbrpc::SetContentRevisionRequest {
                 previous_requester_content: None,
@@ -9638,12 +9683,8 @@ mod tests {
         let version_2 = remote_node.current_content_info()?.unwrap();
         assert!(version_2.content_length > version_1.content_length);
 
-        let mut remote_to_local = connect_p2p_client(
-            remote_node.clone(),
-            local_node.clone(),
-            connector.as_ref(),
-        )
-        .await?;
+        let mut remote_to_local =
+            connect_p2p_client(remote_node.clone(), local_node.clone(), connector.as_ref()).await?;
         let error = remote_to_local
             .set_content_revision(bbrpc::SetContentRevisionRequest {
                 previous_requester_content: Some(version_1.clone()),
@@ -9744,12 +9785,8 @@ mod tests {
         let version_2 = remote_node.current_content_info()?.unwrap();
         assert!(version_2.content_length > version_1.content_length);
 
-        let mut remote_to_local = connect_p2p_client(
-            remote_node.clone(),
-            local_node.clone(),
-            connector.as_ref(),
-        )
-        .await?;
+        let mut remote_to_local =
+            connect_p2p_client(remote_node.clone(), local_node.clone(), connector.as_ref()).await?;
         let error = remote_to_local
             .set_content_revision(bbrpc::SetContentRevisionRequest {
                 previous_requester_content: Some(version_1.clone()),
@@ -11132,8 +11169,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn propose_contract_publishes_our_side_and_accepts_peer_publication(
-    ) -> anyhow::Result<()> {
+    async fn propose_contract_publishes_our_side_and_accepts_peer_publication() -> anyhow::Result<()>
+    {
         let left_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let left_node = Arc::new(Node::with_local_storage("left", left_filesystem)?);
         let right_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
