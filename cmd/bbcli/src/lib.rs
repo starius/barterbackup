@@ -242,7 +242,6 @@ enum PeerCommand {
     },
 
     /// Print the daemon's current peer inventory.
-    #[command(alias = "connected-peers")]
     List {
         /// status filters peers by current local transport state.
         #[arg(long, value_enum)]
