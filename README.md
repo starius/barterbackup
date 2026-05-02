@@ -112,6 +112,10 @@ The generated Markdown manuals are:
 - [docs/cli/bbd.md](/home/user/barterbackup/rust2/docs/cli/bbd.md)
 - [docs/cli/bbcli.md](/home/user/barterbackup/rust2/docs/cli/bbcli.md)
 
+Additional operational notes:
+
+- [docs/peer-storage-flow.md](/home/user/barterbackup/rust2/docs/peer-storage-flow.md)
+
 ## Test
 
 Run the full workspace test suite:
