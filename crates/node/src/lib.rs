@@ -257,9 +257,9 @@ struct MirroredBlobUsage {
     references: Vec<PeerBlobReference>,
 }
 
-/// PeerContractState is the live peer-storage state we need for storage reporting.
+/// PeerStorageRuntimeState is the live peer-storage state we need for storage reporting.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct PeerContractState {
+struct PeerStorageRuntimeState {
     /// online reports whether the peer answered the live storage probe.
     online: bool,
     /// our_content_synced reports whether the peer currently advertises our latest content.
@@ -888,7 +888,7 @@ fn peer_latest_known_content(peer: &storedpb::Peer) -> Option<storedpb::PeerCont
 }
 
 /// Return whether persisted metadata indicates any storage relationship.
-fn peer_has_contract(peer: &storedpb::Peer) -> bool {
+fn peer_has_storage(peer: &storedpb::Peer) -> bool {
     peer.score_measured_at > 0
         || peer.score_seconds != 0
         || peer_latest_known_content(peer).is_some()
@@ -1067,7 +1067,7 @@ fn proto_publication_storage_result(
 /// Aggregate deduplicated mirrored-blob usage into operator-facing totals.
 fn aggregate_storage_accounting(
     usage: &[MirroredBlobUsage],
-    contract_state_by_peer: &BTreeMap<Vec<u8>, PeerContractState>,
+    contract_state_by_peer: &BTreeMap<Vec<u8>, PeerStorageRuntimeState>,
 ) -> StorageAccounting {
     let mut accounting = StorageAccounting::default();
 
@@ -3636,7 +3636,7 @@ impl Node {
                 status,
                 pinned_by_us: tracked_peer.map(|peer| peer.pinned_by_us).unwrap_or(false),
                 pins_us: tracked_peer.map(|peer| peer.pins_us).unwrap_or(false),
-                has_storage: tracked_peer.is_some_and(peer_has_contract),
+                has_storage: tracked_peer.is_some_and(peer_has_storage),
                 score_seconds: tracked_peer
                     .map(|peer| peer.score_seconds)
                     .unwrap_or_default(),
@@ -3723,7 +3723,7 @@ impl Node {
         let mutual_storage_peers = snapshot
             .tracked_peers
             .iter()
-            .filter(|peer| peer_has_contract(peer))
+            .filter(|peer| peer_has_storage(peer))
             .collect::<Vec<_>>();
         let mutual_storage_scores = mutual_storage_peers
             .iter()
@@ -3959,8 +3959,8 @@ impl Node {
     }
 
     /// Build a live peer-storage snapshot for the configured peers.
-    pub async fn get_contracts_response(&self) -> Result<clirpc::GetContractsResponse, Status> {
-        let mut contracts = Vec::new();
+    pub async fn get_peer_storage_response(&self) -> Result<clirpc::GetPeerStorageResponse, Status> {
+        let mut storage_peers = Vec::new();
 
         for peer_onion in self.known_peers() {
             if self.is_our_onion(&peer_onion) {
@@ -4002,7 +4002,7 @@ impl Node {
             let (their_latest_known_content, their_latest_cached_content) =
                 self.mirrored_peer_revision_state(&peer_public_key)?;
 
-            contracts.push(clirpc::ContractInfo {
+            storage_peers.push(clirpc::PeerStorageInfo {
                 peer: Some(clirpc::Peer {
                     onion_service_id: peer_onion,
                 }),
@@ -4030,20 +4030,20 @@ impl Node {
             });
         }
 
-        Ok(clirpc::GetContractsResponse { contracts })
+        Ok(clirpc::GetPeerStorageResponse { storage_peers })
     }
 
     /// Build the replica-horizon report for our currently verified fresh replicas.
     fn replica_horizon(
         &self,
-        contracts: &[clirpc::ContractInfo],
+        storage_peers: &[clirpc::PeerStorageInfo],
         tracked_by_onion: &BTreeMap<String, storedpb::Peer>,
     ) -> Result<Vec<clirpc::ReplicaHorizonPoint>, Status> {
         let Some(current_content) = self.responder_content()? else {
             return Ok(Vec::new());
         };
 
-        let expiry_seconds = contracts
+        let expiry_seconds = storage_peers
             .iter()
             .filter(|contract| contract.online && contract.our_content_synced)
             .filter_map(|contract| {
@@ -4063,7 +4063,7 @@ impl Node {
 
     /// Build the derived storage view shown by the local CLI.
     pub async fn storage_info(&self) -> Result<clirpc::StorageInfo, Status> {
-        let contracts = self.get_contracts_response().await?;
+        let storage_peers = self.get_peer_storage_response().await?;
         let mut online_obligations = 0i64;
         let mut offline_obligations = 0i64;
         let mut expired_offline_obligations = 0i64;
@@ -4087,19 +4087,19 @@ impl Node {
 
         // Split mirrored-peer usage by live reachability and by whether the
         // peer has expired into best-effort storage from our perspective.
-        for contract in &contracts.contracts {
-            let content_bytes = contract.their_content_length.max(0);
-            if contract.online && contract.our_content_synced {
+        for peer_storage in &storage_peers.storage_peers {
+            let content_bytes = peer_storage.their_content_length.max(0);
+            if peer_storage.online && peer_storage.our_content_synced {
                 online_obligations = online_obligations.saturating_add(content_bytes);
             } else {
                 offline_obligations = offline_obligations.saturating_add(content_bytes);
-                if contract.their_remaining_seconds < 0 {
+                if peer_storage.their_remaining_seconds < 0 {
                     expired_offline_obligations =
                         expired_offline_obligations.saturating_add(content_bytes);
                 }
             }
 
-            if let Some(peer_onion) = contract
+            if let Some(peer_onion) = peer_storage
                 .peer
                 .as_ref()
                 .map(|peer| peer.onion_service_id.as_str())
@@ -4107,9 +4107,9 @@ impl Node {
                 if let Ok(peer_public_key) = keys::public_key_from_onion_hostname(peer_onion) {
                     contract_state_by_peer.insert(
                         peer_public_key.as_bytes().to_vec(),
-                        PeerContractState {
-                            online: contract.online,
-                            our_content_synced: contract.our_content_synced,
+                        PeerStorageRuntimeState {
+                            online: peer_storage.online,
+                            our_content_synced: peer_storage.our_content_synced,
                         },
                     );
                 }
@@ -4137,14 +4137,14 @@ impl Node {
             tracked_only_peers_count,
             offline_blocking_storage_bytes: storage_accounting.offline_blocking_bytes,
             reclaimable_peer_storage_bytes: storage_accounting.reclaimable_bytes,
-            replica_horizon: self.replica_horizon(&contracts.contracts, &tracked_by_onion)?,
+            replica_horizon: self.replica_horizon(&storage_peers.storage_peers, &tracked_by_onion)?,
         })
     }
 
     /// Build the current background peer-maintenance plan.
     pub async fn background_maintenance_plan(&self) -> Result<BackgroundMaintenancePlan, Status> {
         let inventory = self.peer_inventory()?;
-        let contracts = self.get_contracts_response().await?;
+        let storage_peers = self.get_peer_storage_response().await?;
         let current_content = self.responder_content()?;
         let tracked_peers = self.tracked_peers()?;
         let tracked_by_onion = tracked_peers
@@ -4155,18 +4155,19 @@ impl Node {
                     .map(|peer_onion| (peer_onion, peer))
             })
             .collect::<BTreeMap<_, _>>();
-        let contract_by_onion = contracts
-            .contracts
+        let storage_by_onion = storage_peers
+            .storage_peers
             .into_iter()
-            .filter_map(|contract| {
-                let peer_onion = contract.peer.as_ref()?.onion_service_id.clone();
-                Some((peer_onion, contract))
+            .filter_map(|peer_storage| {
+                let peer_onion = peer_storage.peer.as_ref()?.onion_service_id.clone();
+                Some((peer_onion, peer_storage))
             })
             .collect::<BTreeMap<_, _>>();
-        let fresh_replica_peers = contract_by_onion
+        let fresh_replica_peers = storage_by_onion
             .iter()
-            .filter_map(|(peer_onion, contract)| {
-                (contract.online && contract.our_content_synced).then_some(peer_onion.clone())
+            .filter_map(|(peer_onion, peer_storage)| {
+                (peer_storage.online && peer_storage.our_content_synced)
+                    .then_some(peer_onion.clone())
             })
             .collect::<BTreeSet<_>>();
         let fresh_replica_count = i64::try_from(fresh_replica_peers.len()).unwrap_or(i64::MAX);
@@ -4191,9 +4192,9 @@ impl Node {
             let candidates = inventory
                 .iter()
                 .filter_map(|peer| {
-                    let contract = contract_by_onion.get(&peer.onion_service_id)?;
+                    let peer_storage = storage_by_onion.get(&peer.onion_service_id)?;
                     let tracked_peer = tracked_by_onion.get(&peer.onion_service_id)?;
-                    if !contract.online || contract.our_content_synced {
+                    if !peer_storage.online || peer_storage.our_content_synced {
                         return None;
                     }
                     Some(PublicationCandidate {
@@ -4239,34 +4240,34 @@ impl Node {
         })
     }
 
-    /// Propose or renew a contract with one peer and report the progress
-    /// updates that should be streamed to the caller.
-    pub async fn propose_contract_updates(
+    /// Publish our current content to one peer and report the streamed
+    /// progress updates for the caller.
+    pub async fn publish_to_peer_updates(
         &self,
         peer_onion: &str,
-    ) -> Result<Vec<clirpc::ProposeContractUpdate>, Status> {
+    ) -> Result<Vec<clirpc::PublishToPeerUpdate>, Status> {
         self.ensure_owner_publication_allowed()?;
         self.retry_peer_operation(
             peer_onion,
             transport::PeerRetryPolicy::for_operation(transport::PeerOperation::Proposal),
-            || self.propose_contract_updates_once(peer_onion),
+            || self.publish_to_peer_updates_once(peer_onion),
         )
         .await
     }
 
     /// Perform one proposal attempt against a peer without any outer retry
     /// loop.
-    async fn propose_contract_updates_once(
+    async fn publish_to_peer_updates_once(
         &self,
         peer_onion: &str,
-    ) -> Result<Vec<clirpc::ProposeContractUpdate>, Status> {
+    ) -> Result<Vec<clirpc::PublishToPeerUpdate>, Status> {
         if self.is_our_onion(peer_onion) {
             return Err(self.self_peer_error());
         }
         let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
             .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
-        let mut updates = vec![clirpc::ProposeContractUpdate {
-            state: clirpc::ContractState::ConnectingToPeer as i32,
+        let mut updates = vec![clirpc::PublishToPeerUpdate {
+            state: clirpc::PeerStorageOperationState::ConnectingToPeer as i32,
             success: false,
             their_content_length: 0,
             their_content_downloaded_bytes: 0,
@@ -4321,8 +4322,8 @@ impl Node {
         let their_content_length = self.mirrored_peer_content_length(&peer_public_key)?;
         let downloaded_their_content = 0;
 
-        updates.push(clirpc::ProposeContractUpdate {
-            state: clirpc::ContractState::ProposingContract as i32,
+        updates.push(clirpc::PublishToPeerUpdate {
+            state: clirpc::PeerStorageOperationState::PublishingToPeer as i32,
             success: false,
             their_content_length,
             their_content_downloaded_bytes: downloaded_their_content,
@@ -4455,8 +4456,8 @@ impl Node {
         self.maybe_exchange_peers_with_client(peer_onion, &mut client)
             .await?;
 
-        updates.push(clirpc::ProposeContractUpdate {
-            state: clirpc::ContractState::SyncingContents as i32,
+        updates.push(clirpc::PublishToPeerUpdate {
+            state: clirpc::PeerStorageOperationState::SyncingContents as i32,
             success: false,
             their_content_length,
             their_content_downloaded_bytes: downloaded_their_content,
@@ -4464,8 +4465,8 @@ impl Node {
             our_content_uploaded_bytes: uploaded_our_content,
             storage_result: publication_storage_result as i32,
         });
-        updates.push(clirpc::ProposeContractUpdate {
-            state: clirpc::ContractState::Completed as i32,
+        updates.push(clirpc::PublishToPeerUpdate {
+            state: clirpc::PeerStorageOperationState::Completed as i32,
             success: true,
             their_content_length,
             their_content_downloaded_bytes: downloaded_their_content,
@@ -4490,11 +4491,11 @@ impl Node {
     /// Verify one peer's stored copy of our content, update the peer score,
     /// and return the streamed
     /// progress updates that describe the check.
-    pub async fn check_contract_updates(
+    pub async fn verify_peer_storage_updates(
         &self,
         peer_onion: &str,
-    ) -> Result<Vec<clirpc::CheckContractUpdate>, Status> {
-        self.check_contract_updates_with_policy(
+    ) -> Result<Vec<clirpc::VerifyPeerStorageUpdate>, Status> {
+        self.verify_peer_storage_updates_with_policy(
             peer_onion,
             transport::PeerRetryPolicy::for_operation(transport::PeerOperation::Check),
         )
@@ -4502,11 +4503,11 @@ impl Node {
     }
 
     /// Verify one peer under the provided retry and timeout policy.
-    async fn check_contract_updates_with_policy(
+    async fn verify_peer_storage_updates_with_policy(
         &self,
         peer_onion: &str,
         policy: transport::PeerRetryPolicy,
-    ) -> Result<Vec<clirpc::CheckContractUpdate>, Status> {
+    ) -> Result<Vec<clirpc::VerifyPeerStorageUpdate>, Status> {
         if self.is_our_onion(peer_onion) {
             return Err(self.self_peer_error());
         }
@@ -4515,7 +4516,7 @@ impl Node {
         let peer_was_tracked = self.is_tracked_peer(&peer_public_key)?;
         match self
             .retry_peer_operation(peer_onion, policy, || {
-                self.check_contract_updates_once(peer_onion, policy)
+                self.verify_peer_storage_updates_once(peer_onion, policy)
             })
             .await
         {
@@ -4541,15 +4542,15 @@ impl Node {
                     "peer verification failed after retries"
                 );
                 Ok(vec![
-                    clirpc::CheckContractUpdate {
-                        state: clirpc::ContractState::ConnectingToPeer as i32,
+                    clirpc::VerifyPeerStorageUpdate {
+                        state: clirpc::PeerStorageOperationState::ConnectingToPeer as i32,
                         success: false,
                         our_content_length: 0,
                         our_content_section_offset: 0,
                         our_content_section_length: 0,
                     },
-                    clirpc::CheckContractUpdate {
-                        state: clirpc::ContractState::PeerUnavailable as i32,
+                    clirpc::VerifyPeerStorageUpdate {
+                        state: clirpc::PeerStorageOperationState::PeerUnavailable as i32,
                         success: false,
                         our_content_length,
                         our_content_section_offset: 0,
@@ -4561,21 +4562,21 @@ impl Node {
         }
     }
 
-    /// Perform one contract-check attempt against a peer without any outer
-    /// retry loop.
-    async fn check_contract_updates_once(
+    /// Perform one peer-storage verification attempt against a peer without
+    /// any outer retry loop.
+    async fn verify_peer_storage_updates_once(
         &self,
         peer_onion: &str,
         policy: transport::PeerRetryPolicy,
-    ) -> Result<Vec<clirpc::CheckContractUpdate>, Status> {
+    ) -> Result<Vec<clirpc::VerifyPeerStorageUpdate>, Status> {
         if self.is_our_onion(peer_onion) {
             return Err(self.self_peer_error());
         }
         let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
             .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
         let peer_was_tracked = self.is_tracked_peer(&peer_public_key)?;
-        let mut updates = vec![clirpc::CheckContractUpdate {
-            state: clirpc::ContractState::ConnectingToPeer as i32,
+        let mut updates = vec![clirpc::VerifyPeerStorageUpdate {
+            state: clirpc::PeerStorageOperationState::ConnectingToPeer as i32,
             success: false,
             our_content_length: 0,
             our_content_section_offset: 0,
@@ -4604,8 +4605,8 @@ impl Node {
             self.record_requester_revision_observation(&peer_public_key, &revision)?;
         }
 
-        updates.push(clirpc::CheckContractUpdate {
-            state: clirpc::ContractState::CheckingContents as i32,
+        updates.push(clirpc::VerifyPeerStorageUpdate {
+            state: clirpc::PeerStorageOperationState::VerifyingContent as i32,
             success: false,
             our_content_length: 0,
             our_content_section_offset: 0,
@@ -4622,8 +4623,8 @@ impl Node {
             } else {
                 None
             };
-            updates.push(clirpc::CheckContractUpdate {
-                state: clirpc::ContractState::Completed as i32,
+            updates.push(clirpc::VerifyPeerStorageUpdate {
+                state: clirpc::PeerStorageOperationState::Completed as i32,
                 success: true,
                 our_content_length: 0,
                 our_content_section_offset: 0,
@@ -4654,8 +4655,8 @@ impl Node {
             } else {
                 None
             };
-            updates.push(clirpc::CheckContractUpdate {
-                state: clirpc::ContractState::OurContentRevisionMissing as i32,
+            updates.push(clirpc::VerifyPeerStorageUpdate {
+                state: clirpc::PeerStorageOperationState::PeerMissingOurContent as i32,
                 success: false,
                 our_content_length: our_content.content_length,
                 our_content_section_offset: 0,
@@ -4713,11 +4714,11 @@ impl Node {
         } else {
             None
         };
-        updates.push(clirpc::CheckContractUpdate {
+        updates.push(clirpc::VerifyPeerStorageUpdate {
             state: if passed {
-                clirpc::ContractState::Completed as i32
+                clirpc::PeerStorageOperationState::Completed as i32
             } else {
-                clirpc::ContractState::InvalidContentReturned as i32
+                clirpc::PeerStorageOperationState::InvalidContentReturned as i32
             },
             success: passed,
             our_content_length: our_content.content_length,
@@ -5241,18 +5242,18 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
     type GetFileStreamStream =
         Pin<Box<dyn Stream<Item = Result<clirpc::GetFileChunk, tonic::Status>> + Send + 'static>>;
 
-    /// ProposeContractStream is the streaming response for peer publication.
-    type ProposeContractStream = Pin<
+    /// PublishToPeerStream is the streaming response for peer publication.
+    type PublishToPeerStream = Pin<
         Box<
-            dyn Stream<Item = Result<clirpc::ProposeContractUpdate, tonic::Status>>
+            dyn Stream<Item = Result<clirpc::PublishToPeerUpdate, tonic::Status>>
                 + Send
                 + 'static,
         >,
     >;
 
-    /// CheckContractStream is the streaming response for peer verification.
-    type CheckContractStream = Pin<
-        Box<dyn Stream<Item = Result<clirpc::CheckContractUpdate, tonic::Status>> + Send + 'static>,
+    /// VerifyPeerStorageStream is the streaming response for peer verification.
+    type VerifyPeerStorageStream = Pin<
+        Box<dyn Stream<Item = Result<clirpc::VerifyPeerStorageUpdate, tonic::Status>> + Send + 'static>,
     >;
 
     async fn state(
@@ -5497,17 +5498,17 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         }))
     }
 
-    async fn get_contracts(
+    async fn get_peer_storage(
         &self,
-        _request: tonic::Request<clirpc::GetContractsRequest>,
-    ) -> Result<tonic::Response<clirpc::GetContractsResponse>, tonic::Status> {
-        Ok(Response::new(self.node.get_contracts_response().await?))
+        _request: tonic::Request<clirpc::GetPeerStorageRequest>,
+    ) -> Result<tonic::Response<clirpc::GetPeerStorageResponse>, tonic::Status> {
+        Ok(Response::new(self.node.get_peer_storage_response().await?))
     }
 
-    async fn propose_contract(
+    async fn publish_to_peer(
         &self,
-        request: tonic::Request<clirpc::ProposeContractRequest>,
-    ) -> Result<tonic::Response<Self::ProposeContractStream>, tonic::Status> {
+        request: tonic::Request<clirpc::PublishToPeerRequest>,
+    ) -> Result<tonic::Response<Self::PublishToPeerStream>, tonic::Status> {
         let peer = request
             .into_inner()
             .peer
@@ -5517,7 +5518,7 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         }
         let updates = self
             .node
-            .propose_contract_updates(&peer.onion_service_id)
+            .publish_to_peer_updates(&peer.onion_service_id)
             .await?
             .into_iter()
             .map(Ok)
@@ -5526,10 +5527,10 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         Ok(Response::new(Box::pin(stream::iter(updates))))
     }
 
-    async fn check_contract(
+    async fn verify_peer_storage(
         &self,
-        request: tonic::Request<clirpc::CheckContractRequest>,
-    ) -> Result<tonic::Response<Self::CheckContractStream>, tonic::Status> {
+        request: tonic::Request<clirpc::VerifyPeerStorageRequest>,
+    ) -> Result<tonic::Response<Self::VerifyPeerStorageStream>, tonic::Status> {
         let peer = request
             .into_inner()
             .peer
@@ -5539,7 +5540,7 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         }
         let updates = self
             .node
-            .check_contract_updates(&peer.onion_service_id)
+            .verify_peer_storage_updates(&peer.onion_service_id)
             .await?
             .into_iter()
             .map(Ok)
@@ -7028,10 +7029,10 @@ mod tests {
 
         let owner_server = spawn_registered_p2p_server(owner.clone(), connector.as_ref()).await?;
         let peer_server = spawn_registered_p2p_server(peer.clone(), connector.as_ref()).await?;
-        owner.propose_contract_updates(peer.address()).await?;
-        owner.check_contract_updates(peer.address()).await?;
+        owner.publish_to_peer_updates(peer.address()).await?;
+        owner.verify_peer_storage_updates(peer.address()).await?;
         owner_clock.advance(Duration::from_secs(3_600));
-        owner.check_contract_updates(peer.address()).await?;
+        owner.verify_peer_storage_updates(peer.address()).await?;
 
         let summary = owner
             .local_state_summary()?
@@ -7114,8 +7115,8 @@ mod tests {
             .await?;
         let owner_server = spawn_registered_p2p_server(owner.clone(), connector.as_ref()).await?;
         let peer_server = spawn_registered_p2p_server(peer.clone(), connector.as_ref()).await?;
-        owner.propose_contract_updates(peer.address()).await?;
-        owner.check_contract_updates(peer.address()).await?;
+        owner.publish_to_peer_updates(peer.address()).await?;
+        owner.verify_peer_storage_updates(peer.address()).await?;
         owner_server.abort();
         peer_server.abort();
 
@@ -7423,7 +7424,7 @@ mod tests {
         let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let node = Node::with_local_storage("self-propose", filesystem)?;
         let error = node
-            .propose_contract_updates(node.address())
+            .publish_to_peer_updates(node.address())
             .await
             .unwrap_err();
 
@@ -7795,28 +7796,28 @@ mod tests {
         let contract_states = BTreeMap::from([
             (
                 pinned_key,
-                PeerContractState {
+                PeerStorageRuntimeState {
                     online: true,
                     our_content_synced: true,
                 },
             ),
             (
                 protected_key,
-                PeerContractState {
+                PeerStorageRuntimeState {
                     online: true,
                     our_content_synced: true,
                 },
             ),
             (
                 offline_key,
-                PeerContractState {
+                PeerStorageRuntimeState {
                     online: false,
                     our_content_synced: false,
                 },
             ),
             (
                 disposable_key,
-                PeerContractState {
+                PeerStorageRuntimeState {
                     online: false,
                     our_content_synced: false,
                 },
@@ -9127,7 +9128,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn propose_contract_updates_auto_recovers_empty_owner_before_publication(
+    async fn publish_to_peer_updates_auto_recovers_empty_owner_before_publication(
     ) -> anyhow::Result<()> {
         let old_owner_clock = Arc::new(ManualClock::new(Timestamp::new(90, 0).unwrap()));
         let new_owner_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
@@ -9180,7 +9181,7 @@ mod tests {
         let new_owner_server =
             spawn_registered_p2p_server(new_owner.clone(), connector.as_ref()).await?;
         let updates = new_owner
-            .propose_contract_updates(responder.address())
+            .publish_to_peer_updates(responder.address())
             .await?;
         assert_eq!(updates.last().map(|update| update.success), Some(true));
 
@@ -9237,11 +9238,11 @@ mod tests {
             spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
 
         let updates = requester_node
-            .propose_contract_updates(responder_node.address())
+            .publish_to_peer_updates(responder_node.address())
             .await?;
         assert_eq!(updates.last().map(|update| update.success), Some(true));
-        let contracts = responder_node.get_contracts_response().await?;
-        assert_eq!(contracts.contracts.len(), 1);
+        let contracts = responder_node.get_peer_storage_response().await?;
+        assert_eq!(contracts.storage_peers.len(), 1);
 
         responder_server.abort();
         drop(responder_node);
@@ -9762,7 +9763,7 @@ mod tests {
         let responder_server =
             spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
         requester_cli
-            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+            .publish_to_peer(tonic::Request::new(clirpc::PublishToPeerRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: responder_node.address().to_string(),
                 }),
@@ -9773,10 +9774,10 @@ mod tests {
             .await?;
 
         let contracts = requester_cli
-            .get_contracts(tonic::Request::new(clirpc::GetContractsRequest {}))
+            .get_peer_storage(tonic::Request::new(clirpc::GetPeerStorageRequest {}))
             .await?
             .into_inner()
-            .contracts;
+            .storage_peers;
         assert_eq!(contracts.len(), 1);
         assert!(contracts[0].online);
         assert!(contracts[0].our_content_synced);
@@ -9819,7 +9820,7 @@ mod tests {
         let responder_server =
             spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
 
-        let _contracts = requester_node.get_contracts_response().await?;
+        let _contracts = requester_node.get_peer_storage_response().await?;
         let peer = peer_entry(requester_node.as_ref(), responder_node.address())?
             .ok_or_else(|| anyhow::anyhow!("missing peer entry"))?;
         assert!(peer.pins_us);
@@ -9995,7 +9996,7 @@ mod tests {
         };
 
         local_node
-            .propose_contract_updates(pinned_node.address())
+            .publish_to_peer_updates(pinned_node.address())
             .await?;
         publish_current_content_to_peer(
             pinned_node.clone(),
@@ -10424,7 +10425,7 @@ mod tests {
             spawn_registered_p2p_server(tracked_only_node.clone(), connector.as_ref()).await?;
 
         local_node
-            .propose_contract_updates(pinned_node.address())
+            .publish_to_peer_updates(pinned_node.address())
             .await?;
         publish_current_content_to_peer(
             pinned_node.clone(),
@@ -10437,7 +10438,7 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("missing pinned peer content"))?
             .content_length;
         local_node
-            .propose_contract_updates(protected_node.address())
+            .publish_to_peer_updates(protected_node.address())
             .await?;
         publish_current_content_to_peer(
             protected_node.clone(),
@@ -10450,7 +10451,7 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("missing protected peer content"))?
             .content_length;
         local_node
-            .propose_contract_updates(disposable_node.address())
+            .publish_to_peer_updates(disposable_node.address())
             .await?;
         publish_current_content_to_peer(
             disposable_node.clone(),
@@ -10627,8 +10628,8 @@ mod tests {
         let peer_c_server = spawn_registered_p2p_server(peer_c.clone(), connector.as_ref()).await?;
 
         for peer_onion in [peer_a.address(), peer_b.address(), peer_c.address()] {
-            owner_node.propose_contract_updates(peer_onion).await?;
-            let check = owner_node.check_contract_updates(peer_onion).await?;
+            owner_node.publish_to_peer_updates(peer_onion).await?;
+            let check = owner_node.verify_peer_storage_updates(peer_onion).await?;
             assert!(check.last().is_some_and(|update| update.success));
         }
 
@@ -10720,13 +10721,13 @@ mod tests {
             spawn_registered_p2p_server(unsynced_peer.clone(), connector.as_ref()).await?;
 
         owner
-            .propose_contract_updates(verified_peer.address())
+            .publish_to_peer_updates(verified_peer.address())
             .await?;
         owner
-            .check_contract_updates(verified_peer.address())
+            .verify_peer_storage_updates(verified_peer.address())
             .await?;
         owner
-            .propose_contract_updates(synced_unverified_peer.address())
+            .publish_to_peer_updates(synced_unverified_peer.address())
             .await?;
 
         let plan = owner.background_maintenance_plan().await?;
@@ -10809,8 +10810,8 @@ mod tests {
             spawn_registered_p2p_server(fresh_peer.clone(), connector.as_ref()).await?;
         let unsynced_server =
             spawn_registered_p2p_server(unsynced_peer.clone(), connector.as_ref()).await?;
-        owner.propose_contract_updates(fresh_peer.address()).await?;
-        owner.check_contract_updates(fresh_peer.address()).await?;
+        owner.publish_to_peer_updates(fresh_peer.address()).await?;
+        owner.verify_peer_storage_updates(fresh_peer.address()).await?;
 
         let plan = owner.background_maintenance_plan().await?;
         assert_eq!(plan.fresh_replica_count, 1);
@@ -10956,7 +10957,7 @@ mod tests {
             .await?;
 
         let first_updates = requester_cli
-            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+            .verify_peer_storage(tonic::Request::new(clirpc::VerifyPeerStorageRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: responder_node.address().to_string(),
                 }),
@@ -10976,7 +10977,7 @@ mod tests {
 
         requester_clock.advance(Duration::from_secs(3_600));
         let second_updates = requester_cli
-            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+            .verify_peer_storage(tonic::Request::new(clirpc::VerifyPeerStorageRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: responder_node.address().to_string(),
                 }),
@@ -11032,7 +11033,7 @@ mod tests {
             spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
 
         let updates = requester_node
-            .check_contract_updates(responder_node.address())
+            .verify_peer_storage_updates(responder_node.address())
             .await?;
         let responder_public_key = keys::public_key_from_onion_hostname(responder_node.address())?;
 
@@ -11075,13 +11076,13 @@ mod tests {
         let offline_peer = Node::new("untracked-offline-probe")?;
         let offline_public_key = keys::public_key_from_onion_hostname(offline_peer.address())?;
         let updates = requester_node
-            .check_contract_updates_with_policy(offline_peer.address(), test_check_retry_policy())
+            .verify_peer_storage_updates_with_policy(offline_peer.address(), test_check_retry_policy())
             .await?;
 
         assert_eq!(updates.last().map(|update| update.success), Some(false));
         assert_eq!(
             updates.last().map(|update| update.state),
-            Some(clirpc::ContractState::PeerUnavailable as i32)
+            Some(clirpc::PeerStorageOperationState::PeerUnavailable as i32)
         );
         assert_eq!(requester_node.known_peers().len(), MAX_TRACKED_PEERS);
         assert!(!requester_node
@@ -11156,7 +11157,7 @@ mod tests {
             .await?;
 
         let first_updates = requester_cli
-            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+            .verify_peer_storage(tonic::Request::new(clirpc::VerifyPeerStorageRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: responder_node.address().to_string(),
                 }),
@@ -11185,7 +11186,7 @@ mod tests {
 
         requester_clock.advance(Duration::from_secs(1));
         let second_updates = requester_cli
-            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+            .verify_peer_storage(tonic::Request::new(clirpc::VerifyPeerStorageRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: responder_node.address().to_string(),
                 }),
@@ -11267,7 +11268,7 @@ mod tests {
 
         requester_clock.advance(Duration::from_secs(3_600));
         let updates = requester_node
-            .check_contract_updates(peer_identity.address())
+            .verify_peer_storage_updates(peer_identity.address())
             .await?;
         assert_eq!(updates.last().map(|update| update.success), Some(true));
         assert_eq!(service_state.download_call_count(), 2);
@@ -11317,11 +11318,11 @@ mod tests {
 
         requester_clock.advance(Duration::from_secs(3_600));
         let updates = requester_node
-            .check_contract_updates_with_policy(peer_identity.address(), test_check_retry_policy())
+            .verify_peer_storage_updates_with_policy(peer_identity.address(), test_check_retry_policy())
             .await?;
         assert_eq!(
             updates.last().map(|update| update.state),
-            Some(clirpc::ContractState::PeerUnavailable as i32)
+            Some(clirpc::PeerStorageOperationState::PeerUnavailable as i32)
         );
         assert_eq!(updates.last().map(|update| update.success), Some(false));
         assert!(flaky_connector.dial_count() >= 2);
@@ -11381,11 +11382,11 @@ mod tests {
 
         requester_clock.advance(Duration::from_secs(1_800));
         let updates = requester_node
-            .check_contract_updates_with_policy(peer_identity.address(), test_check_retry_policy())
+            .verify_peer_storage_updates_with_policy(peer_identity.address(), test_check_retry_policy())
             .await?;
         assert_eq!(
             updates.last().map(|update| update.state),
-            Some(clirpc::ContractState::PeerUnavailable as i32)
+            Some(clirpc::PeerStorageOperationState::PeerUnavailable as i32)
         );
         assert_eq!(updates.last().map(|update| update.success), Some(false));
         assert_eq!(
@@ -11442,11 +11443,11 @@ mod tests {
 
         requester_clock.advance(Duration::from_secs(900));
         let updates = requester_node
-            .check_contract_updates_with_policy(peer_identity.address(), test_check_retry_policy())
+            .verify_peer_storage_updates_with_policy(peer_identity.address(), test_check_retry_policy())
             .await?;
         assert_eq!(
             updates.last().map(|update| update.state),
-            Some(clirpc::ContractState::PeerUnavailable as i32)
+            Some(clirpc::PeerStorageOperationState::PeerUnavailable as i32)
         );
         assert_eq!(updates.last().map(|update| update.success), Some(false));
         assert_eq!(
@@ -11513,7 +11514,7 @@ mod tests {
 
         requester_clock.advance(Duration::from_secs(3_600));
         requester_cli
-            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+            .verify_peer_storage(tonic::Request::new(clirpc::VerifyPeerStorageRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: responder_node.address().to_string(),
                 }),
@@ -11532,7 +11533,7 @@ mod tests {
 
         requester_clock.advance(Duration::from_secs(1_800));
         let failed_updates = requester_cli
-            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+            .verify_peer_storage(tonic::Request::new(clirpc::VerifyPeerStorageRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: responder_node.address().to_string(),
                 }),
@@ -11543,7 +11544,7 @@ mod tests {
             .await?;
         assert_eq!(
             failed_updates.last().map(|update| update.state),
-            Some(clirpc::ContractState::OurContentRevisionMissing as i32)
+            Some(clirpc::PeerStorageOperationState::PeerMissingOurContent as i32)
         );
         assert_eq!(
             peer_score_seconds(&requester_node, responder_node.address())?,
@@ -11604,10 +11605,10 @@ mod tests {
         let (endpoint, server) = spawn_plain_peer_server(static_service).await?;
         connector.register_peer(peer_identity.address(), &endpoint);
 
-        let updates = node.check_contract_updates(peer_identity.address()).await?;
+        let updates = node.verify_peer_storage_updates(peer_identity.address()).await?;
         assert_eq!(
             updates.last().map(|update| update.state),
-            Some(clirpc::ContractState::InvalidContentReturned as i32)
+            Some(clirpc::PeerStorageOperationState::InvalidContentReturned as i32)
         );
         assert_eq!(
             peer_score_seconds(node.as_ref(), peer_identity.address())?,
@@ -11665,7 +11666,7 @@ mod tests {
         connector.register_peer(peer_identity.address(), &endpoint);
 
         let first = node
-            .propose_contract_updates(peer_identity.address())
+            .publish_to_peer_updates(peer_identity.address())
             .await?;
         assert_eq!(first.last().map(|update| update.success), Some(true));
         assert_eq!(exchange_state.peer_exchange_call_count(), 1);
@@ -11674,7 +11675,7 @@ mod tests {
             .contains(&learned_peer.address().to_string()));
 
         let second = node
-            .propose_contract_updates(peer_identity.address())
+            .publish_to_peer_updates(peer_identity.address())
             .await?;
         assert_eq!(second.last().map(|update| update.success), Some(true));
         assert_eq!(exchange_state.peer_exchange_call_count(), 1);
@@ -11683,7 +11684,7 @@ mod tests {
             u64::try_from(PEER_EXCHANGE_COOLDOWN_SECS + 1).unwrap_or(u64::MAX),
         ));
         let third = node
-            .propose_contract_updates(peer_identity.address())
+            .publish_to_peer_updates(peer_identity.address())
             .await?;
         assert_eq!(third.last().map(|update| update.success), Some(true));
         assert_eq!(exchange_state.peer_exchange_call_count(), 2);
@@ -11768,7 +11769,7 @@ mod tests {
         let right_server =
             spawn_registered_p2p_server(right_node.clone(), connector.as_ref()).await?;
         let updates = left_cli
-            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+            .publish_to_peer(tonic::Request::new(clirpc::PublishToPeerRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: right_node.address().to_string(),
                 }),
@@ -11836,7 +11837,7 @@ mod tests {
             spawn_registered_p2p_server(right_node.clone(), base_connector.as_ref()).await?;
 
         let updates = left_node
-            .propose_contract_updates(right_node.address())
+            .publish_to_peer_updates(right_node.address())
             .await?;
         assert_eq!(updates.last().map(|update| update.success), Some(true));
         assert_eq!(flaky_connector.dial_count(), 4);
@@ -11892,7 +11893,7 @@ mod tests {
         connector.register_peer(peer_identity.address(), &endpoint);
 
         let updates = node
-            .propose_contract_updates(peer_identity.address())
+            .publish_to_peer_updates(peer_identity.address())
             .await?;
         assert_eq!(updates.last().map(|update| update.success), Some(true));
         assert_eq!(service_state.set_call_count(), 1);
@@ -12609,7 +12610,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn propose_contract_updates_run_automatic_recovery_before_publication(
+    async fn publish_to_peer_updates_run_automatic_recovery_before_publication(
     ) -> anyhow::Result<()> {
         let old_owner_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
         let old_owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
@@ -12679,7 +12680,7 @@ mod tests {
 
         recovered_node.add_known_peer(peer_node.address())?;
         let updates = recovered_node
-            .propose_contract_updates(peer_node.address())
+            .publish_to_peer_updates(peer_node.address())
             .await
             .context("publish after automatic recovery")?;
         assert_eq!(updates.last().map(|update| update.success), Some(true));
@@ -12754,7 +12755,7 @@ mod tests {
         let responder_server =
             spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
         requester_cli
-            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+            .publish_to_peer(tonic::Request::new(clirpc::PublishToPeerRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: responder_node.address().to_string(),
                 }),
@@ -12766,7 +12767,7 @@ mod tests {
 
         for _ in 0..3 {
             requester_cli
-                .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+                .verify_peer_storage(tonic::Request::new(clirpc::VerifyPeerStorageRequest {
                     peer: Some(clirpc::Peer {
                         onion_service_id: responder_node.address().to_string(),
                     }),
@@ -12825,7 +12826,7 @@ mod tests {
         let responder_server =
             spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
         requester_cli
-            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+            .publish_to_peer(tonic::Request::new(clirpc::PublishToPeerRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: responder_node.address().to_string(),
                 }),
@@ -12837,7 +12838,7 @@ mod tests {
 
         requester_clock.advance(Duration::from_secs(3_600));
         requester_cli
-            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+            .verify_peer_storage(tonic::Request::new(clirpc::VerifyPeerStorageRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: responder_node.address().to_string(),
                 }),
@@ -12862,7 +12863,7 @@ mod tests {
             .await?;
         requester_clock.advance(Duration::from_secs(1_800));
         let failed_updates = requester_cli
-            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+            .verify_peer_storage(tonic::Request::new(clirpc::VerifyPeerStorageRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: responder_node.address().to_string(),
                 }),
@@ -12881,7 +12882,7 @@ mod tests {
         );
 
         requester_cli
-            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+            .publish_to_peer(tonic::Request::new(clirpc::PublishToPeerRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: responder_node.address().to_string(),
                 }),
@@ -12892,7 +12893,7 @@ mod tests {
             .await?;
         requester_clock.advance(Duration::from_secs(3_600));
         let recovered_updates = requester_cli
-            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+            .verify_peer_storage(tonic::Request::new(clirpc::VerifyPeerStorageRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: responder_node.address().to_string(),
                 }),

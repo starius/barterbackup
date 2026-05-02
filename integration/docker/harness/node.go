@@ -460,30 +460,30 @@ func (n *Node) GetStorageConfig(ctx context.Context) (*clirpc.GetStorageConfigRe
 	return response, nil
 }
 
-// GetContracts returns the current live peer-storage snapshot.
-func (n *Node) GetContracts(ctx context.Context) (*clirpc.GetContractsResponse, error) {
+// GetPeerStorage returns the current live peer-storage snapshot.
+func (n *Node) GetPeerStorage(ctx context.Context) (*clirpc.GetPeerStorageResponse, error) {
 	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
-	response, err := client.GetContracts(ctx, &clirpc.GetContractsRequest{})
+	response, err := client.GetPeerStorage(ctx, &clirpc.GetPeerStorageRequest{})
 	if err != nil {
 		return nil, fmt.Errorf("get contracts from %s: %w", n.name, err)
 	}
 	return response, nil
 }
 
-// ProposeContract runs one peer publication and returns the last update.
-func (n *Node) ProposeContract(
+// PublishToPeer runs one peer publication and returns the last update.
+func (n *Node) PublishToPeer(
 	ctx context.Context,
 	peerOnion string,
-) (*clirpc.ProposeContractUpdate, error) {
+) (*clirpc.PublishToPeerUpdate, error) {
 	return n.proposeContractOnce(ctx, peerOnion)
 }
 
-// ProposeContractUntilSuccess retries one peer publication until it succeeds or times out.
-func (n *Node) ProposeContractUntilSuccess(ctx context.Context, peerOnion string) (*clirpc.ProposeContractUpdate, error) {
+// PublishToPeerUntilSuccess retries one peer publication until it succeeds or times out.
+func (n *Node) PublishToPeerUntilSuccess(ctx context.Context, peerOnion string) (*clirpc.PublishToPeerUpdate, error) {
 	deadline, cancel := context.WithTimeout(ctx, defaultLongTimeout)
 	defer cancel()
 
@@ -499,25 +499,25 @@ func (n *Node) ProposeContractUntilSuccess(ctx context.Context, peerOnion string
 	}
 }
 
-// CheckContract runs one peer verification and returns the last update.
-func (n *Node) CheckContract(
+// VerifyPeerStorage runs one peer verification and returns the last update.
+func (n *Node) VerifyPeerStorage(
 	ctx context.Context,
 	peerOnion string,
-) (*clirpc.CheckContractUpdate, error) {
+) (*clirpc.VerifyPeerStorageUpdate, error) {
 	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
 
-	stream, err := client.CheckContract(ctx, &clirpc.CheckContractRequest{
+	stream, err := client.VerifyPeerStorage(ctx, &clirpc.VerifyPeerStorageRequest{
 		Peer: &clirpc.Peer{OnionServiceId: peerOnion},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("check contract from %s to %s: %w", n.name, peerOnion, err)
 	}
 
-	var last *clirpc.CheckContractUpdate
+	var last *clirpc.VerifyPeerStorageUpdate
 	for {
 		update, recvErr := stream.Recv()
 		if errors.Is(recvErr, io.EOF) {
@@ -534,8 +534,8 @@ func (n *Node) CheckContract(
 	return last, nil
 }
 
-// CheckContractUntilSuccess retries one peer verification until it succeeds or times out.
-func (n *Node) CheckContractUntilSuccess(ctx context.Context, peerOnion string) (*clirpc.CheckContractUpdate, error) {
+// VerifyPeerStorageUntilSuccess retries one peer verification until it succeeds or times out.
+func (n *Node) VerifyPeerStorageUntilSuccess(ctx context.Context, peerOnion string) (*clirpc.VerifyPeerStorageUpdate, error) {
 	deadline, cancel := context.WithTimeout(ctx, defaultLongTimeout)
 	defer cancel()
 
@@ -595,21 +595,21 @@ func (n *Node) Stop(ctx context.Context) error {
 	}
 }
 
-func (n *Node) proposeContractOnce(ctx context.Context, peerOnion string) (*clirpc.ProposeContractUpdate, error) {
+func (n *Node) proposeContractOnce(ctx context.Context, peerOnion string) (*clirpc.PublishToPeerUpdate, error) {
 	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
 
-	stream, err := client.ProposeContract(ctx, &clirpc.ProposeContractRequest{
+	stream, err := client.PublishToPeer(ctx, &clirpc.PublishToPeerRequest{
 		Peer: &clirpc.Peer{OnionServiceId: peerOnion},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("propose contract from %s to %s: %w", n.name, peerOnion, err)
 	}
 
-	var last *clirpc.ProposeContractUpdate
+	var last *clirpc.PublishToPeerUpdate
 	for {
 		update, recvErr := stream.Recv()
 		if errors.Is(recvErr, io.EOF) {
@@ -626,21 +626,21 @@ func (n *Node) proposeContractOnce(ctx context.Context, peerOnion string) (*clir
 	return last, nil
 }
 
-func (n *Node) checkContractOnce(ctx context.Context, peerOnion string) (*clirpc.CheckContractUpdate, error) {
+func (n *Node) checkContractOnce(ctx context.Context, peerOnion string) (*clirpc.VerifyPeerStorageUpdate, error) {
 	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
 
-	stream, err := client.CheckContract(ctx, &clirpc.CheckContractRequest{
+	stream, err := client.VerifyPeerStorage(ctx, &clirpc.VerifyPeerStorageRequest{
 		Peer: &clirpc.Peer{OnionServiceId: peerOnion},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("check contract from %s to %s: %w", n.name, peerOnion, err)
 	}
 
-	var last *clirpc.CheckContractUpdate
+	var last *clirpc.VerifyPeerStorageUpdate
 	for {
 		update, recvErr := stream.Recv()
 		if errors.Is(recvErr, io.EOF) {

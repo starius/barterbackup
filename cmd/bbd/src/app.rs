@@ -1149,11 +1149,11 @@ impl BarterBackupClient for DaemonService {
     /// GetFileStreamStream streams one plaintext file download.
     type GetFileStreamStream = <CliService as BarterBackupClient>::GetFileStreamStream;
 
-    /// ProposeContractStream streams contract proposal progress updates.
-    type ProposeContractStream = <CliService as BarterBackupClient>::ProposeContractStream;
+    /// PublishToPeerStream streams peer-publication progress updates.
+    type PublishToPeerStream = <CliService as BarterBackupClient>::PublishToPeerStream;
 
-    /// CheckContractStream streams contract verification progress updates.
-    type CheckContractStream = <CliService as BarterBackupClient>::CheckContractStream;
+    /// VerifyPeerStorageStream streams peer-verification progress updates.
+    type VerifyPeerStorageStream = <CliService as BarterBackupClient>::VerifyPeerStorageStream;
 
     async fn state(
         &self,
@@ -1518,30 +1518,30 @@ impl BarterBackupClient for DaemonService {
             .await
     }
 
-    async fn get_contracts(
+    async fn get_peer_storage(
         &self,
-        request: tonic::Request<clirpc::GetContractsRequest>,
-    ) -> Result<Response<clirpc::GetContractsResponse>, Status> {
+        request: tonic::Request<clirpc::GetPeerStorageRequest>,
+    ) -> Result<Response<clirpc::GetPeerStorageResponse>, Status> {
         CliService::new(self.unlocked_node().await?)
-            .get_contracts(request)
+            .get_peer_storage(request)
             .await
     }
 
-    async fn propose_contract(
+    async fn publish_to_peer(
         &self,
-        request: tonic::Request<clirpc::ProposeContractRequest>,
-    ) -> Result<Response<Self::ProposeContractStream>, Status> {
+        request: tonic::Request<clirpc::PublishToPeerRequest>,
+    ) -> Result<Response<Self::PublishToPeerStream>, Status> {
         CliService::new(self.unlocked_node().await?)
-            .propose_contract(request)
+            .publish_to_peer(request)
             .await
     }
 
-    async fn check_contract(
+    async fn verify_peer_storage(
         &self,
-        request: tonic::Request<clirpc::CheckContractRequest>,
-    ) -> Result<Response<Self::CheckContractStream>, Status> {
+        request: tonic::Request<clirpc::VerifyPeerStorageRequest>,
+    ) -> Result<Response<Self::VerifyPeerStorageStream>, Status> {
         CliService::new(self.unlocked_node().await?)
-            .check_contract(request)
+            .verify_peer_storage(request)
             .await
     }
 
@@ -1565,11 +1565,11 @@ impl BarterBackupClient for DaemonRpcService {
     /// GetFileStreamStream streams one plaintext file download.
     type GetFileStreamStream = <DaemonService as BarterBackupClient>::GetFileStreamStream;
 
-    /// ProposeContractStream streams contract proposal progress updates.
-    type ProposeContractStream = <DaemonService as BarterBackupClient>::ProposeContractStream;
+    /// PublishToPeerStream streams peer-publication progress updates.
+    type PublishToPeerStream = <DaemonService as BarterBackupClient>::PublishToPeerStream;
 
-    /// CheckContractStream streams contract verification progress updates.
-    type CheckContractStream = <DaemonService as BarterBackupClient>::CheckContractStream;
+    /// VerifyPeerStorageStream streams peer-verification progress updates.
+    type VerifyPeerStorageStream = <DaemonService as BarterBackupClient>::VerifyPeerStorageStream;
 
     async fn state(
         &self,
@@ -1704,25 +1704,25 @@ impl BarterBackupClient for DaemonRpcService {
         self.daemon.get_storage_config(request).await
     }
 
-    async fn get_contracts(
+    async fn get_peer_storage(
         &self,
-        request: tonic::Request<clirpc::GetContractsRequest>,
-    ) -> Result<Response<clirpc::GetContractsResponse>, Status> {
-        self.daemon.get_contracts(request).await
+        request: tonic::Request<clirpc::GetPeerStorageRequest>,
+    ) -> Result<Response<clirpc::GetPeerStorageResponse>, Status> {
+        self.daemon.get_peer_storage(request).await
     }
 
-    async fn propose_contract(
+    async fn publish_to_peer(
         &self,
-        request: tonic::Request<clirpc::ProposeContractRequest>,
-    ) -> Result<Response<Self::ProposeContractStream>, Status> {
-        self.daemon.propose_contract(request).await
+        request: tonic::Request<clirpc::PublishToPeerRequest>,
+    ) -> Result<Response<Self::PublishToPeerStream>, Status> {
+        self.daemon.publish_to_peer(request).await
     }
 
-    async fn check_contract(
+    async fn verify_peer_storage(
         &self,
-        request: tonic::Request<clirpc::CheckContractRequest>,
-    ) -> Result<Response<Self::CheckContractStream>, Status> {
-        self.daemon.check_contract(request).await
+        request: tonic::Request<clirpc::VerifyPeerStorageRequest>,
+    ) -> Result<Response<Self::VerifyPeerStorageStream>, Status> {
+        self.daemon.verify_peer_storage(request).await
     }
 
     async fn init_complete(
@@ -1943,7 +1943,7 @@ async fn run_background_peer_maintenance(
 
     if action.propose {
         let Some(proposal_result) =
-            wait_for_maintenance_step(&shutdown, node.propose_contract_updates(&peer_onion)).await
+            wait_for_maintenance_step(&shutdown, node.publish_to_peer_updates(&peer_onion)).await
         else {
             return;
         };
@@ -1967,7 +1967,7 @@ async fn run_background_peer_maintenance(
                     last_success_ago_ms = failure.last_success_ago.map(|elapsed| elapsed.as_millis()),
                     self_peer_check_state = self_check_state,
                     self_peer_check_error = %self_check_error,
-                    "background contract proposal failed"
+                    "background peer publication failed"
                 );
                 return;
             }
@@ -1976,7 +1976,7 @@ async fn run_background_peer_maintenance(
 
     if action.check {
         let Some(check_result) =
-            wait_for_maintenance_step(&shutdown, node.check_contract_updates(&peer_onion)).await
+            wait_for_maintenance_step(&shutdown, node.verify_peer_storage_updates(&peer_onion)).await
         else {
             return;
         };
@@ -1993,7 +1993,7 @@ async fn run_background_peer_maintenance(
                 last_success_ago_ms = failure.last_success_ago.map(|elapsed| elapsed.as_millis()),
                 self_peer_check_state = self_check_state,
                 self_peer_check_error = %self_check_error,
-                "background contract check failed"
+                "background peer-storage verification failed"
             );
             return;
         }
@@ -3580,7 +3580,7 @@ mod tests {
             }))
             .await?;
         let mut proposal_updates = service
-            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+            .publish_to_peer(tonic::Request::new(clirpc::PublishToPeerRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: remote_node.address().to_string(),
                 }),
@@ -3589,7 +3589,7 @@ mod tests {
             .into_inner();
         while let Some(update) = proposal_updates.next().await {
             let update = update?;
-            if update.state == clirpc::ContractState::Completed as i32 && update.success {
+            if update.state == clirpc::PeerStorageOperationState::Completed as i32 && update.success {
                 break;
             }
         }
@@ -4645,10 +4645,10 @@ mod tests {
             let remote_onion = remote_onion.clone();
             async move {
                 let contracts = local_service
-                    .get_contracts(tonic::Request::new(clirpc::GetContractsRequest {}))
+                    .get_peer_storage(tonic::Request::new(clirpc::GetPeerStorageRequest {}))
                     .await?
                     .into_inner()
-                    .contracts;
+                    .storage_peers;
                 Ok(contracts.into_iter().any(|contract| {
                     contract
                         .peer
@@ -4710,7 +4710,7 @@ mod tests {
             .content_id;
 
         let mut proposal_updates = owner_service
-            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+            .publish_to_peer(tonic::Request::new(clirpc::PublishToPeerRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: peer_onion.clone(),
                 }),
@@ -4720,7 +4720,7 @@ mod tests {
         let mut saw_successful_proposal = false;
         while let Some(update) = proposal_updates.next().await {
             let update = update?;
-            if update.state == clirpc::ContractState::Completed as i32 && update.success {
+            if update.state == clirpc::PeerStorageOperationState::Completed as i32 && update.success {
                 saw_successful_proposal = true;
             }
         }
@@ -4730,7 +4730,7 @@ mod tests {
         );
 
         let mut check_updates = owner_service
-            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+            .verify_peer_storage(tonic::Request::new(clirpc::VerifyPeerStorageRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: peer_onion.clone(),
                 }),
@@ -4740,7 +4740,7 @@ mod tests {
         let mut saw_successful_check = false;
         while let Some(update) = check_updates.next().await {
             let update = update?;
-            if update.state == clirpc::ContractState::Completed as i32 && update.success {
+            if update.state == clirpc::PeerStorageOperationState::Completed as i32 && update.success {
                 saw_successful_check = true;
             }
         }
@@ -4835,10 +4835,10 @@ mod tests {
             let remote_onion = remote_onion.clone();
             async move {
                 let contracts = local_service
-                    .get_contracts(tonic::Request::new(clirpc::GetContractsRequest {}))
+                    .get_peer_storage(tonic::Request::new(clirpc::GetPeerStorageRequest {}))
                     .await?
                     .into_inner()
-                    .contracts;
+                    .storage_peers;
                 Ok(contracts.into_iter().any(|contract| {
                     contract
                         .peer
@@ -4942,7 +4942,7 @@ mod tests {
             .await?;
 
         owner_service
-            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+            .publish_to_peer(tonic::Request::new(clirpc::PublishToPeerRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: first_peer_onion.clone(),
                 }),
@@ -4952,7 +4952,7 @@ mod tests {
             .for_each(|_| async {})
             .await;
         owner_service
-            .check_contract(tonic::Request::new(clirpc::CheckContractRequest {
+            .verify_peer_storage(tonic::Request::new(clirpc::VerifyPeerStorageRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: first_peer_onion.clone(),
                 }),
@@ -5048,7 +5048,7 @@ mod tests {
             .await?;
 
         let mut proposal_updates = owner_service
-            .propose_contract(tonic::Request::new(clirpc::ProposeContractRequest {
+            .publish_to_peer(tonic::Request::new(clirpc::PublishToPeerRequest {
                 peer: Some(clirpc::Peer {
                     onion_service_id: peer_onion.clone(),
                 }),
@@ -5060,10 +5060,10 @@ mod tests {
         }
 
         let contracts = peer_service
-            .get_contracts(tonic::Request::new(clirpc::GetContractsRequest {}))
+            .get_peer_storage(tonic::Request::new(clirpc::GetPeerStorageRequest {}))
             .await?
             .into_inner()
-            .contracts;
+            .storage_peers;
         assert_eq!(contracts.len(), 1);
         assert!(contracts[0].online);
         assert!(contracts[0].our_content_synced);
@@ -5081,10 +5081,10 @@ mod tests {
         wait_for_public_peer_runtime(&restarted_peer, Duration::from_secs(30)).await?;
 
         let restarted_contracts = restarted_peer
-            .get_contracts(tonic::Request::new(clirpc::GetContractsRequest {}))
+            .get_peer_storage(tonic::Request::new(clirpc::GetPeerStorageRequest {}))
             .await?
             .into_inner()
-            .contracts;
+            .storage_peers;
         assert_eq!(restarted_contracts.len(), 1);
         assert_eq!(
             restarted_contracts[0].their_latest_cached_content_length,

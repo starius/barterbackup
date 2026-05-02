@@ -715,18 +715,18 @@ mod tests {
         ) -> std::result::Result<tonic::Response<Self::TimerInterceptStream>, Status> {
             Err(Status::unimplemented(""))
         }
-        type ProposeContractStream = std::pin::Pin<
+        type PublishToPeerStream = std::pin::Pin<
             Box<
                 dyn tokio_stream::Stream<
-                        Item = std::result::Result<protos::clirpc::ProposeContractUpdate, Status>,
+                        Item = std::result::Result<protos::clirpc::PublishToPeerUpdate, Status>,
                     > + Send
                     + 'static,
             >,
         >;
-        type CheckContractStream = std::pin::Pin<
+        type VerifyPeerStorageStream = std::pin::Pin<
             Box<
                 dyn tokio_stream::Stream<
-                        Item = std::result::Result<protos::clirpc::CheckContractUpdate, Status>,
+                        Item = std::result::Result<protos::clirpc::VerifyPeerStorageUpdate, Status>,
                     > + Send
                     + 'static,
             >,
@@ -822,23 +822,23 @@ mod tests {
         {
             Err(Status::unimplemented(""))
         }
-        async fn get_contracts(
+        async fn get_peer_storage(
             &self,
-            _: Request<protos::clirpc::GetContractsRequest>,
-        ) -> std::result::Result<tonic::Response<protos::clirpc::GetContractsResponse>, Status>
+            _: Request<protos::clirpc::GetPeerStorageRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::GetPeerStorageResponse>, Status>
         {
             Err(Status::unimplemented(""))
         }
-        async fn propose_contract(
+        async fn publish_to_peer(
             &self,
-            _: Request<protos::clirpc::ProposeContractRequest>,
-        ) -> std::result::Result<tonic::Response<Self::ProposeContractStream>, Status> {
+            _: Request<protos::clirpc::PublishToPeerRequest>,
+        ) -> std::result::Result<tonic::Response<Self::PublishToPeerStream>, Status> {
             Err(Status::unimplemented(""))
         }
-        async fn check_contract(
+        async fn verify_peer_storage(
             &self,
-            _: Request<protos::clirpc::CheckContractRequest>,
-        ) -> std::result::Result<tonic::Response<Self::CheckContractStream>, Status> {
+            _: Request<protos::clirpc::VerifyPeerStorageRequest>,
+        ) -> std::result::Result<tonic::Response<Self::VerifyPeerStorageStream>, Status> {
             Err(Status::unimplemented(""))
         }
         async fn init_complete(

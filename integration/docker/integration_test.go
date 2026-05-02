@@ -558,7 +558,7 @@ func TestDockerRecoveryModeBlocksPublicationUntilFinished(t *testing.T) {
 	connectPeer(t, scenario.recovered, scenario.peerCOnion)
 
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	_, err := scenario.recovered.ProposeContract(ctx, scenario.peerCOnion)
+	_, err := scenario.recovered.PublishToPeer(ctx, scenario.peerCOnion)
 	cancel()
 	assertStatusMessage(
 		t,
@@ -753,7 +753,7 @@ func TestDockerOfflinePeerPenalizedOnCheck(t *testing.T) {
 	if failedCheck.GetSuccess() {
 		t.Fatalf("expected offline contract check to fail, got %+v", failedCheck)
 	}
-	if failedCheck.GetState() != clirpc.ContractState_PEER_UNAVAILABLE {
+	if failedCheck.GetState() != clirpc.PeerStorageOperationState_PEER_UNAVAILABLE {
 		t.Fatalf("expected peer-unavailable state, got %s", failedCheck.GetState().String())
 	}
 
@@ -811,7 +811,7 @@ func TestDockerRetryAfterTransientDisconnect(t *testing.T) {
 	assertCLIKeysRemoved(t, peer)
 
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	_, err := owner.ProposeContract(ctx, peerOnion)
+	_, err := owner.PublishToPeer(ctx, peerOnion)
 	cancel()
 	if err == nil {
 		t.Fatalf("expected proposal to fail while the peer was offline")
@@ -869,7 +869,7 @@ func TestDockerResourcePolicyRejectsOversizedPeerContent(t *testing.T) {
 	setFile(t, owner, "payload-a.bin", randomPayload(firstChunkLength))
 	setFile(t, owner, "payload-b.bin", randomPayload(secondChunkLength))
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	_, err := owner.ProposeContract(ctx, peerOnion)
+	_, err := owner.PublishToPeer(ctx, peerOnion)
 	cancel()
 	if grpcstatus.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("expected oversized proposal to fail with failed precondition, got %v", err)
@@ -964,7 +964,7 @@ func TestDockerStorageBudgetAndEviction(t *testing.T) {
 	reservedPayloadV2 := randomPayload(1024 * 1024)
 	setFile(t, reserved, "payload.bin", reservedPayloadV2)
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	update, err := reserved.ProposeContract(ctx, holderOnion)
+	update, err := reserved.PublishToPeer(ctx, holderOnion)
 	cancel()
 	if err != nil {
 		t.Fatalf("expected oversized reserved proposal to succeed with sidecar-only storage, got %v", err)
@@ -1202,7 +1202,7 @@ func TestDockerPeerStatusInventory(t *testing.T) {
 	stopNode(t, offlinePeer)
 	assertCLIKeysRemoved(t, offlinePeer)
 	offlineUpdate := checkContractOnce(t, requester, offlineOnion)
-	if offlineUpdate.GetSuccess() || offlineUpdate.GetState() != clirpc.ContractState_PEER_UNAVAILABLE {
+	if offlineUpdate.GetSuccess() || offlineUpdate.GetState() != clirpc.PeerStorageOperationState_PEER_UNAVAILABLE {
 		t.Fatalf("expected offline peer check to finish unavailable, got %+v", offlineUpdate)
 	}
 
@@ -1342,7 +1342,7 @@ func TestDockerPinnedStorageReportingAndTrackedOnlyState(t *testing.T) {
 	setStorageBudget(t, holder, cachedBudget)
 
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	update, err := trackedOnlyPeer.ProposeContract(ctx, holderOnion)
+	update, err := trackedOnlyPeer.PublishToPeer(ctx, holderOnion)
 	cancel()
 	if err != nil {
 		t.Fatalf("expected tracked-only proposal to succeed with sidecar-only storage, got %v", err)
@@ -1895,7 +1895,7 @@ func proposeContract(t *testing.T, node *harness.Node, peerOnion string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
 	defer cancel()
-	update, err := node.ProposeContractUntilSuccess(ctx, peerOnion)
+	update, err := node.PublishToPeerUntilSuccess(ctx, peerOnion)
 	if err != nil {
 		t.Fatalf("propose contract from %s to %s: %v", node.Name(), peerOnion, err)
 	}
@@ -1908,7 +1908,7 @@ func checkContract(t *testing.T, node *harness.Node, peerOnion string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
 	defer cancel()
-	update, err := node.CheckContractUntilSuccess(ctx, peerOnion)
+	update, err := node.VerifyPeerStorageUntilSuccess(ctx, peerOnion)
 	if err != nil {
 		t.Fatalf("check contract from %s to %s: %v", node.Name(), peerOnion, err)
 	}
@@ -2386,11 +2386,11 @@ func waitForPeerInfo(
 	}
 }
 
-func checkContractOnce(t *testing.T, node *harness.Node, peerOnion string) *clirpc.CheckContractUpdate {
+func checkContractOnce(t *testing.T, node *harness.Node, peerOnion string) *clirpc.VerifyPeerStorageUpdate {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
 	defer cancel()
-	update, err := node.CheckContract(ctx, peerOnion)
+	update, err := node.VerifyPeerStorage(ctx, peerOnion)
 	if err != nil {
 		t.Fatalf("check contract from %s to %s: %v", node.Name(), peerOnion, err)
 	}
@@ -2438,11 +2438,11 @@ func getStorageConfig(t *testing.T, node *harness.Node) *clirpc.GetStorageConfig
 	return response
 }
 
-func getContracts(t *testing.T, node *harness.Node) *clirpc.GetContractsResponse {
+func getContracts(t *testing.T, node *harness.Node) *clirpc.GetPeerStorageResponse {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
 	defer cancel()
-	response, err := node.GetContracts(ctx)
+	response, err := node.GetPeerStorage(ctx)
 	if err != nil {
 		t.Fatalf("get contracts from %s: %v", node.Name(), err)
 	}
@@ -2454,7 +2454,7 @@ func waitForContractSynced(t *testing.T, node *harness.Node, peerOnion string) {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		response := getContracts(t, node)
-		for _, contract := range response.GetContracts() {
+		for _, contract := range response.GetStoragePeers() {
 			if contract.GetPeer().GetOnionServiceId() == peerOnion && contract.GetOurContentSynced() {
 				return
 			}
@@ -2469,7 +2469,7 @@ func waitForContractSynced(t *testing.T, node *harness.Node, peerOnion string) {
 func assertContractOnlineState(t *testing.T, node *harness.Node, peerOnion string, expected bool) {
 	t.Helper()
 	response := getContracts(t, node)
-	for _, contract := range response.GetContracts() {
+	for _, contract := range response.GetStoragePeers() {
 		if contract.GetPeer().GetOnionServiceId() != peerOnion {
 			continue
 		}

@@ -75,8 +75,9 @@ service BarterBackupClient {
 
     // SetStorageConfig sets how much data of other peers we want to store
     // and what is the minimum number of replicas (peers) we want to store
-    // data on. We also have obligations under old contracts (where peers are
-    // offline but still have remaining time to download their data from us).
+    // data on. We also have obligations under existing peer-storage
+    // relationships where peers are offline but still have remaining time to
+    // download their data from us.
     // Given all of this it is possible to reduce the maximum content length
     // of another peer we accept into our storage.
     rpc SetStorageConfig(SetStorageConfigRequest)
@@ -86,20 +87,20 @@ service BarterBackupClient {
     rpc GetStorageConfig(GetStorageConfigRequest)
         returns (GetStorageConfigResponse);
 
-    // GetContracts returns the current peer-storage state.
-    rpc GetContracts(GetContractsRequest) returns (GetContractsResponse);
+    // GetPeerStorage returns the current peer-storage state.
+    rpc GetPeerStorage(GetPeerStorageRequest) returns (GetPeerStorageResponse);
 
-    // ProposeContract tells the server to publish our current content to the
+    // PublishToPeer tells the server to publish our current content to the
     // specified peer.
-    rpc ProposeContract(ProposeContractRequest)
-        returns (stream ProposeContractUpdate);
+    rpc PublishToPeer(PublishToPeerRequest)
+        returns (stream PublishToPeerUpdate);
 
-    // CheckContract tells the server to verify one peer's current copy of our
+    // VerifyPeerStorage tells the server to verify one peer's current copy of our
     // content. It checks whether the peer stores the most recent version, then
     // downloads and verifies a random sample of our content from that peer.
     // Such checks are also run in the background.
-    rpc CheckContract(CheckContractRequest)
-        returns (stream CheckContractUpdate);
+    rpc VerifyPeerStorage(VerifyPeerStorageRequest)
+        returns (stream VerifyPeerStorageUpdate);
 
     // InitComplete disables recovery mode and advances the effective
     // recovery watermark to the current node-generation boundary.
@@ -761,11 +762,11 @@ message GetStorageConfigResponse {
     ResourcePolicy resource_policy = 3;
 }
 
-message GetContractsRequest {}
+message GetPeerStorageRequest {}
 
-// ContractInfo holds important information about one peer-storage
+// PeerStorageInfo holds important information about one peer-storage
 // relationship.
-message ContractInfo {
+message PeerStorageInfo {
     // peer specifies the peer being described.
     Peer peer = 1;
 
@@ -804,18 +805,18 @@ message ContractInfo {
     int64 their_latest_cached_content_length = 10;
 }
 
-message GetContractsResponse {
-    repeated ContractInfo contracts = 1;
+message GetPeerStorageResponse {
+    repeated PeerStorageInfo storage_peers = 1;
 }
 
-// ProposeContractRequest asks the daemon to publish our current content to a
+// PublishToPeerRequest asks the daemon to publish our current content to a
 // specific peer.
-message ProposeContractRequest {
+message PublishToPeerRequest {
     // peer is the peer to publish to.
     Peer peer = 1;
 }
 
-enum ContractState
+enum PeerStorageOperationState
 {
     // NOT_STARTED means the operation has not begun.
     NOT_STARTED = 0;
@@ -823,22 +824,22 @@ enum ContractState
     // CONNECTING_TO_PEER means we are connecting to the peer.
     CONNECTING_TO_PEER = 1;
 
-    // PROPOSING_CONTRACT means we are proposing a contract to the peer.
-    PROPOSING_CONTRACT = 2;
+    // PUBLISHING_TO_PEER means we are publishing our content to the peer.
+    PUBLISHING_TO_PEER = 2;
 
-    // PEER_REFUSED means the peer refused to form or renew a contract.
+    // PEER_REFUSED means the peer refused to accept or renew peer storage.
     PEER_REFUSED = 3;
 
     // SYNCING_CONTENTS means we and the peer are downloading data or
     // each other.
     SYNCING_CONTENTS = 4;
 
-    // CHECKING_CONTENTS means we are verifying stored content.
-    CHECKING_CONTENTS = 5;
+    // VERIFYING_CONTENT means we are verifying stored content.
+    VERIFYING_CONTENT = 5;
 
-    // OUR_CONTENT_REVISION_MISSING means our content revision is missing on
+    // PEER_MISSING_OUR_CONTENT means our content revision is missing on
     // the peer.
-    OUR_CONTENT_REVISION_MISSING = 6;
+    PEER_MISSING_OUR_CONTENT = 6;
 
     // INVALID_CONTENT_RETURNED means the peer returned invalid content when
     // we were checking it.
@@ -853,11 +854,11 @@ enum ContractState
     PEER_UNAVAILABLE = 9;
 };
 
-// ProposeContractUpdate reports progress or status changes while proposing a
-// contract.
-message ProposeContractUpdate {
-    // state is the current contract proposal state.
-    ContractState state = 1;
+// PublishToPeerUpdate reports progress or status changes while publishing to a
+// peer.
+message PublishToPeerUpdate {
+    // state is the current peer-publication state.
+    PeerStorageOperationState state = 1;
 
     // success is true when the proposal finished successfully.
     bool success = 2;
@@ -885,17 +886,17 @@ enum PublicationStorageResult {
     PUBLICATION_STORAGE_RESULT_REQUESTER_CONTENT_CLEARED = 3;
 }
 
-// CheckContractRequest asks the daemon to verify one peer's current stored
+// VerifyPeerStorageRequest asks the daemon to verify one peer's current stored
 // copy of our content.
-message CheckContractRequest {
+message VerifyPeerStorageRequest {
     // peer is the peer to check.
     Peer peer = 1;
 }
 
-// CheckContractUpdate reports progress or status during peer verification.
-message CheckContractUpdate {
+// VerifyPeerStorageUpdate reports progress or status during peer verification.
+message VerifyPeerStorageUpdate {
     // state is the current verification state.
-    ContractState state = 1;
+    PeerStorageOperationState state = 1;
 
     // success is true when the check finished successfully.
     bool success = 2;

@@ -18,10 +18,10 @@ use dirs::home_dir;
 use futures_util::{stream, TryStreamExt};
 use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
 use protos::clirpc::{
-    CheckContractRequest, ConnectPeerRequest, DeleteFileRequest, ExportBuiltInPeersRequest, File,
-    FileInfo, GetContractsRequest, GetFileRequest, GetStorageConfigRequest, InitCompleteRequest,
+    VerifyPeerStorageRequest, ConnectPeerRequest, DeleteFileRequest, ExportBuiltInPeersRequest, File,
+    FileInfo, GetPeerStorageRequest, GetFileRequest, GetStorageConfigRequest, InitCompleteRequest,
     InitRequest, ListFilesRequest, PeerInfo, PeerStatus, PeersRequest, PeersResponse,
-    PinPeerRequest, ProposeContractRequest, SetStorageConfigRequest, StateRequest, StateResponse,
+    PinPeerRequest, PublishToPeerRequest, SetStorageConfigRequest, StateRequest, StateResponse,
     StopRequest, StorageConfig, UnlockRequest, UnpinPeerRequest,
 };
 use tlsutil::{connect_pinned_channel, read_keys};
@@ -1658,34 +1658,36 @@ fn format_storage_config_response(
     lines
 }
 
-/// Format one contracts response for CLI output.
+/// Format one peer-storage response for CLI output.
 #[cfg(test)]
-fn format_contracts_response(response: &protos::clirpc::GetContractsResponse) -> Vec<String> {
+fn format_peer_storage_response(
+    response: &protos::clirpc::GetPeerStorageResponse,
+) -> Vec<String> {
     response
-        .contracts
+        .storage_peers
         .iter()
-        .map(|contract| {
-            let peer = contract
+        .map(|peer_storage| {
+            let peer = peer_storage
                 .peer
                 .as_ref()
                 .map(|peer| peer.onion_service_id.as_str())
                 .unwrap_or("");
-            let latest_known_id = hex::encode(&contract.their_latest_known_content_id);
-            let latest_cached_id = hex::encode(&contract.their_latest_cached_content_id);
-            let cache_is_stale = contract.their_latest_known_content_id
-                != contract.their_latest_cached_content_id;
+            let latest_known_id = hex::encode(&peer_storage.their_latest_known_content_id);
+            let latest_cached_id = hex::encode(&peer_storage.their_latest_cached_content_id);
+            let cache_is_stale = peer_storage.their_latest_known_content_id
+                != peer_storage.their_latest_cached_content_id;
             format!(
                 "peer={} online={} synced={} our_remaining_seconds={} their_remaining_seconds={} their_content_length={} latest_known_id={} latest_known_length={} latest_cached_id={} latest_cached_length={} stale_cache={}",
                 peer,
-                contract.online,
-                contract.our_content_synced,
-                contract.our_remaining_seconds,
-                contract.their_remaining_seconds,
-                contract.their_content_length,
+                peer_storage.online,
+                peer_storage.our_content_synced,
+                peer_storage.our_remaining_seconds,
+                peer_storage.their_remaining_seconds,
+                peer_storage.their_content_length,
                 latest_known_id,
-                contract.their_latest_known_content_length,
+                peer_storage.their_latest_known_content_length,
                 latest_cached_id,
-                contract.their_latest_cached_content_length,
+                peer_storage.their_latest_cached_content_length,
                 cache_is_stale
             )
         })
@@ -1708,7 +1710,7 @@ fn format_file_list(files: &[FileInfo]) -> Vec<String> {
 /// Print the streamed updates for one peer publication.
 async fn propose_contract(target: &LocalCliTarget, onion_service_id: &str) -> Result<()> {
     let mut client = connect_client(target).await?;
-    for update in propose_contract_with_client(&mut client, onion_service_id).await? {
+    for update in publish_to_peer_with_client(&mut client, onion_service_id).await? {
         println!(
             "{}",
             format_propose_contract_update(onion_service_id, &update)
@@ -1720,15 +1722,15 @@ async fn propose_contract(target: &LocalCliTarget, onion_service_id: &str) -> Re
 /// Format one peer-publication progress update.
 fn format_propose_contract_update(
     onion_service_id: &str,
-    update: &protos::clirpc::ProposeContractUpdate,
+    update: &protos::clirpc::PublishToPeerUpdate,
 ) -> String {
-    let state = protos::clirpc::ContractState::try_from(update.state)
-        .unwrap_or(protos::clirpc::ContractState::NotStarted);
+    let state = protos::clirpc::PeerStorageOperationState::try_from(update.state)
+        .unwrap_or(protos::clirpc::PeerStorageOperationState::NotStarted);
     let storage_result = protos::clirpc::PublicationStorageResult::try_from(update.storage_result)
         .unwrap_or(protos::clirpc::PublicationStorageResult::Unknown);
     let mut line = format!(
         "peer publication: peer={onion_service_id} state={} success={}",
-        contract_state_label(state),
+        peer_storage_operation_state_label(state),
         update.success
     );
     if update.their_content_length > 0 {
@@ -1759,24 +1761,26 @@ fn format_propose_contract_update(
 async fn check_contract(target: &LocalCliTarget, onion_service_id: &str) -> Result<()> {
     let mut client = connect_client(target).await?;
     let started_at = Instant::now();
-    let updates = check_contract_with_client(&mut client, onion_service_id).await?;
-    for line in format_check_contract_updates(onion_service_id, &updates, started_at.elapsed())? {
+    let updates = verify_peer_storage_with_client(&mut client, onion_service_id).await?;
+    for line in
+        format_verify_peer_storage_updates(onion_service_id, &updates, started_at.elapsed())?
+    {
         println!("{line}");
     }
     Ok(())
 }
 
 /// Format one peer-verification outcome for operator-facing CLI output.
-fn format_check_contract_updates(
+fn format_verify_peer_storage_updates(
     onion_service_id: &str,
-    updates: &[protos::clirpc::CheckContractUpdate],
+    updates: &[protos::clirpc::VerifyPeerStorageUpdate],
     elapsed: Duration,
 ) -> Result<Vec<String>> {
     let final_update = updates
         .last()
         .context("peer verification returned no updates")?;
-    let final_state = protos::clirpc::ContractState::try_from(final_update.state)
-        .unwrap_or(protos::clirpc::ContractState::NotStarted);
+    let final_state = protos::clirpc::PeerStorageOperationState::try_from(final_update.state)
+        .unwrap_or(protos::clirpc::PeerStorageOperationState::NotStarted);
     let mut lines = vec![
         format!(
             "peer verification: {}",
@@ -1796,7 +1800,7 @@ fn format_check_contract_updates(
     if !final_update.success {
         lines.push(format!(
             "reason: {}",
-            check_contract_failure_reason(final_state)
+            verify_peer_storage_failure_reason(final_state)
         ));
     }
 
@@ -1834,40 +1838,44 @@ fn publication_storage_result_label(
 }
 
 /// Return one short CLI label for one publication/verification state.
-fn contract_state_label(state: protos::clirpc::ContractState) -> &'static str {
+fn peer_storage_operation_state_label(
+    state: protos::clirpc::PeerStorageOperationState,
+) -> &'static str {
     match state {
-        protos::clirpc::ContractState::NotStarted => "not-started",
-        protos::clirpc::ContractState::ConnectingToPeer => "connecting-to-peer",
-        protos::clirpc::ContractState::ProposingContract => "publishing",
-        protos::clirpc::ContractState::PeerRefused => "peer-refused",
-        protos::clirpc::ContractState::SyncingContents => "syncing-contents",
-        protos::clirpc::ContractState::CheckingContents => "checking-contents",
-        protos::clirpc::ContractState::OurContentRevisionMissing => "our-content-revision-missing",
-        protos::clirpc::ContractState::InvalidContentReturned => "invalid-content-returned",
-        protos::clirpc::ContractState::Completed => "completed",
-        protos::clirpc::ContractState::PeerUnavailable => "peer-unavailable",
+        protos::clirpc::PeerStorageOperationState::NotStarted => "not-started",
+        protos::clirpc::PeerStorageOperationState::ConnectingToPeer => "connecting-to-peer",
+        protos::clirpc::PeerStorageOperationState::PublishingToPeer => "publishing",
+        protos::clirpc::PeerStorageOperationState::PeerRefused => "peer-refused",
+        protos::clirpc::PeerStorageOperationState::SyncingContents => "syncing-contents",
+        protos::clirpc::PeerStorageOperationState::VerifyingContent => "checking-contents",
+        protos::clirpc::PeerStorageOperationState::PeerMissingOurContent => "our-content-revision-missing",
+        protos::clirpc::PeerStorageOperationState::InvalidContentReturned => "invalid-content-returned",
+        protos::clirpc::PeerStorageOperationState::Completed => "completed",
+        protos::clirpc::PeerStorageOperationState::PeerUnavailable => "peer-unavailable",
     }
 }
 
 /// Render one operator-facing reason for a failed peer verification.
-fn check_contract_failure_reason(state: protos::clirpc::ContractState) -> &'static str {
+fn verify_peer_storage_failure_reason(
+    state: protos::clirpc::PeerStorageOperationState,
+) -> &'static str {
     match state {
-        protos::clirpc::ContractState::PeerUnavailable => {
+        protos::clirpc::PeerStorageOperationState::PeerUnavailable => {
             "peer was unavailable before the retry budget expired"
         }
-        protos::clirpc::ContractState::OurContentRevisionMissing => {
+        protos::clirpc::PeerStorageOperationState::PeerMissingOurContent => {
             "peer is missing the latest local revision"
         }
-        protos::clirpc::ContractState::InvalidContentReturned => {
+        protos::clirpc::PeerStorageOperationState::InvalidContentReturned => {
             "peer returned invalid content for the sampled verification"
         }
-        protos::clirpc::ContractState::PeerRefused => "peer refused the storage update",
-        protos::clirpc::ContractState::ConnectingToPeer
-        | protos::clirpc::ContractState::CheckingContents
-        | protos::clirpc::ContractState::Completed
-        | protos::clirpc::ContractState::NotStarted
-        | protos::clirpc::ContractState::ProposingContract
-        | protos::clirpc::ContractState::SyncingContents => {
+        protos::clirpc::PeerStorageOperationState::PeerRefused => "peer refused the storage update",
+        protos::clirpc::PeerStorageOperationState::ConnectingToPeer
+        | protos::clirpc::PeerStorageOperationState::VerifyingContent
+        | protos::clirpc::PeerStorageOperationState::Completed
+        | protos::clirpc::PeerStorageOperationState::NotStarted
+        | protos::clirpc::PeerStorageOperationState::PublishingToPeer
+        | protos::clirpc::PeerStorageOperationState::SyncingContents => {
             "peer verification did not complete successfully"
         }
     }
@@ -2418,22 +2426,22 @@ pub async fn get_storage_config_with_client(
 }
 
 /// Query peer-storage state through an already connected client.
-pub async fn get_contracts_with_client(
+pub async fn get_peer_storage_with_client(
     client: &mut BarterBackupClientClient<Channel>,
-) -> Result<protos::clirpc::GetContractsResponse> {
+) -> Result<protos::clirpc::GetPeerStorageResponse> {
     Ok(client
-        .get_contracts(GetContractsRequest {})
+        .get_peer_storage(GetPeerStorageRequest {})
         .await?
         .into_inner())
 }
 
 /// Stream one peer publication through an already connected client.
-pub async fn propose_contract_with_client(
+pub async fn publish_to_peer_with_client(
     client: &mut BarterBackupClientClient<Channel>,
     onion_service_id: &str,
-) -> Result<Vec<protos::clirpc::ProposeContractUpdate>> {
+) -> Result<Vec<protos::clirpc::PublishToPeerUpdate>> {
     let response = client
-        .propose_contract(ProposeContractRequest {
+        .publish_to_peer(PublishToPeerRequest {
             peer: Some(protos::clirpc::Peer {
                 onion_service_id: onion_service_id.to_string(),
             }),
@@ -2443,12 +2451,12 @@ pub async fn propose_contract_with_client(
 }
 
 /// Stream one peer verification through an already connected client.
-pub async fn check_contract_with_client(
+pub async fn verify_peer_storage_with_client(
     client: &mut BarterBackupClientClient<Channel>,
     onion_service_id: &str,
-) -> Result<Vec<protos::clirpc::CheckContractUpdate>> {
+) -> Result<Vec<protos::clirpc::VerifyPeerStorageUpdate>> {
     let response = client
-        .check_contract(CheckContractRequest {
+        .verify_peer_storage(VerifyPeerStorageRequest {
             peer: Some(protos::clirpc::Peer {
                 onion_service_id: onion_service_id.to_string(),
             }),
@@ -2796,11 +2804,11 @@ mod tests {
     }
 
     #[test]
-    fn format_check_contract_updates_renders_success_with_sample() {
-        let lines = format_check_contract_updates(
+    fn format_verify_peer_storage_updates_renders_success_with_sample() {
+        let lines = format_verify_peer_storage_updates(
             "peer.onion",
-            &[protos::clirpc::CheckContractUpdate {
-                state: protos::clirpc::ContractState::Completed as i32,
+            &[protos::clirpc::VerifyPeerStorageUpdate {
+                state: protos::clirpc::PeerStorageOperationState::Completed as i32,
                 success: true,
                 our_content_length: 8192,
                 our_content_section_offset: 1024,
@@ -2823,11 +2831,11 @@ mod tests {
     }
 
     #[test]
-    fn format_check_contract_updates_renders_success_without_local_content() {
-        let lines = format_check_contract_updates(
+    fn format_verify_peer_storage_updates_renders_success_without_local_content() {
+        let lines = format_verify_peer_storage_updates(
             "peer.onion",
-            &[protos::clirpc::CheckContractUpdate {
-                state: protos::clirpc::ContractState::Completed as i32,
+            &[protos::clirpc::VerifyPeerStorageUpdate {
+                state: protos::clirpc::PeerStorageOperationState::Completed as i32,
                 success: true,
                 our_content_length: 0,
                 our_content_section_offset: 0,
@@ -2849,11 +2857,11 @@ mod tests {
     }
 
     #[test]
-    fn format_check_contract_updates_renders_failure_reason() {
-        let lines = format_check_contract_updates(
+    fn format_verify_peer_storage_updates_renders_failure_reason() {
+        let lines = format_verify_peer_storage_updates(
             "peer.onion",
-            &[protos::clirpc::CheckContractUpdate {
-                state: protos::clirpc::ContractState::PeerUnavailable as i32,
+            &[protos::clirpc::VerifyPeerStorageUpdate {
+                state: protos::clirpc::PeerStorageOperationState::PeerUnavailable as i32,
                 success: false,
                 our_content_length: 2048,
                 our_content_section_offset: 0,
@@ -2879,8 +2887,8 @@ mod tests {
     fn format_propose_contract_update_reports_sidecar_only_storage() {
         let line = format_propose_contract_update(
             "peer.onion",
-            &protos::clirpc::ProposeContractUpdate {
-                state: protos::clirpc::ContractState::Completed as i32,
+            &protos::clirpc::PublishToPeerUpdate {
+                state: protos::clirpc::PeerStorageOperationState::Completed as i32,
                 success: true,
                 their_content_length: 2048,
                 their_content_downloaded_bytes: 2048,
@@ -3854,8 +3862,8 @@ mod tests {
 
     #[test]
     fn contract_output_includes_both_known_and_cached_versions() {
-        let response = protos::clirpc::GetContractsResponse {
-            contracts: vec![protos::clirpc::ContractInfo {
+        let response = protos::clirpc::GetPeerStorageResponse {
+            storage_peers: vec![protos::clirpc::PeerStorageInfo {
                 peer: Some(protos::clirpc::Peer {
                     onion_service_id: "peer.onion".to_string(),
                 }),
@@ -3871,7 +3879,7 @@ mod tests {
             }],
         };
 
-        let lines = format_contracts_response(&response);
+        let lines = format_peer_storage_response(&response);
 
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("peer=peer.onion"));
@@ -3894,7 +3902,7 @@ mod tests {
             spawn_registered_p2p_server(remote_peer.clone(), connector.as_ref()).await?;
 
         connect_peer_with_client(&mut client, remote_peer.address()).await?;
-        let _contracts = get_contracts_with_client(&mut client).await?;
+        let _contracts = get_peer_storage_with_client(&mut client).await?;
         let source = export_built_in_peers_with_client(&mut client).await?;
 
         assert!(source.contains("pub const BUILTIN_PEERS"));
@@ -3934,16 +3942,16 @@ mod tests {
         connect_peer_with_client(&mut local_client, remote_node.address()).await?;
 
         let propose_updates =
-            propose_contract_with_client(&mut local_client, remote_node.address()).await?;
+            publish_to_peer_with_client(&mut local_client, remote_node.address()).await?;
         assert_eq!(
             propose_updates.last().map(|update| update.success),
             Some(true)
         );
 
-        let contracts = get_contracts_with_client(&mut local_client).await?;
-        assert_eq!(contracts.contracts.len(), 1);
+        let contracts = get_peer_storage_with_client(&mut local_client).await?;
+        assert_eq!(contracts.storage_peers.len(), 1);
         assert_eq!(
-            contracts.contracts[0]
+            contracts.storage_peers[0]
                 .peer
                 .as_ref()
                 .map(|peer| peer.onion_service_id.as_str()),
@@ -3951,7 +3959,7 @@ mod tests {
         );
 
         let check_updates =
-            check_contract_with_client(&mut local_client, remote_node.address()).await?;
+            verify_peer_storage_with_client(&mut local_client, remote_node.address()).await?;
         assert_eq!(
             check_updates.last().map(|update| update.success),
             Some(true)
