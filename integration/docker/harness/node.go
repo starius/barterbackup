@@ -114,23 +114,44 @@ func (n *Node) Unlock(ctx context.Context) error {
 	return nil
 }
 
-// WaitForReady waits until the node reports a ready peer runtime.
+// waitStateReadyAndReachable reports whether the node's public peer runtime is
+// ready and the daemon can reach its own public onion path.
+func waitStateReadyAndReachable(state *clirpc.StateResponse) bool {
+	return state.GetPeerRuntimeState() == clirpc.PeerRuntimeState_PEER_RUNTIME_STATE_READY &&
+		state.GetSelfPeerCheckState() == clirpc.SelfPeerCheckState_SELF_PEER_CHECK_STATE_HEALTHY
+}
+
+// WaitForReady waits until the node reports a ready and self-reachable public
+// peer runtime.
 func (n *Node) WaitForReady(ctx context.Context) (*clirpc.StateResponse, error) {
 	deadline, cancel := context.WithTimeout(ctx, defaultLongTimeout)
 	defer cancel()
 
+	var lastState *clirpc.StateResponse
 	for {
 		state, err := n.WaitForState(deadline)
 		if err != nil {
 			return nil, err
 		}
-		if state.PeerRuntimeState == clirpc.PeerRuntimeState_PEER_RUNTIME_STATE_READY {
+		lastState = state
+		if waitStateReadyAndReachable(state) {
 			return state, nil
 		}
 		if state.PeerRuntimeState == clirpc.PeerRuntimeState_PEER_RUNTIME_STATE_FAILED {
 			return nil, fmt.Errorf("peer runtime failed for %s: %s", n.name, state.PeerRuntimeError)
 		}
 		if err := ctxErr(deadline); err != nil {
+			if lastState != nil {
+				return nil, fmt.Errorf(
+					"node %s did not become publicly reachable before timeout: peer_runtime_state=%s peer_runtime_error=%q self_peer_check_state=%s self_peer_check_error=%q: %w",
+					n.name,
+					lastState.GetPeerRuntimeState().String(),
+					lastState.GetPeerRuntimeError(),
+					lastState.GetSelfPeerCheckState().String(),
+					lastState.GetSelfPeerCheckError(),
+					err,
+				)
+			}
 			return nil, err
 		}
 		time.Sleep(300 * time.Millisecond)

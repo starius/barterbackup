@@ -1759,7 +1759,8 @@ func waitForTestClockNodesReady(
 			if state.GetPeerRuntimeState() == clirpc.PeerRuntimeState_PEER_RUNTIME_STATE_FAILED {
 				t.Fatalf("peer runtime failed on %s: %s", node.Name(), state.GetPeerRuntimeError())
 			}
-			if state.GetPeerRuntimeState() != clirpc.PeerRuntimeState_PEER_RUNTIME_STATE_READY {
+			if state.GetPeerRuntimeState() != clirpc.PeerRuntimeState_PEER_RUNTIME_STATE_READY ||
+				state.GetSelfPeerCheckState() != clirpc.SelfPeerCheckState_SELF_PEER_CHECK_STATE_HEALTHY {
 				allReady = false
 			}
 		}
