@@ -73,7 +73,7 @@ nix develop --command make docker-dev-env ARGS='--name lab down'
 ```
 
 `bbdevenv` always runs `bbcli` on the host side. Only `bbd` runs inside Docker.
-See [cmd/bbdevenv/README.md](/home/user/barterbackup/rust2/integration/docker/cmd/bbdevenv/README.md)
+See [cmd/bbdevenv/README.md](cmd/bbdevenv/README.md)
 for the command layout, clock controls, and recovery workflow.
 
 If Docker is not already running on the machine, start `dockerd` from the dev

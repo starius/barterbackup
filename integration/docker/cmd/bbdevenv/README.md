@@ -152,5 +152,5 @@ separate terminal and export `DOCKER_HOST` before using `bbdevenv`.
 
 ## See Also
 
-- [integration/docker/README.md](/home/user/barterbackup/rust2/integration/docker/README.md)
-- [docs/cli/bbcli.md](/home/user/barterbackup/rust2/docs/cli/bbcli.md)
+- [integration/docker/README.md](../../README.md)
+- [docs/cli/bbcli.md](../../../docs/cli/bbcli.md)

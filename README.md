@@ -109,12 +109,12 @@ generates the Go `clirpc` stubs under `integration/docker/gen/clirpc`.
 Markdown CLI manuals under `completions/`, `docs/man/`, and `docs/cli/`.
 The generated Markdown manuals are:
 
-- [docs/cli/bbd.md](/home/user/barterbackup/rust2/docs/cli/bbd.md)
-- [docs/cli/bbcli.md](/home/user/barterbackup/rust2/docs/cli/bbcli.md)
+- [docs/cli/bbd.md](docs/cli/bbd.md)
+- [docs/cli/bbcli.md](docs/cli/bbcli.md)
 
 Additional operational notes:
 
-- [docs/peer-storage-flow.md](/home/user/barterbackup/rust2/docs/peer-storage-flow.md)
+- [docs/peer-storage-flow.md](docs/peer-storage-flow.md)
 
 ## Test
 
@@ -190,7 +190,7 @@ The Docker integration harness requires:
 For the detailed Docker workflow, runtime layout, artifact handling, timeout
 debugging, harness-specific knobs, and the persistent manual Docker
 environment, see
-[integration/docker/README.md](/home/user/barterbackup/rust2/integration/docker/README.md).
+[integration/docker/README.md](integration/docker/README.md).
 
 ## Configuration
 
