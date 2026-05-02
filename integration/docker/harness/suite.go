@@ -278,7 +278,7 @@ func findStaticBBDBinaryForGOARCH(repoRoot string, goarch string) (string, error
 		}
 	}
 	return "", fmt.Errorf(
-		"could not find a static bbd binary for %s; run make build-static first",
+		"could not find a static bbd binary for %s; run make build-static-bbd first",
 		goarch,
 	)
 }

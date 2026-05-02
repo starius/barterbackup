@@ -18,19 +18,32 @@ directories without needing a fuller base image.
 From the repository root:
 
 ```bash
-nix develop --command make integration-test-docker
+nix develop --command make rpc
+nix develop --command make build-static-bbd
+nix develop --command bash -lc 'cd integration/docker && go test ./...'
 nix develop --command make integration-test-docker-tor-smoke
 ```
 
-`make integration-test-docker`:
+Private Chutney lane:
 
-- builds static Linux binaries for `bbd` and `bbcli`
 - regenerates the Go `clirpc` stubs with `make rpc`
+- builds only the static Linux `bbd` binary with `make build-static-bbd`
 - runs `go test ./...` in this module against the private Chutney network
+
+Run one specific test:
+
+```bash
+nix develop --command make rpc
+nix develop --command make build-static-bbd
+nix develop --command bash -lc '
+  cd integration/docker
+  go test -run "^TestDockerMaintenanceRefillsReplicaTargetFromKnownPeer$" -v -count=1
+'
+```
 
 `make integration-test-docker-tor-smoke`:
 
-- builds the same static binaries
+- builds the same static `bbd` binary
 - regenerates the Go `clirpc` stubs
 - runs `TestDockerRealTorRecoverySmoke` against public Tor
 
@@ -81,7 +94,9 @@ Then point the test shell at that socket:
 
 ```bash
 export DOCKER_HOST=unix:///tmp/barterbackup-docker.sock
-nix develop --command make integration-test-docker
+nix develop --command make rpc
+nix develop --command make build-static-bbd
+nix develop --command bash -lc 'cd integration/docker && go test ./...'
 ```
 
 ## Runtime Layout
@@ -128,9 +143,12 @@ BB_KEEP_INTEGRATION_ARTIFACTS=1
 Example:
 
 ```bash
-nix develop --command env \
-  BB_KEEP_INTEGRATION_ARTIFACTS=1 \
-  make integration-test-docker
+nix develop --command env BB_KEEP_INTEGRATION_ARTIFACTS=1 bash -lc '
+  make rpc
+  make build-static-bbd
+  cd integration/docker
+  go test ./...
+'
 ```
 
 ## Timeouts And Debugging

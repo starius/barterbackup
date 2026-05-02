@@ -32,7 +32,7 @@ STATIC_LINUX_ARM64_ENV := \
 	CXX_aarch64_unknown_linux_musl=aarch64-unknown-linux-musl-g++ \
 	AR_aarch64_unknown_linux_musl=aarch64-unknown-linux-musl-ar
 
-.PHONY: build test unit fmt clippy install rpc cli-docs integration-test-docker integration-test-docker-tor-smoke docker-dev-env-build docker-dev-env build-static build-static-linux-amd64 build-static-linux-arm64 build-windows sanitize-address clean
+.PHONY: build test unit fmt clippy install rpc cli-docs integration-test-docker-tor-smoke docker-dev-env-build docker-dev-env build-static build-static-bbd build-static-linux-amd64 build-static-linux-arm64 build-windows sanitize-address clean
 
 build:
 	$(CARGO) build --workspace
@@ -66,13 +66,8 @@ rpc:
 cli-docs:
 	$(CARGO) run -p cli-docs --
 
-integration-test-docker:
-	$(MAKE) build-static
-	$(MAKE) rpc
-	cd integration/docker && $(GO) test ./...
-
 integration-test-docker-tor-smoke:
-	$(MAKE) build-static
+	$(MAKE) build-static-bbd
 	$(MAKE) rpc
 	cd integration/docker && BB_DOCKER_REAL_TOR=1 $(GO) test -run TestDockerRealTorRecoverySmoke -count=1 -timeout 30m
 
@@ -95,6 +90,28 @@ ifeq ($(STATIC_TARGET),$(STATIC_LINUX_AMD64_TARGET))
 	$(MAKE) build-static-linux-amd64
 else ifeq ($(STATIC_TARGET),$(STATIC_LINUX_ARM64_TARGET))
 	$(MAKE) build-static-linux-arm64
+else
+	$(error unsupported static target $(STATIC_TARGET))
+endif
+
+build-static-bbd:
+ifndef STATIC_TARGET
+	$(error build-static-bbd requires an x86_64-linux or aarch64-linux host)
+endif
+ifeq ($(STATIC_TARGET),$(STATIC_LINUX_AMD64_TARGET))
+	env -u CC -u CXX -u AR \
+		$(STATIC_LINUX_AMD64_ENV) \
+		CARGO_BUILD_PIPELINING=false \
+		RUSTFLAGS="-Zmir-opt-level=0" \
+		CARGO_TARGET_DIR=$(STATIC_TARGET_DIR)/$(STATIC_LINUX_AMD64_TARGET) \
+		$(CARGO) build --release --target $(STATIC_LINUX_AMD64_TARGET) -p bbd
+else ifeq ($(STATIC_TARGET),$(STATIC_LINUX_ARM64_TARGET))
+	env -u CC -u CXX -u AR \
+		$(STATIC_LINUX_ARM64_ENV) \
+		CARGO_BUILD_PIPELINING=false \
+		RUSTFLAGS="-Zmir-opt-level=0" \
+		CARGO_TARGET_DIR=$(STATIC_TARGET_DIR)/$(STATIC_LINUX_ARM64_TARGET) \
+		$(CARGO) build --release --target $(STATIC_LINUX_ARM64_TARGET) -p bbd
 else
 	$(error unsupported static target $(STATIC_TARGET))
 endif

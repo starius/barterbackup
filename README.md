@@ -48,7 +48,9 @@ Any `make` target can be run inside it directly, for example:
 ```bash
 nix develop --command make test
 nix develop --command make build-static
-nix develop --command make integration-test-docker
+nix develop --command make build-static-bbd
+nix develop --command make rpc
+nix develop --command bash -lc 'cd integration/docker && go test ./...'
 nix develop --command make integration-test-docker-tor-smoke
 ```
 
@@ -78,13 +80,13 @@ Build distributable variants:
 ```bash
 nix build .
 make build-static
+make build-static-bbd
 make build-static-linux-amd64
 make build-static-linux-arm64
 make build-windows
 make sanitize-address
 make rpc
 make cli-docs
-make integration-test-docker
 make integration-test-docker-tor-smoke
 make docker-dev-env-build
 make docker-dev-env ARGS='--name lab up --nodes 3'
@@ -138,15 +140,26 @@ make clippy
 Docker integration:
 
 ```bash
-make integration-test-docker
+make rpc
+make build-static-bbd
+cd integration/docker && go test ./...
 make integration-test-docker-tor-smoke
 ```
 
-`make integration-test-docker`:
+Private Chutney lane:
 
-- builds static `bbd` and `bbcli` binaries for the current Linux host
 - regenerates the Go `clirpc` stubs
+- builds the static `bbd` binary for the current Linux host with
+  `make build-static-bbd`
 - runs the fast Go Docker suite under `integration/docker`
+
+Run one specific integration test:
+
+```bash
+make rpc
+make build-static-bbd
+cd integration/docker && go test -run '^TestDockerMaintenanceRefillsReplicaTargetFromKnownPeer$' -v -count=1
+```
 
 It runs `bbd` inside Docker containers against a private Chutney Tor network.
 That lane also includes logical-clock scenarios driven through hidden local
@@ -154,9 +167,15 @@ test-clock RPCs.
 
 `make integration-test-docker-tor-smoke`:
 
-- builds the same static binaries
+- builds the same static `bbd` binary
 - regenerates the Go `clirpc` stubs
 - runs one basic public-Tor recovery smoke test in Docker
+
+`make docker-dev-env-build`:
+
+- builds static `bbd` and `bbcli` binaries for the current Linux host
+- regenerates the Go `clirpc` stubs
+- keeps the host-side `bbcli` binary available for the persistent manual lab
 
 The Docker integration harness requires:
 
