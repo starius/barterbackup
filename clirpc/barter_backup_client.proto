@@ -86,19 +86,18 @@ service BarterBackupClient {
     rpc GetStorageConfig(GetStorageConfigRequest)
         returns (GetStorageConfigResponse);
 
-    // GetContracts returns the current state of storage contracts.
+    // GetContracts returns the current peer-storage state.
     rpc GetContracts(GetContractsRequest) returns (GetContractsResponse);
 
-    // ProposeContract tells the server to form a contract if not already
-    // present with the specified peer.
+    // ProposeContract tells the server to publish our current content to the
+    // specified peer.
     rpc ProposeContract(ProposeContractRequest)
         returns (stream ProposeContractUpdate);
 
-    // CheckContract tells the server to check the contract with the peer.
-    // It verifies that we and the peer store the most recent versions of
-    // contents of each other, then downloads a random piece of our content
-    // from the peer and verifies it. Such checks are also run in the
-    // background.
+    // CheckContract tells the server to verify one peer's current copy of our
+    // content. It checks whether the peer stores the most recent version, then
+    // downloads and verifies a random sample of our content from that peer.
+    // Such checks are also run in the background.
     rpc CheckContract(CheckContractRequest)
         returns (stream CheckContractUpdate);
 
@@ -234,22 +233,21 @@ message StatePeerSummary {
     // transport client.
     int64 connected = 2;
 
-    // storing_our_data is the number of peers that most recently passed a
-    // contract check for any of our revisions.
+    // storing_our_data is the number of peers that most recently stored any of
+    // our revisions.
     int64 storing_our_data = 3;
 
-    // storing_latest_our_data is the number of peers that most recently
-    // passed a contract check for the active local revision.
+    // storing_latest_our_data is the number of peers that most recently stored
+    // the active local revision.
     int64 storing_latest_our_data = 4;
 
-    // working_contracts is the number of peers whose persisted metadata
-    // indicates an active contract relationship.
-    int64 working_contracts = 5;
+    // mutual_storage_peers is the number of peers whose persisted metadata
+    // indicates a mutual storage relationship.
+    int64 mutual_storage_peers = 5;
 
-    // mean_working_contract_score_seconds is the arithmetic mean score across
-    // peers whose persisted metadata indicates an active contract
-    // relationship.
-    int64 mean_working_contract_score_seconds = 6;
+    // mean_mutual_storage_score_seconds is the arithmetic mean score across
+    // peers whose persisted metadata indicates a mutual storage relationship.
+    int64 mean_mutual_storage_score_seconds = 6;
 
     // mirrored_peers is the number of peers whose content we currently cache
     // locally.
@@ -302,6 +300,28 @@ message StateRecoverySummary {
     // publish_blocked_reason describes why owner-originated publication is
     // currently blocked, if any.
     string publish_blocked_reason = 6;
+
+    // latest_recovered_content_id is the newest older-lineage revision that
+    // was already merged locally during recovery, if any.
+    bytes latest_recovered_content_id = 7;
+
+    // latest_recovered_at is the authenticated timestamp of
+    // latest_recovered_content_id.
+    int64 latest_recovered_at = 8;
+
+    // latest_recovered_at_ns is the nanosecond component of
+    // latest_recovered_at.
+    int32 latest_recovered_at_ns = 9;
+
+    // newer_known_content_id is a newer recoverable requester revision that a
+    // peer reported knowing about but did not report still storing.
+    bytes newer_known_content_id = 10;
+
+    // newer_known_at is the authenticated timestamp of newer_known_content_id.
+    int64 newer_known_at = 11;
+
+    // newer_known_at_ns is the nanosecond component of newer_known_at.
+    int32 newer_known_at_ns = 12;
 }
 
 // StateLocalSummary groups all local-only state data that can be reported
@@ -441,9 +461,9 @@ message PeerInfo {
     // status is the current locally observed transport status.
     PeerStatus status = 2;
 
-    // has_contract reports whether persisted state indicates a current
-    // contract relationship with this peer.
-    bool has_contract = 3;
+    // has_storage reports whether persisted state indicates any current
+    // storage relationship with this peer.
+    bool has_storage = 3;
 
     // score_seconds is the peer's current persisted score.
     int64 score_seconds = 4;
@@ -743,9 +763,10 @@ message GetStorageConfigResponse {
 
 message GetContractsRequest {}
 
-// ContractInfo holds important information about a contract with a peer.
+// ContractInfo holds important information about one peer-storage
+// relationship.
 message ContractInfo {
-    // peer specifies the peer with which there is this contract.
+    // peer specifies the peer being described.
     Peer peer = 1;
 
     // our_content_synced specifies if the peer stores the most recent version
@@ -787,10 +808,10 @@ message GetContractsResponse {
     repeated ContractInfo contracts = 1;
 }
 
-// ProposeContractRequest asks the daemon to create or renew a contract with
-// a specific peer.
+// ProposeContractRequest asks the daemon to publish our current content to a
+// specific peer.
 message ProposeContractRequest {
-    // peer is the peer to negotiate with.
+    // peer is the peer to publish to.
     Peer peer = 1;
 }
 
@@ -852,17 +873,28 @@ message ProposeContractUpdate {
 
     // our_content_uploaded_bytes is the uploaded portion in bytes.
     int64 our_content_uploaded_bytes = 6;
+
+    // storage_result reports how the peer handled our published content.
+    PublicationStorageResult storage_result = 7;
 }
 
-// CheckContractRequest asks the daemon to verify a contract with a peer.
+enum PublicationStorageResult {
+    PUBLICATION_STORAGE_RESULT_UNKNOWN = 0;
+    PUBLICATION_STORAGE_RESULT_MIRRORED_BYTES_CACHED = 1;
+    PUBLICATION_STORAGE_RESULT_SIDECAR_ONLY = 2;
+    PUBLICATION_STORAGE_RESULT_REQUESTER_CONTENT_CLEARED = 3;
+}
+
+// CheckContractRequest asks the daemon to verify one peer's current stored
+// copy of our content.
 message CheckContractRequest {
     // peer is the peer to check.
     Peer peer = 1;
 }
 
-// CheckContractUpdate reports progress or status during a contract check.
+// CheckContractUpdate reports progress or status during peer verification.
 message CheckContractUpdate {
-    // state is the current contract check state.
+    // state is the current verification state.
     ContractState state = 1;
 
     // success is true when the check finished successfully.

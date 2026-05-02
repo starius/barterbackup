@@ -110,7 +110,29 @@ message SetContentRevisionFailure {
     SetContentRevisionFailureReason reason = 1;
 }
 
-message SetContentRevisionResponse {}
+enum SetContentRevisionStorageResult
+{
+    SET_CONTENT_REVISION_STORAGE_RESULT_UNKNOWN = 0;
+
+    // MIRRORED_BYTES_CACHED means the responder accepted the sidecar update
+    // and currently caches the mirrored requester bytes locally.
+    SET_CONTENT_REVISION_STORAGE_RESULT_MIRRORED_BYTES_CACHED = 1;
+
+    // SIDECAR_ONLY means the responder accepted the sidecar update but did
+    // not cache the mirrored requester bytes because local peer-storage space
+    // was exhausted.
+    SET_CONTENT_REVISION_STORAGE_RESULT_SIDECAR_ONLY = 2;
+
+    // REQUESTER_CONTENT_CLEARED means the responder accepted a request to
+    // clear the requester's mirrored content state.
+    SET_CONTENT_REVISION_STORAGE_RESULT_REQUESTER_CONTENT_CLEARED = 3;
+}
+
+message SetContentRevisionResponse {
+    // storage_result reports whether the responder accepted only metadata or
+    // both metadata and mirrored bytes.
+    SetContentRevisionStorageResult storage_result = 1;
+}
 
 message DownloadRequest {
     bytes content_id = 1;

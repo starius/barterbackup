@@ -337,7 +337,11 @@ fn migrate_peer(peer: &mut storedpb::Peer) {
 }
 
 /// Ensure one peer entry exists in a mutable peer vector.
-fn ensure_peer_entry(peers: &mut Vec<storedpb::Peer>, onion_pubkey: &[u8]) {
+fn ensure_peer_entry(
+    peers: &mut Vec<storedpb::Peer>,
+    onion_pubkey: &[u8],
+    first_seen_at: (i64, i64),
+) {
     if peers
         .iter()
         .any(|peer| peer.onion_pubkey.as_slice() == onion_pubkey)
@@ -360,6 +364,12 @@ fn ensure_peer_entry(peers: &mut Vec<storedpb::Peer>, onion_pubkey: &[u8]) {
         pins_us: false,
         our_content_last_verified_content_id: Vec::new(),
         our_content_last_verified_at: 0,
+        first_seen_at: first_seen_at.0,
+        first_seen_at_ns: first_seen_at.1,
+        successful_calls: 0,
+        failed_calls: 0,
+        requester_latest_stored_content: None,
+        requester_latest_known_content: None,
     });
 }
 
@@ -662,6 +672,11 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
+        let now = self.time_source.now();
+        let first_seen_at = (
+            i64::try_from(now.secs).unwrap_or(i64::MAX),
+            i64::from(now.nanos),
+        );
         self.update_peers(|peers| {
             if let Some(peer) = peers
                 .iter()
@@ -694,6 +709,12 @@ impl Store {
                     pins_us: false,
                     our_content_last_verified_content_id: Vec::new(),
                     our_content_last_verified_at: 0,
+                    first_seen_at: first_seen_at.0,
+                    first_seen_at_ns: first_seen_at.1,
+                    successful_calls: 0,
+                    failed_calls: 0,
+                    requester_latest_stored_content: None,
+                    requester_latest_known_content: None,
                 });
             }
             Ok(true)
@@ -740,8 +761,13 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
+        let now = self.time_source.now();
+        let first_seen_at = (
+            i64::try_from(now.secs).unwrap_or(i64::MAX),
+            i64::from(now.nanos),
+        );
         self.update_peers(|peers| {
-            ensure_peer_entry(peers, onion_pubkey);
+            ensure_peer_entry(peers, onion_pubkey, first_seen_at);
             let peer = peers
                 .iter_mut()
                 .find(|peer| peer.onion_pubkey == onion_pubkey)
@@ -802,8 +828,13 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
+        let now = self.time_source.now();
+        let first_seen_at = (
+            i64::try_from(now.secs).unwrap_or(i64::MAX),
+            i64::from(now.nanos),
+        );
         self.update_peers_with_persist(persist, |peers| {
-            ensure_peer_entry(peers, onion_pubkey);
+            ensure_peer_entry(peers, onion_pubkey, first_seen_at);
             let peer = peers
                 .iter_mut()
                 .find(|peer| peer.onion_pubkey == onion_pubkey)
@@ -827,8 +858,13 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
+        let now = self.time_source.now();
+        let first_seen_at = (
+            i64::try_from(now.secs).unwrap_or(i64::MAX),
+            i64::from(now.nanos),
+        );
         self.update_peers(|peers| {
-            ensure_peer_entry(peers, onion_pubkey);
+            ensure_peer_entry(peers, onion_pubkey, first_seen_at);
             let peer = peers
                 .iter_mut()
                 .find(|peer| peer.onion_pubkey == onion_pubkey)
@@ -873,8 +909,13 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
+        let now = self.time_source.now();
+        let first_seen_at = (
+            i64::try_from(now.secs).unwrap_or(i64::MAX),
+            i64::from(now.nanos),
+        );
         self.update_peers_with_persist(persist, |peers| {
-            ensure_peer_entry(peers, onion_pubkey);
+            ensure_peer_entry(peers, onion_pubkey, first_seen_at);
             let peer = peers
                 .iter_mut()
                 .find(|peer| peer.onion_pubkey == onion_pubkey)
@@ -939,8 +980,13 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
+        let now = self.time_source.now();
+        let first_seen_at = (
+            i64::try_from(now.secs).unwrap_or(i64::MAX),
+            i64::from(now.nanos),
+        );
         self.update_peers_with_persist(persist, |peers| {
-            ensure_peer_entry(peers, onion_pubkey);
+            ensure_peer_entry(peers, onion_pubkey, first_seen_at);
             let peer = peers
                 .iter_mut()
                 .find(|peer| peer.onion_pubkey == onion_pubkey)
@@ -995,8 +1041,13 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
+        let now = self.time_source.now();
+        let first_seen_at = (
+            i64::try_from(now.secs).unwrap_or(i64::MAX),
+            i64::from(now.nanos),
+        );
         self.update_peers_with_persist(persist, |peers| {
-            ensure_peer_entry(peers, onion_pubkey);
+            ensure_peer_entry(peers, onion_pubkey, first_seen_at);
             let peer = peers
                 .iter_mut()
                 .find(|peer| peer.onion_pubkey == onion_pubkey)
@@ -1021,8 +1072,13 @@ impl Store {
             return Err(StorageError::InvalidFileName);
         }
 
+        let now = self.time_source.now();
+        let first_seen_at = (
+            i64::try_from(now.secs).unwrap_or(i64::MAX),
+            i64::from(now.nanos),
+        );
         self.update_peers(|peers| {
-            ensure_peer_entry(peers, onion_pubkey);
+            ensure_peer_entry(peers, onion_pubkey, first_seen_at);
             let peer = peers
                 .iter_mut()
                 .find(|peer| peer.onion_pubkey == onion_pubkey)
@@ -1031,6 +1087,89 @@ impl Store {
                 return Ok(false);
             }
             peer.first_contact_direction = first_contact_direction;
+            Ok(true)
+        })
+    }
+
+    /// Persist the latest requester revision view we learned from this peer.
+    pub fn set_peer_requester_revision_state(
+        &mut self,
+        onion_pubkey: &[u8],
+        latest_stored_content_id: Option<&[u8]>,
+        latest_stored_content_length: Option<i64>,
+        latest_known_content_id: Option<&[u8]>,
+        latest_known_content_length: Option<i64>,
+    ) -> Result<(), StorageError> {
+        if onion_pubkey.is_empty() {
+            return Err(StorageError::InvalidFileName);
+        }
+        if latest_stored_content_id.is_some_and(|content_id| content_id.is_empty()) {
+            return Err(StorageError::InvalidFileName);
+        }
+        if latest_known_content_id.is_some_and(|content_id| content_id.is_empty()) {
+            return Err(StorageError::InvalidFileName);
+        }
+        if latest_stored_content_id.is_some() && latest_stored_content_length.is_none() {
+            return Err(StorageError::InvalidFileName);
+        }
+        if latest_known_content_id.is_some() && latest_known_content_length.is_none() {
+            return Err(StorageError::InvalidFileName);
+        }
+
+        let now = self.time_source.now();
+        let first_seen_at = (
+            i64::try_from(now.secs).unwrap_or(i64::MAX),
+            i64::from(now.nanos),
+        );
+        self.update_peers(|peers| {
+            ensure_peer_entry(peers, onion_pubkey, first_seen_at);
+            let peer = peers
+                .iter_mut()
+                .find(|peer| peer.onion_pubkey == onion_pubkey)
+                .expect("peer entry must exist after ensure");
+            let next_latest_stored = latest_stored_content_id.map(|content_id| {
+                peer_content_summary(content_id, latest_stored_content_length.unwrap_or(0))
+            });
+            let next_latest_known = latest_known_content_id.map(|content_id| {
+                peer_content_summary(content_id, latest_known_content_length.unwrap_or(0))
+            });
+            if peer.requester_latest_stored_content == next_latest_stored
+                && peer.requester_latest_known_content == next_latest_known
+            {
+                return Ok(false);
+            }
+            peer.requester_latest_stored_content = next_latest_stored;
+            peer.requester_latest_known_content = next_latest_known;
+            Ok(true)
+        })
+    }
+
+    /// Persist one outbound peer-call outcome for availability weighting.
+    pub fn record_peer_call_outcome(
+        &mut self,
+        onion_pubkey: &[u8],
+        succeeded: bool,
+    ) -> Result<(), StorageError> {
+        if onion_pubkey.is_empty() {
+            return Err(StorageError::InvalidFileName);
+        }
+
+        let now = self.time_source.now();
+        let first_seen_at = (
+            i64::try_from(now.secs).unwrap_or(i64::MAX),
+            i64::from(now.nanos),
+        );
+        self.update_peers(|peers| {
+            ensure_peer_entry(peers, onion_pubkey, first_seen_at);
+            let peer = peers
+                .iter_mut()
+                .find(|peer| peer.onion_pubkey == onion_pubkey)
+                .expect("peer entry must exist after ensure");
+            if succeeded {
+                peer.successful_calls = peer.successful_calls.saturating_add(1);
+            } else {
+                peer.failed_calls = peer.failed_calls.saturating_add(1);
+            }
             Ok(true)
         })
     }
@@ -2193,6 +2332,57 @@ mod tests {
         assert_eq!(reloaded.peers().len(), 1);
         assert_eq!(reloaded.peers()[0].onion_pubkey, b"peer-a".to_vec());
         assert!(reloaded.peers()[0].content_id.is_empty());
+        assert_eq!(reloaded.peers()[0].first_seen_at, 10);
+        assert_eq!(reloaded.peers()[0].first_seen_at_ns, 1);
+    }
+
+    #[test]
+    fn peer_requester_revision_state_and_call_outcomes_persist() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+
+        store
+            .set_peer_requester_revision_state(
+                b"peer-a",
+                Some(b"stored-revision"),
+                Some(123),
+                Some(b"known-revision"),
+                Some(456),
+            )
+            .unwrap();
+        store.record_peer_call_outcome(b"peer-a", true).unwrap();
+        store.record_peer_call_outcome(b"peer-a", false).unwrap();
+
+        let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        let peer = &reloaded.peers()[0];
+        assert_eq!(peer.successful_calls, 1);
+        assert_eq!(peer.failed_calls, 1);
+        assert_eq!(
+            peer.requester_latest_stored_content
+                .as_ref()
+                .map(|content| (content.content_id.clone(), content.content_length)),
+            Some((b"stored-revision".to_vec(), 123))
+        );
+        assert_eq!(
+            peer.requester_latest_known_content
+                .as_ref()
+                .map(|content| (content.content_id.clone(), content.content_length)),
+            Some((b"known-revision".to_vec(), 456))
+        );
+    }
+
+    #[test]
+    fn peer_first_seen_time_is_not_reset_by_later_updates() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
+
+        store.ensure_peer(b"peer-a").unwrap();
+        store.record_peer_call_outcome(b"peer-a", true).unwrap();
+        store.set_peer_pinned_by_us(b"peer-a", true).unwrap();
+
+        let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        let peer = &reloaded.peers()[0];
+        assert_eq!((peer.first_seen_at, peer.first_seen_at_ns), (10, 1));
     }
 
     #[test]
@@ -2237,6 +2427,12 @@ mod tests {
                 pins_us: false,
                 our_content_last_verified_content_id: Vec::new(),
                 our_content_last_verified_at: 0,
+                first_seen_at: 0,
+                first_seen_at_ns: 0,
+                successful_calls: 0,
+                failed_calls: 0,
+                requester_latest_stored_content: None,
+                requester_latest_known_content: None,
             }],
             node_initialized_at: 0,
             node_initialized_at_ns: 0,
@@ -2653,6 +2849,12 @@ mod tests {
                 pins_us: false,
                 our_content_last_verified_content_id: Vec::new(),
                 our_content_last_verified_at: 0,
+                first_seen_at: 0,
+                first_seen_at_ns: 0,
+                successful_calls: 0,
+                failed_calls: 0,
+                requester_latest_stored_content: None,
+                requester_latest_known_content: None,
             })
             .collect::<Vec<_>>();
 
@@ -2740,6 +2942,12 @@ mod tests {
                     pins_us: false,
                     our_content_last_verified_content_id: Vec::new(),
                     our_content_last_verified_at: 0,
+                    first_seen_at: 0,
+                    first_seen_at_ns: 0,
+                    successful_calls: 0,
+                    failed_calls: 0,
+                    requester_latest_stored_content: None,
+                    requester_latest_known_content: None,
                 })
                 .collect::<Vec<_>>()
         };

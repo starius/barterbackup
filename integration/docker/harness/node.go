@@ -460,7 +460,7 @@ func (n *Node) GetStorageConfig(ctx context.Context) (*clirpc.GetStorageConfigRe
 	return response, nil
 }
 
-// GetContracts returns the current live contract snapshot.
+// GetContracts returns the current live peer-storage snapshot.
 func (n *Node) GetContracts(ctx context.Context) (*clirpc.GetContractsResponse, error) {
 	client, conn, err := DialLocalClient(ctx, n.localAddr, n.keysDir())
 	if err != nil {
@@ -474,7 +474,7 @@ func (n *Node) GetContracts(ctx context.Context) (*clirpc.GetContractsResponse, 
 	return response, nil
 }
 
-// ProposeContract runs one contract proposal and returns the last update.
+// ProposeContract runs one peer publication and returns the last update.
 func (n *Node) ProposeContract(
 	ctx context.Context,
 	peerOnion string,
@@ -482,7 +482,7 @@ func (n *Node) ProposeContract(
 	return n.proposeContractOnce(ctx, peerOnion)
 }
 
-// ProposeContractUntilSuccess retries one contract proposal until it succeeds or times out.
+// ProposeContractUntilSuccess retries one peer publication until it succeeds or times out.
 func (n *Node) ProposeContractUntilSuccess(ctx context.Context, peerOnion string) (*clirpc.ProposeContractUpdate, error) {
 	deadline, cancel := context.WithTimeout(ctx, defaultLongTimeout)
 	defer cancel()
@@ -499,7 +499,7 @@ func (n *Node) ProposeContractUntilSuccess(ctx context.Context, peerOnion string
 	}
 }
 
-// CheckContract runs one contract check and returns the last update.
+// CheckContract runs one peer verification and returns the last update.
 func (n *Node) CheckContract(
 	ctx context.Context,
 	peerOnion string,
@@ -529,12 +529,12 @@ func (n *Node) CheckContract(
 		last = update
 	}
 	if last == nil {
-		return nil, fmt.Errorf("contract check from %s to %s returned no updates", n.name, peerOnion)
+		return nil, fmt.Errorf("peer verification from %s to %s returned no updates", n.name, peerOnion)
 	}
 	return last, nil
 }
 
-// CheckContractUntilSuccess retries one contract check until it succeeds or times out.
+// CheckContractUntilSuccess retries one peer verification until it succeeds or times out.
 func (n *Node) CheckContractUntilSuccess(ctx context.Context, peerOnion string) (*clirpc.CheckContractUpdate, error) {
 	deadline, cancel := context.WithTimeout(ctx, defaultLongTimeout)
 	defer cancel()
@@ -652,7 +652,7 @@ func (n *Node) checkContractOnce(ctx context.Context, peerOnion string) (*clirpc
 		last = update
 	}
 	if last == nil || !last.Success {
-		return nil, fmt.Errorf("contract check from %s to %s did not finish successfully", n.name, peerOnion)
+		return nil, fmt.Errorf("peer verification from %s to %s did not finish successfully", n.name, peerOnion)
 	}
 	return last, nil
 }

@@ -200,12 +200,6 @@ enum Command {
         cmd: FileCommand,
     },
 
-    /// Inspect and drive contracts with peers.
-    Contract {
-        #[command(subcommand)]
-        cmd: ContractCommand,
-    },
-
     /// Read or update daemon configuration.
     Config {
         #[command(subcommand)]
@@ -247,13 +241,25 @@ enum PeerCommand {
         #[arg(long, value_enum)]
         status: Vec<PeerStatusFilter>,
 
-        /// with_contract keeps only peers with persisted contract state.
-        #[arg(long, conflicts_with = "without_contract")]
-        with_contract: bool,
+        /// with_storage keeps only peers with persisted storage state.
+        #[arg(long, conflicts_with = "without_storage")]
+        with_storage: bool,
 
-        /// without_contract keeps only peers without persisted contract state.
-        #[arg(long, conflicts_with = "with_contract")]
-        without_contract: bool,
+        /// without_storage keeps only peers without persisted storage state.
+        #[arg(long, conflicts_with = "with_storage")]
+        without_storage: bool,
+    },
+
+    /// Publish the current local revision to one peer and print streamed updates.
+    Publish {
+        /// onion_service_id is the peer onion service identifier.
+        onion_service_id: String,
+    },
+
+    /// Verify one peer's current copy of our latest local revision.
+    Verify {
+        /// onion_service_id is the peer onion service identifier.
+        onion_service_id: String,
     },
 
     /// Print the Rust source file for the compiled built-in peer list.
@@ -289,25 +295,6 @@ enum FileCommand {
     Delete {
         /// name is the stable file name inside the encrypted content set.
         name: String,
-    },
-}
-
-/// ContractCommand is one `bbcli contract` subcommand.
-#[derive(Subcommand, Debug)]
-enum ContractCommand {
-    /// Print current contract state for known peers.
-    List,
-
-    /// Form or renew a contract with a peer and print streamed updates.
-    Propose {
-        /// onion_service_id is the peer onion service identifier.
-        onion_service_id: String,
-    },
-
-    /// Verify a peer contract and print streamed updates.
-    Check {
-        /// onion_service_id is the peer onion service identifier.
-        onion_service_id: String,
     },
 }
 
@@ -360,18 +347,18 @@ enum PeerStatusFilter {
 struct PeerListFilter {
     /// statuses restricts the accepted current peer states when non-empty.
     statuses: Vec<PeerStatusFilter>,
-    /// has_contract restricts the accepted contract state when set.
-    has_contract: Option<bool>,
+    /// has_storage restricts the accepted persisted storage state when set.
+    has_storage: Option<bool>,
 }
 
 impl PeerListFilter {
     /// Build one peer filter from parsed CLI flags.
-    fn new(statuses: Vec<PeerStatusFilter>, with_contract: bool, without_contract: bool) -> Self {
+    fn new(statuses: Vec<PeerStatusFilter>, with_storage: bool, without_storage: bool) -> Self {
         Self {
             statuses,
-            has_contract: if with_contract {
+            has_storage: if with_storage {
                 Some(true)
-            } else if without_contract {
+            } else if without_storage {
                 Some(false)
             } else {
                 None
@@ -381,8 +368,8 @@ impl PeerListFilter {
 
     /// Return whether one peer info entry matches this filter.
     fn matches(&self, peer: &PeerInfo) -> bool {
-        if let Some(has_contract) = self.has_contract {
-            if peer.has_contract != has_contract {
+        if let Some(has_storage) = self.has_storage {
+            if peer.has_storage != has_storage {
                 return false;
             }
         }
@@ -497,14 +484,20 @@ async fn run_parsed(args: Args) -> Result<()> {
             PeerCommand::Unpin { onion_service_id } => unpin_peer(&target, &onion_service_id).await,
             PeerCommand::List {
                 status,
-                with_contract,
-                without_contract,
+                with_storage,
+                without_storage,
             } => {
                 peers(
                     &target,
-                    PeerListFilter::new(status, with_contract, without_contract),
+                    PeerListFilter::new(status, with_storage, without_storage),
                 )
                 .await
+            }
+            PeerCommand::Publish { onion_service_id } => {
+                propose_contract(&target, &onion_service_id).await
+            }
+            PeerCommand::Verify { onion_service_id } => {
+                check_contract(&target, &onion_service_id).await
             }
             PeerCommand::ExportBuiltIn => export_built_in_peers(&target).await,
         },
@@ -513,15 +506,6 @@ async fn run_parsed(args: Args) -> Result<()> {
             FileCommand::Set { name, path } => set_file(&target, &name, &path).await,
             FileCommand::Get { name, out } => get_file(&target, &name, out.as_deref()).await,
             FileCommand::Delete { name } => delete_file(&target, &name).await,
-        },
-        Command::Contract { cmd } => match cmd {
-            ContractCommand::List => get_contracts(&target).await,
-            ContractCommand::Propose { onion_service_id } => {
-                propose_contract(&target, &onion_service_id).await
-            }
-            ContractCommand::Check { onion_service_id } => {
-                check_contract(&target, &onion_service_id).await
-            }
         },
         Command::Config { cmd } => match cmd {
             ConfigCommand::Get {
@@ -762,12 +746,12 @@ fn format_state_response(response: &StateResponse) -> Vec<String> {
                 peers.storing_latest_our_data
             ));
             lines.push(format!(
-                "working_contract_peers: {}",
-                peers.working_contracts
+                "mutual_storage_peers: {}",
+                peers.mutual_storage_peers
             ));
             lines.push(format!(
-                "mean_working_contract_score_seconds: {}",
-                peers.mean_working_contract_score_seconds
+                "mean_mutual_storage_score_seconds: {}",
+                peers.mean_mutual_storage_score_seconds
             ));
             lines.push(format!("mirrored_peers: {}", peers.mirrored_peers));
             lines.push(format!(
@@ -826,10 +810,45 @@ fn format_state_response(response: &StateResponse) -> Vec<String> {
                     recovery.publish_blocked_reason
                 ));
             }
+            if !recovery.latest_recovered_content_id.is_empty() {
+                lines.push(format!(
+                    "latest_recovered_content_id: {}",
+                    hex::encode(&recovery.latest_recovered_content_id)
+                ));
+                lines.push(format!(
+                    "latest_recovered_at: {}",
+                    format_timestamp_or_unknown(
+                        recovery.latest_recovered_at,
+                        recovery.latest_recovered_at_ns
+                    )
+                ));
+            }
+            if !recovery.newer_known_content_id.is_empty() {
+                lines.push(format!(
+                    "newer_known_content_id: {}",
+                    hex::encode(&recovery.newer_known_content_id)
+                ));
+                lines.push(format!(
+                    "newer_known_at: {}",
+                    format_timestamp_or_unknown(
+                        recovery.newer_known_at,
+                        recovery.newer_known_at_ns
+                    )
+                ));
+            }
         }
     }
 
     lines
+}
+
+/// Render one `(seconds, nanos)` pair or `unknown` for operator-facing state output.
+fn format_timestamp_or_unknown(seconds: i64, nanos: i32) -> String {
+    if seconds != 0 || nanos != 0 {
+        format!("{}.{:09}", seconds, nanos.max(0))
+    } else {
+        "unknown".to_string()
+    }
 }
 
 /// Run the init command, checking daemon state before asking for a password.
@@ -1311,27 +1330,17 @@ async fn get_storage_config(target: &LocalCliTarget, filter: ConfigFieldFilter) 
     Ok(())
 }
 
-/// Print the current contract summary for each known peer.
-async fn get_contracts(target: &LocalCliTarget) -> Result<()> {
-    let mut client = connect_client(target).await?;
-    let response = get_contracts_with_client(&mut client).await?;
-    for line in format_contracts_response(&response) {
-        println!("{line}");
-    }
-    Ok(())
-}
-
 /// Format one peer-inventory response for CLI output.
 fn format_peers_response(response: &PeersResponse, filter: &PeerListFilter) -> Vec<String> {
     let mut lines = Vec::new();
-    let mut with_contract = Vec::new();
+    let mut with_storage = Vec::new();
     let mut online = Vec::new();
     let mut offline = Vec::new();
 
     for peer in response.peers.iter().filter(|peer| filter.matches(peer)) {
         let line = format_peer_info_line(peer);
-        if peer.has_contract {
-            with_contract.push(line);
+        if peer.has_storage {
+            with_storage.push(line);
         } else if peer_info_status(peer) == PeerStatus::Offline {
             offline.push(line);
         } else {
@@ -1339,7 +1348,7 @@ fn format_peers_response(response: &PeersResponse, filter: &PeerListFilter) -> V
         }
     }
 
-    push_peer_inventory_group_lines(&mut lines, "with_contract", &with_contract);
+    push_peer_inventory_group_lines(&mut lines, "with_storage", &with_storage);
     push_peer_inventory_group_lines(&mut lines, "online", &online);
     push_peer_inventory_group_lines(&mut lines, "offline", &offline);
     lines
@@ -1650,6 +1659,7 @@ fn format_storage_config_response(
 }
 
 /// Format one contracts response for CLI output.
+#[cfg(test)]
 fn format_contracts_response(response: &protos::clirpc::GetContractsResponse) -> Vec<String> {
     response
         .contracts
@@ -1695,24 +1705,57 @@ fn format_file_list(files: &[FileInfo]) -> Vec<String> {
         .collect()
 }
 
-/// Print the streamed updates for one contract proposal.
+/// Print the streamed updates for one peer publication.
 async fn propose_contract(target: &LocalCliTarget, onion_service_id: &str) -> Result<()> {
     let mut client = connect_client(target).await?;
     for update in propose_contract_with_client(&mut client, onion_service_id).await? {
         println!(
-            "state={} success={} their_content_length={} their_content_downloaded_bytes={} our_content_length={} our_content_uploaded_bytes={}",
-            update.state,
-            update.success,
-            update.their_content_length,
-            update.their_content_downloaded_bytes,
-            update.our_content_length,
-            update.our_content_uploaded_bytes
+            "{}",
+            format_propose_contract_update(onion_service_id, &update)
         );
     }
     Ok(())
 }
 
-/// Print the streamed updates for one contract check.
+/// Format one peer-publication progress update.
+fn format_propose_contract_update(
+    onion_service_id: &str,
+    update: &protos::clirpc::ProposeContractUpdate,
+) -> String {
+    let state = protos::clirpc::ContractState::try_from(update.state)
+        .unwrap_or(protos::clirpc::ContractState::NotStarted);
+    let storage_result = protos::clirpc::PublicationStorageResult::try_from(update.storage_result)
+        .unwrap_or(protos::clirpc::PublicationStorageResult::Unknown);
+    let mut line = format!(
+        "peer publication: peer={onion_service_id} state={} success={}",
+        contract_state_label(state),
+        update.success
+    );
+    if update.their_content_length > 0 {
+        line.push_str(&format!(
+            " peer_content_bytes={}",
+            update.their_content_length
+        ));
+    }
+    if update.our_content_length > 0 {
+        line.push_str(&format!(" our_content_bytes={}", update.our_content_length));
+    }
+    if update.our_content_uploaded_bytes > 0 {
+        line.push_str(&format!(
+            " uploaded_content_bytes={}",
+            update.our_content_uploaded_bytes
+        ));
+    }
+    if update.success {
+        line.push_str(&format!(
+            " peer_storage={}",
+            publication_storage_result_label(storage_result)
+        ));
+    }
+    line
+}
+
+/// Print the streamed updates for one peer verification.
 async fn check_contract(target: &LocalCliTarget, onion_service_id: &str) -> Result<()> {
     let mut client = connect_client(target).await?;
     let started_at = Instant::now();
@@ -1723,7 +1766,7 @@ async fn check_contract(target: &LocalCliTarget, onion_service_id: &str) -> Resu
     Ok(())
 }
 
-/// Format one contract-check outcome for operator-facing CLI output.
+/// Format one peer-verification outcome for operator-facing CLI output.
 fn format_check_contract_updates(
     onion_service_id: &str,
     updates: &[protos::clirpc::CheckContractUpdate],
@@ -1731,12 +1774,12 @@ fn format_check_contract_updates(
 ) -> Result<Vec<String>> {
     let final_update = updates
         .last()
-        .context("contract check returned no updates")?;
+        .context("peer verification returned no updates")?;
     let final_state = protos::clirpc::ContractState::try_from(final_update.state)
         .unwrap_or(protos::clirpc::ContractState::NotStarted);
     let mut lines = vec![
         format!(
-            "contract check: {}",
+            "peer verification: {}",
             if final_update.success {
                 "passed"
             } else {
@@ -1776,7 +1819,37 @@ fn format_check_contract_updates(
     Ok(lines)
 }
 
-/// Render one operator-facing reason for a failed contract check.
+/// Return one short label for one peer-publication storage result.
+fn publication_storage_result_label(
+    result: protos::clirpc::PublicationStorageResult,
+) -> &'static str {
+    match result {
+        protos::clirpc::PublicationStorageResult::Unknown => "unknown",
+        protos::clirpc::PublicationStorageResult::MirroredBytesCached => "mirrored-bytes-cached",
+        protos::clirpc::PublicationStorageResult::SidecarOnly => "sidecar-only",
+        protos::clirpc::PublicationStorageResult::RequesterContentCleared => {
+            "requester-content-cleared"
+        }
+    }
+}
+
+/// Return one short CLI label for one publication/verification state.
+fn contract_state_label(state: protos::clirpc::ContractState) -> &'static str {
+    match state {
+        protos::clirpc::ContractState::NotStarted => "not-started",
+        protos::clirpc::ContractState::ConnectingToPeer => "connecting-to-peer",
+        protos::clirpc::ContractState::ProposingContract => "publishing",
+        protos::clirpc::ContractState::PeerRefused => "peer-refused",
+        protos::clirpc::ContractState::SyncingContents => "syncing-contents",
+        protos::clirpc::ContractState::CheckingContents => "checking-contents",
+        protos::clirpc::ContractState::OurContentRevisionMissing => "our-content-revision-missing",
+        protos::clirpc::ContractState::InvalidContentReturned => "invalid-content-returned",
+        protos::clirpc::ContractState::Completed => "completed",
+        protos::clirpc::ContractState::PeerUnavailable => "peer-unavailable",
+    }
+}
+
+/// Render one operator-facing reason for a failed peer verification.
 fn check_contract_failure_reason(state: protos::clirpc::ContractState) -> &'static str {
     match state {
         protos::clirpc::ContractState::PeerUnavailable => {
@@ -1788,14 +1861,14 @@ fn check_contract_failure_reason(state: protos::clirpc::ContractState) -> &'stat
         protos::clirpc::ContractState::InvalidContentReturned => {
             "peer returned invalid content for the sampled verification"
         }
-        protos::clirpc::ContractState::PeerRefused => "peer refused the contract",
+        protos::clirpc::ContractState::PeerRefused => "peer refused the storage update",
         protos::clirpc::ContractState::ConnectingToPeer
         | protos::clirpc::ContractState::CheckingContents
         | protos::clirpc::ContractState::Completed
         | protos::clirpc::ContractState::NotStarted
         | protos::clirpc::ContractState::ProposingContract
         | protos::clirpc::ContractState::SyncingContents => {
-            "contract check did not complete successfully"
+            "peer verification did not complete successfully"
         }
     }
 }
@@ -2344,7 +2417,7 @@ pub async fn get_storage_config_with_client(
         .into_inner())
 }
 
-/// Query contract state through an already connected client.
+/// Query peer-storage state through an already connected client.
 pub async fn get_contracts_with_client(
     client: &mut BarterBackupClientClient<Channel>,
 ) -> Result<protos::clirpc::GetContractsResponse> {
@@ -2354,7 +2427,7 @@ pub async fn get_contracts_with_client(
         .into_inner())
 }
 
-/// Stream one contract proposal through an already connected client.
+/// Stream one peer publication through an already connected client.
 pub async fn propose_contract_with_client(
     client: &mut BarterBackupClientClient<Channel>,
     onion_service_id: &str,
@@ -2369,7 +2442,7 @@ pub async fn propose_contract_with_client(
     Ok(response.into_inner().try_collect().await?)
 }
 
-/// Stream one contract check through an already connected client.
+/// Stream one peer verification through an already connected client.
 pub async fn check_contract_with_client(
     client: &mut BarterBackupClientClient<Channel>,
     onion_service_id: &str,
@@ -2627,8 +2700,8 @@ mod tests {
                     connected: 2,
                     storing_our_data: 3,
                     storing_latest_our_data: 1,
-                    working_contracts: 2,
-                    mean_working_contract_score_seconds: 3600,
+                    mutual_storage_peers: 2,
+                    mean_mutual_storage_score_seconds: 3600,
                     mirrored_peers: 1,
                     mirrored_total_size_bytes: 2048,
                 }),
@@ -2648,6 +2721,12 @@ mod tests {
                     recovery_watermark_at: 90,
                     recovery_watermark_at_ns: 8,
                     publish_blocked_reason: "recovery mode is enabled".to_string(),
+                    latest_recovered_content_id: b"recovered-id".to_vec(),
+                    latest_recovered_at: 80,
+                    latest_recovered_at_ns: 9,
+                    newer_known_content_id: b"known-id".to_vec(),
+                    newer_known_at: 95,
+                    newer_known_at_ns: 10,
                 }),
             }),
         };
@@ -2681,10 +2760,10 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line == "peers_storing_latest_our_data: 1"));
-        assert!(lines.iter().any(|line| line == "working_contract_peers: 2"));
+        assert!(lines.iter().any(|line| line == "mutual_storage_peers: 2"));
         assert!(lines
             .iter()
-            .any(|line| line == "mean_working_contract_score_seconds: 3600"));
+            .any(|line| line == "mean_mutual_storage_score_seconds: 3600"));
         assert!(lines.iter().any(|line| line == "mirrored_peers: 1"));
         assert!(lines
             .iter()
@@ -2692,6 +2771,22 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line == "predicted_fresh_replicas_now: 1"));
+        assert!(lines.iter().any(|line| {
+            *line
+                == format!(
+                    "latest_recovered_content_id: {}",
+                    hex::encode(b"recovered-id")
+                )
+        }));
+        assert!(lines
+            .iter()
+            .any(|line| line == "latest_recovered_at: 80.000000009"));
+        assert!(lines.iter().any(|line| {
+            *line == format!("newer_known_content_id: {}", hex::encode(b"known-id"))
+        }));
+        assert!(lines
+            .iter()
+            .any(|line| line == "newer_known_at: 95.000000010"));
         assert!(lines
             .iter()
             .any(|line| line == "predicted_min_replicas_target: 2"));
@@ -2718,7 +2813,7 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "contract check: passed".to_string(),
+                "peer verification: passed".to_string(),
                 "peer: peer.onion".to_string(),
                 "elapsed: 1250 ms".to_string(),
                 "checked content: 8192 bytes".to_string(),
@@ -2745,7 +2840,7 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "contract check: passed".to_string(),
+                "peer verification: passed".to_string(),
                 "peer: peer.onion".to_string(),
                 "elapsed: 12 ms".to_string(),
                 "local content: none".to_string(),
@@ -2771,12 +2866,33 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "contract check: failed".to_string(),
+                "peer verification: failed".to_string(),
                 "peer: peer.onion".to_string(),
                 "elapsed: 750 ms".to_string(),
                 "reason: peer was unavailable before the retry budget expired".to_string(),
                 "checked content: 2048 bytes".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn format_propose_contract_update_reports_sidecar_only_storage() {
+        let line = format_propose_contract_update(
+            "peer.onion",
+            &protos::clirpc::ProposeContractUpdate {
+                state: protos::clirpc::ContractState::Completed as i32,
+                success: true,
+                their_content_length: 2048,
+                their_content_downloaded_bytes: 2048,
+                our_content_length: 4096,
+                our_content_uploaded_bytes: 4096,
+                storage_result: protos::clirpc::PublicationStorageResult::SidecarOnly as i32,
+            },
+        );
+
+        assert_eq!(
+            line,
+            "peer publication: peer=peer.onion state=completed success=true peer_content_bytes=2048 our_content_bytes=4096 uploaded_content_bytes=4096 peer_storage=sidecar-only"
         );
     }
 
@@ -3151,12 +3267,12 @@ mod tests {
     }
 
     #[test]
-    fn args_parse_grouped_contract_and_init_commands() {
-        let args = Args::parse_from(["bbcli", "contract", "propose", "peer.onion"]);
+    fn args_parse_grouped_peer_publish_and_init_commands() {
+        let args = Args::parse_from(["bbcli", "peer", "publish", "peer.onion"]);
         assert!(matches!(
             args.cmd,
-            Command::Contract {
-                cmd: ContractCommand::Propose { .. }
+            Command::Peer {
+                cmd: PeerCommand::Publish { .. }
             }
         ));
 
@@ -3353,7 +3469,7 @@ mod tests {
                     status: PeerStatus::Connected as i32,
                     pinned_by_us: true,
                     pins_us: true,
-                    has_contract: true,
+                    has_storage: true,
                     score_seconds: 7,
                     score_measured_at: 11,
                     stored_content_bytes: 13,
@@ -3376,7 +3492,7 @@ mod tests {
                     status: PeerStatus::Online as i32,
                     pinned_by_us: false,
                     pins_us: false,
-                    has_contract: false,
+                    has_storage: false,
                     score_seconds: 0,
                     score_measured_at: 0,
                     stored_content_bytes: 0,
@@ -3397,7 +3513,7 @@ mod tests {
 
         let lines = format_peers_response(&response, &PeerListFilter::default());
 
-        assert_eq!(lines[0], "with_contract: 1");
+        assert_eq!(lines[0], "with_storage: 1");
         assert!(lines
             .iter()
             .any(|line| line.contains("peer=contract.onion")));
@@ -3424,7 +3540,7 @@ mod tests {
                     status: PeerStatus::Connected as i32,
                     pinned_by_us: false,
                     pins_us: false,
-                    has_contract: true,
+                    has_storage: true,
                     score_seconds: 7,
                     score_measured_at: 11,
                     stored_content_bytes: 13,
@@ -3447,7 +3563,7 @@ mod tests {
                     status: PeerStatus::Offline as i32,
                     pinned_by_us: false,
                     pins_us: false,
-                    has_contract: false,
+                    has_storage: false,
                     score_seconds: -5,
                     score_measured_at: 31,
                     stored_content_bytes: 0,
@@ -3471,7 +3587,7 @@ mod tests {
             &PeerListFilter::new(vec![PeerStatusFilter::Offline], false, true),
         );
 
-        assert_eq!(lines[0], "with_contract: 0");
+        assert_eq!(lines[0], "with_storage: 0");
         assert!(lines.iter().any(|line| line == "offline: 1"));
         assert!(lines.iter().any(|line| line.contains("peer=offline.onion")));
         assert!(lines

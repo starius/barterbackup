@@ -910,6 +910,13 @@ func TestDockerStorageBudgetAndEviction(t *testing.T) {
 	if bestEffortBudget <= 0 {
 		t.Fatalf("expected best-effort cached length to be positive, got %d", bestEffortBudget)
 	}
+	holderPolicy := getStorageConfig(t, holder).GetResourcePolicy()
+	if holderPolicy == nil {
+		t.Fatalf("expected holder resource policy in storage config response")
+	}
+	if holderPolicy.GetMaxPeerContentBytes() <= 0 {
+		t.Fatalf("expected positive holder max peer content bytes, got %d", holderPolicy.GetMaxPeerContentBytes())
+	}
 
 	if !checkContractOnce(t, holder, reservedOnion).GetSuccess() {
 		t.Fatalf("expected reserved peer check to succeed")
@@ -922,7 +929,7 @@ func TestDockerStorageBudgetAndEviction(t *testing.T) {
 		t.Fatalf("expected reserved peer to gain positive score before storage pressure")
 	}
 
-	setStorageBudget(t, holder, bestEffortBudget)
+	setStorageBudget(t, holder, holderPolicy.GetMaxPeerContentBytes())
 	reservedPayloadV1 := bytes.Repeat([]byte("reserved-v1\n"), 3072)
 	setFile(t, reserved, "payload.bin", reservedPayloadV1)
 	proposeContract(t, reserved, holderOnion)
@@ -957,13 +964,13 @@ func TestDockerStorageBudgetAndEviction(t *testing.T) {
 	reservedPayloadV2 := randomPayload(1024 * 1024)
 	setFile(t, reserved, "payload.bin", reservedPayloadV2)
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	_, err := reserved.ProposeContract(ctx, holderOnion)
+	update, err := reserved.ProposeContract(ctx, holderOnion)
 	cancel()
-	if grpcstatus.Code(err) != codes.ResourceExhausted {
-		t.Fatalf("expected oversized reserved proposal to fail with resource exhausted, got %v", err)
+	if err != nil {
+		t.Fatalf("expected oversized reserved proposal to succeed with sidecar-only storage, got %v", err)
 	}
-	if !strings.Contains(grpcstatus.Convert(err).Message(), "peer storage budget was exhausted") {
-		t.Fatalf("unexpected storage-budget proposal message: %v", err)
+	if got := update.GetStorageResult(); got != clirpc.PublicationStorageResult_PUBLICATION_STORAGE_RESULT_SIDECAR_ONLY {
+		t.Fatalf("expected oversized reserved proposal to report sidecar-only storage, got %s", got.String())
 	}
 
 	reservedAfterOverflow := waitForPeerInfo(
@@ -1335,10 +1342,13 @@ func TestDockerPinnedStorageReportingAndTrackedOnlyState(t *testing.T) {
 	setStorageBudget(t, holder, cachedBudget)
 
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	_, err := trackedOnlyPeer.ProposeContract(ctx, holderOnion)
+	update, err := trackedOnlyPeer.ProposeContract(ctx, holderOnion)
 	cancel()
-	if grpcstatus.Code(err) != codes.ResourceExhausted {
-		t.Fatalf("expected tracked-only proposal to fall back with resource exhausted, got %v", err)
+	if err != nil {
+		t.Fatalf("expected tracked-only proposal to succeed with sidecar-only storage, got %v", err)
+	}
+	if got := update.GetStorageResult(); got != clirpc.PublicationStorageResult_PUBLICATION_STORAGE_RESULT_SIDECAR_ONLY {
+		t.Fatalf("expected tracked-only proposal to report sidecar-only storage, got %s", got.String())
 	}
 
 	trackedOnlyInfo := waitForPeerInfo(
@@ -1406,8 +1416,9 @@ func TestDockerPinnedStorageReportingAndTrackedOnlyState(t *testing.T) {
 	if storage.GetTrackedOnlyPeersCount() != 1 {
 		t.Fatalf("unexpected tracked-only peer count: got %d want 1", storage.GetTrackedOnlyPeersCount())
 	}
-	if storage.GetOfflineBlockingStorageBytes() != protectedInfo.GetStoredContentBytes() {
-		t.Fatalf("unexpected offline-blocking bytes: got %d want %d", storage.GetOfflineBlockingStorageBytes(), protectedInfo.GetStoredContentBytes())
+	expectedOfflineBlocking := pinnedInfo.GetStoredContentBytes() + protectedInfo.GetStoredContentBytes()
+	if storage.GetOfflineBlockingStorageBytes() != expectedOfflineBlocking {
+		t.Fatalf("unexpected offline-blocking bytes: got %d want %d", storage.GetOfflineBlockingStorageBytes(), expectedOfflineBlocking)
 	}
 	if storage.GetReclaimablePeerStorageBytes() != disposableInfo.GetStoredContentBytes() {
 		t.Fatalf("unexpected reclaimable bytes: got %d want %d", storage.GetReclaimablePeerStorageBytes(), disposableInfo.GetStoredContentBytes())

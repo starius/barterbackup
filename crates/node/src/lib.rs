@@ -1,7 +1,7 @@
 //! Node orchestration for a single BarterBackup instance.
 //!
 //! The node owns the local encrypted store, the local and peer RPC surfaces,
-//! peer inventory and contract bookkeeping, and recovery and maintenance
+//! peer inventory and storage bookkeeping, and recovery and maintenance
 //! helpers used by the daemon.
 
 mod builtin_peers;
@@ -12,6 +12,7 @@ use content::{PlainFile, CONTENT_ID_LEN};
 use futures::{stream, Stream};
 use prost::Message;
 use protos::{bbrpc, clirpc, storedpb};
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -28,6 +29,18 @@ use transport::PeerConnector;
 
 /// LOCAL_CLI_FILE_CHUNK_BYTES is the chunk size used for streamed local file RPCs.
 const LOCAL_CLI_FILE_CHUNK_BYTES: usize = 256 * 1024;
+/// PEER_SELECTION_BASE_WEIGHT is the baseline chance every eligible peer keeps.
+const PEER_SELECTION_BASE_WEIGHT: u64 = 1;
+/// PEER_SELECTION_PINNED_BY_US_BONUS strongly boosts peers pinned locally.
+const PEER_SELECTION_PINNED_BY_US_BONUS: u64 = 48;
+/// PEER_SELECTION_PINS_US_BONUS strongly boosts peers that most recently pinned us.
+const PEER_SELECTION_PINS_US_BONUS: u64 = 32;
+/// PEER_SELECTION_AVAILABILITY_BONUS_SCALE converts the smoothed success ratio into weight.
+const PEER_SELECTION_AVAILABILITY_BONUS_SCALE: u64 = 40;
+/// PEER_SELECTION_AGE_STEP_SECS grants one age bonus per observed day.
+const PEER_SELECTION_AGE_STEP_SECS: i64 = 86_400;
+/// PEER_SELECTION_MAX_AGE_BONUS caps the age contribution to keep it moderate.
+const PEER_SELECTION_MAX_AGE_BONUS: u64 = 30;
 
 /// PeerIdentity describes the authenticated peer that issued a request.
 struct PeerIdentity {
@@ -244,10 +257,10 @@ struct MirroredBlobUsage {
     references: Vec<PeerBlobReference>,
 }
 
-/// PeerContractState is the live contract state we need for storage reporting.
+/// PeerContractState is the live peer-storage state we need for storage reporting.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct PeerContractState {
-    /// online reports whether the peer answered the live contract probe.
+    /// online reports whether the peer answered the live storage probe.
     online: bool,
     /// our_content_synced reports whether the peer currently advertises our latest content.
     our_content_synced: bool,
@@ -259,6 +272,17 @@ enum StorageAdmission {
     Store { evict_content_ids: Vec<Vec<u8>> },
     /// TrackOnly remembers the peer's latest content id without caching bytes.
     TrackOnly,
+}
+
+/// SyncPeerContentResult reports how one responder handled requester content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SyncPeerContentResult {
+    /// MirroredBytesCached means the sidecar and requester bytes are cached.
+    MirroredBytesCached,
+    /// SidecarOnly means only sidecar metadata was accepted locally.
+    SidecarOnly,
+    /// RequesterContentCleared means requester content state was cleared.
+    RequesterContentCleared,
 }
 
 /// CachedPeerClient keeps one reusable outbound peer client with its last use time.
@@ -292,8 +316,8 @@ struct PeerInventoryEntry {
     pinned_by_us: bool,
     /// pins_us reports whether the peer most recently told us it pins us.
     pins_us: bool,
-    /// has_contract reports whether persisted state indicates an active contract relationship.
-    has_contract: bool,
+    /// has_storage reports whether persisted state indicates any storage relationship.
+    has_storage: bool,
     /// score_seconds is the peer's current persisted score.
     score_seconds: i64,
     /// score_measured_at is when `score_seconds` was last updated.
@@ -339,9 +363,9 @@ enum PeerAdmissionPlan {
 pub struct BackgroundMaintenancePeerAction {
     /// peer_onion is the peer onion hostname to contact.
     pub peer_onion: String,
-    /// propose reports whether the pass should run contract proposal first.
+    /// propose reports whether the pass should run peer publication first.
     pub propose: bool,
-    /// check reports whether the pass should run contract verification.
+    /// check reports whether the pass should run peer verification.
     pub check: bool,
 }
 
@@ -358,6 +382,25 @@ pub struct BackgroundMaintenancePlan {
     pub min_replicas_target: i64,
 }
 
+/// PublicationCandidate is one eligible peer considered for replica refill.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PublicationCandidate {
+    /// peer_onion is the peer onion hostname.
+    peer_onion: String,
+    /// pinned_by_us reports whether we pin this peer locally.
+    pinned_by_us: bool,
+    /// pins_us reports whether this peer most recently told us that it pins us.
+    pins_us: bool,
+    /// first_seen_at is when we first admitted this peer locally.
+    first_seen_at: (i64, i64),
+    /// successful_calls counts successful observed outbound interactions.
+    successful_calls: i64,
+    /// failed_calls counts failed observed outbound interactions.
+    failed_calls: i64,
+    /// stores_peer_data reports whether we currently cache this peer's bytes.
+    stores_peer_data: bool,
+}
+
 /// LocalStoreSnapshot is the local encrypted-store state needed for one local
 /// CLI state summary.
 #[derive(Clone, Debug, PartialEq)]
@@ -372,6 +415,8 @@ struct LocalStoreSnapshot {
     total_file_bytes: i64,
     /// node_initialized_at is the persisted generation boundary, if any.
     node_initialized_at: Option<(i64, i64)>,
+    /// latest_recovered_revision is the newest merged older-lineage revision, if any.
+    latest_recovered_revision: Option<storedpb::RecoveredRevision>,
     /// recovery_watermark is the persisted older-lineage watermark, if any.
     recovery_watermark: Option<(i64, i64)>,
     /// recovery_mode_enabled reports whether outgoing publication is blocked.
@@ -842,12 +887,14 @@ fn peer_latest_known_content(peer: &storedpb::Peer) -> Option<storedpb::PeerCont
     })
 }
 
-/// Return whether persisted metadata indicates an existing contract relationship.
+/// Return whether persisted metadata indicates any storage relationship.
 fn peer_has_contract(peer: &storedpb::Peer) -> bool {
     peer.score_measured_at > 0
         || peer.score_seconds != 0
         || peer_latest_known_content(peer).is_some()
         || peer_latest_cached_content(peer).is_some()
+        || peer_requester_latest_known_content(peer).is_some()
+        || peer_requester_latest_stored_content(peer).is_some()
 }
 
 /// Classify the currently cached bytes for one tracked peer.
@@ -868,6 +915,125 @@ fn peer_is_tracked_only(peer: &storedpb::Peer) -> bool {
     peer_latest_known_content(peer).is_some() && peer_latest_cached_content(peer).is_none()
 }
 
+/// Return the newest requester revision this peer claims it can still return.
+fn peer_requester_latest_stored_content(peer: &storedpb::Peer) -> Option<storedpb::PeerContent> {
+    peer.requester_latest_stored_content.clone()
+}
+
+/// Return the newest requester revision this peer claims to know about.
+fn peer_requester_latest_known_content(peer: &storedpb::Peer) -> Option<storedpb::PeerContent> {
+    peer.requester_latest_known_content.clone()
+}
+
+/// Compute one weighted-random selection score for a publication candidate.
+fn publication_candidate_weight(candidate: &PublicationCandidate, now_secs: i64) -> u64 {
+    let mut weight = PEER_SELECTION_BASE_WEIGHT;
+    if candidate.pinned_by_us {
+        weight = weight.saturating_add(PEER_SELECTION_PINNED_BY_US_BONUS);
+    }
+    if candidate.pins_us {
+        weight = weight.saturating_add(PEER_SELECTION_PINS_US_BONUS);
+    }
+
+    let age_bonus = now_secs
+        .saturating_sub(candidate.first_seen_at.0)
+        .max(0)
+        .checked_div(PEER_SELECTION_AGE_STEP_SECS)
+        .unwrap_or(0);
+    let age_bonus = u64::try_from(age_bonus)
+        .unwrap_or(u64::MAX)
+        .min(PEER_SELECTION_MAX_AGE_BONUS);
+    weight = weight.saturating_add(age_bonus);
+
+    let successes = u64::try_from(candidate.successful_calls.max(0)).unwrap_or(u64::MAX);
+    let failures = u64::try_from(candidate.failed_calls.max(0)).unwrap_or(u64::MAX);
+    let availability_denominator = successes.saturating_add(failures).saturating_add(2);
+    let availability_bonus = successes
+        .saturating_add(1)
+        .saturating_mul(PEER_SELECTION_AVAILABILITY_BONUS_SCALE)
+        .checked_div(availability_denominator.max(1))
+        .unwrap_or(0);
+    weight.saturating_add(availability_bonus)
+}
+
+/// Sample one weighted publication candidate index.
+fn sample_weighted_publication_candidate<R: Rng + ?Sized>(
+    candidates: &[PublicationCandidate],
+    now_secs: i64,
+    rng: &mut R,
+) -> Option<usize> {
+    let weights = candidates
+        .iter()
+        .map(|candidate| publication_candidate_weight(candidate, now_secs))
+        .collect::<Vec<_>>();
+    let total_weight = weights.iter().copied().fold(0u64, u64::saturating_add);
+    if total_weight == 0 {
+        return None;
+    }
+
+    let mut draw = rng.gen_range(0..total_weight);
+    for (index, weight) in weights.into_iter().enumerate() {
+        if draw < weight {
+            return Some(index);
+        }
+        draw = draw.saturating_sub(weight);
+    }
+    Some(candidates.len().saturating_sub(1))
+}
+
+/// Select publication candidates without replacement under the weighting policy.
+fn choose_publication_candidates<R: Rng + ?Sized>(
+    candidates: &[PublicationCandidate],
+    missing_replicas: usize,
+    now_secs: i64,
+    rng: &mut R,
+) -> Vec<String> {
+    fn draw_from_pool<R: Rng + ?Sized>(
+        pool: &mut Vec<PublicationCandidate>,
+        selected: &mut Vec<String>,
+        remaining: &mut usize,
+        now_secs: i64,
+        rng: &mut R,
+    ) {
+        while *remaining > 0 && !pool.is_empty() {
+            let Some(index) = sample_weighted_publication_candidate(pool, now_secs, rng) else {
+                break;
+            };
+            let candidate = pool.remove(index);
+            selected.push(candidate.peer_onion);
+            *remaining = remaining.saturating_sub(1);
+        }
+    }
+
+    let mut selected = Vec::new();
+    let mut remaining = missing_replicas;
+    let mut reciprocal = candidates
+        .iter()
+        .filter(|candidate| candidate.stores_peer_data)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !reciprocal.is_empty() {
+        draw_from_pool(
+            &mut reciprocal,
+            &mut selected,
+            &mut remaining,
+            now_secs,
+            rng,
+        );
+    }
+    if remaining == 0 {
+        return selected;
+    }
+    let selected_set = selected.iter().cloned().collect::<BTreeSet<_>>();
+    let mut others = candidates
+        .iter()
+        .filter(|candidate| !selected_set.contains(&candidate.peer_onion))
+        .cloned()
+        .collect::<Vec<_>>();
+    draw_from_pool(&mut others, &mut selected, &mut remaining, now_secs, rng);
+    selected
+}
+
 /// Convert one internal storage protection class into its CLI proto enum.
 fn proto_peer_storage_protection(class: PeerStorageProtectionClass) -> i32 {
     match class {
@@ -875,6 +1041,26 @@ fn proto_peer_storage_protection(class: PeerStorageProtectionClass) -> i32 {
         PeerStorageProtectionClass::Pinned => clirpc::PeerStorageProtection::Pinned as i32,
         PeerStorageProtectionClass::Protected => clirpc::PeerStorageProtection::Protected as i32,
         PeerStorageProtectionClass::Disposable => clirpc::PeerStorageProtection::Disposable as i32,
+    }
+}
+
+/// Translate one peer-publication storage outcome into the local CLI enum.
+fn proto_publication_storage_result(
+    result: bbrpc::SetContentRevisionStorageResult,
+) -> clirpc::PublicationStorageResult {
+    match result {
+        bbrpc::SetContentRevisionStorageResult::Unknown => {
+            clirpc::PublicationStorageResult::Unknown
+        }
+        bbrpc::SetContentRevisionStorageResult::MirroredBytesCached => {
+            clirpc::PublicationStorageResult::MirroredBytesCached
+        }
+        bbrpc::SetContentRevisionStorageResult::SidecarOnly => {
+            clirpc::PublicationStorageResult::SidecarOnly
+        }
+        bbrpc::SetContentRevisionStorageResult::RequesterContentCleared => {
+            clirpc::PublicationStorageResult::RequesterContentCleared
+        }
     }
 }
 
@@ -1012,7 +1198,7 @@ fn peer_inventory_status(peer: Option<&storedpb::Peer>, connected: bool) -> Peer
 
 /// Return the group priority used when listing peers.
 fn peer_inventory_group_rank(entry: &PeerInventoryEntry) -> u8 {
-    if entry.has_contract {
+    if entry.has_storage {
         0
     } else if entry.status != PeerInventoryStatus::Offline {
         1
@@ -1309,7 +1495,7 @@ impl Node {
         peer_public_key == &self.ed25519_keypair.public
     }
 
-    /// Return one clear error for self-peer contract attempts.
+    /// Return one clear error for self-peer storage attempts.
     fn self_peer_error(&self) -> Status {
         Status::failed_precondition("local node cannot act as its own peer")
     }
@@ -1666,6 +1852,7 @@ impl Node {
             )
             .await?;
         self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned)?;
+        self.record_requester_revision_observation(&peer_public_key, &revision)?;
         self.maybe_exchange_peers_with_client(peer_onion, client)
             .await?;
         if let Some(recoverable_revision) = self.recoverable_requester_revision(&revision)? {
@@ -1855,7 +2042,8 @@ impl Node {
             peer_public_key.as_bytes(),
             storedpb::PeerReachability::Online as i32,
             Some(now_secs),
-        )
+        )?;
+        self.with_store(|store| store.record_peer_call_outcome(peer_public_key.as_bytes(), true))
     }
 
     /// Persist a failed live transport interaction with one peer.
@@ -1876,7 +2064,8 @@ impl Node {
             peer_public_key.as_bytes(),
             storedpb::PeerReachability::Offline as i32,
             None,
-        )
+        )?;
+        self.with_store(|store| store.record_peer_call_outcome(peer_public_key.as_bytes(), false))
     }
 
     /// Classify one peer-operation failure for local operator-facing status.
@@ -2235,6 +2424,38 @@ impl Node {
         })
     }
 
+    /// Persist the latest requester revision view reported by a live peer.
+    fn record_requester_revision_observation(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+        revision: &bbrpc::GetContentRevisionResponse,
+    ) -> Result<(), Status> {
+        if !self.is_tracked_peer(peer_public_key)? {
+            return Ok(());
+        }
+        self.with_store(|store| {
+            store.set_peer_requester_revision_state(
+                peer_public_key.as_bytes(),
+                revision
+                    .requester_latest_stored_content
+                    .as_ref()
+                    .map(|content| content.content_id.as_slice()),
+                revision
+                    .requester_latest_stored_content
+                    .as_ref()
+                    .map(|content| content.content_length),
+                revision
+                    .requester_latest_known_content
+                    .as_ref()
+                    .map(|content| content.content_id.as_slice()),
+                revision
+                    .requester_latest_known_content
+                    .as_ref()
+                    .map(|content| content.content_length),
+            )
+        })
+    }
+
     /// Connect to another peer using the configured outbound transport.
     async fn connect_peer_client(&self, peer_onion: &str) -> Result<transport::PeerClient, Status> {
         self.connect_peer_client_with_timeout(peer_onion, transport::PEER_CONNECT_TIMEOUT)
@@ -2449,6 +2670,7 @@ impl Node {
                 )
                 .await?;
             self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned)?;
+            self.record_requester_revision_observation(&peer_public_key, &revision)?;
             self.maybe_exchange_peers_with_client(peer_onion, &mut client)
                 .await?;
             Ok(revision)
@@ -2687,6 +2909,7 @@ impl Node {
         if new_content_length > max_peer_content_bytes_i64() {
             return Err(Status::resource_exhausted("peer content is too large"));
         }
+        let incoming_allocation = max_peer_content_bytes_i64();
 
         let current_score = self.peer_score_state(peer_public_key)?.0;
         let pinned_by_us = self.is_peer_pinned_by_us(peer_public_key)?;
@@ -2747,7 +2970,7 @@ impl Node {
         // Positive-score peers reserve storage first; if reserved content alone
         // would exceed the budget, we can only track the latest revision.
         if incoming_class == StorageClass::Reserved
-            && protected_used.saturating_add(new_content_length) > budget
+            && protected_used.saturating_add(incoming_allocation) > budget
         {
             return Ok(StorageAdmission::TrackOnly);
         }
@@ -2763,14 +2986,14 @@ impl Node {
 
         let mut evict_content_ids = Vec::new();
         for (content_id, blob_len, _, _) in evictable {
-            if total_used.saturating_add(new_content_length) <= budget {
+            if total_used.saturating_add(incoming_allocation) <= budget {
                 break;
             }
             total_used = total_used.saturating_sub(blob_len);
             evict_content_ids.push(content_id);
         }
 
-        if total_used.saturating_add(new_content_length) > budget {
+        if total_used.saturating_add(incoming_allocation) > budget {
             return Ok(StorageAdmission::TrackOnly);
         }
 
@@ -2807,7 +3030,7 @@ impl Node {
         peer_onion: &str,
         peer_public_key: &ed25519_dalek::PublicKey,
         content_info: Option<&bbrpc::ContentInfo>,
-    ) -> Result<(), Status> {
+    ) -> Result<SyncPeerContentResult, Status> {
         if !self.is_tracked_peer(peer_public_key)? {
             return Err(Status::resource_exhausted(format!(
                 "peer capacity reached; refusing to mirror {peer_onion}"
@@ -2823,10 +3046,10 @@ impl Node {
                 validate_peer_content_info(content_info)?;
                 let content_id = content_id_hex(&content_info.content_id);
                 let mirrored_state = self.mirrored_blob_state(&content_info.content_id)?;
-                let mut storage_error = None;
                 let current_score = self.peer_score_state(peer_public_key)?.0;
                 let pinned_by_us = self.is_peer_pinned_by_us(peer_public_key)?;
                 let next_cached_content;
+                let storage_result;
 
                 // Refresh the mirrored blob whenever it is missing or locally
                 // corrupted so the peer cache never depends on stale bytes.
@@ -2877,6 +3100,7 @@ impl Node {
                                 content_id: content_info.content_id.clone(),
                                 content_length: content_info.content_length,
                             });
+                            storage_result = SyncPeerContentResult::MirroredBytesCached;
                         }
                         StorageAdmission::TrackOnly => {
                             next_cached_content =
@@ -2893,9 +3117,7 @@ impl Node {
                                 maximum_peer_content_accepted_bytes = self.maximum_peer_content_accepted_bytes()?,
                                 "tracked peer revision without caching the blob because the storage budget was exhausted"
                             );
-                            storage_error = Some(Status::resource_exhausted(
-                                "peer storage budget was exhausted",
-                            ));
+                            storage_result = SyncPeerContentResult::SidecarOnly;
                         }
                     }
                 } else {
@@ -2903,6 +3125,7 @@ impl Node {
                         content_id: content_info.content_id.clone(),
                         content_length: content_info.content_length,
                     });
+                    storage_result = SyncPeerContentResult::MirroredBytesCached;
                 }
                 self.with_store(|store| {
                     store.set_peer_content_state(
@@ -2925,9 +3148,7 @@ impl Node {
                         self.remove_unused_foreign_blob(&previous_cached_content_id)?;
                     }
                 }
-                if let Some(error) = storage_error {
-                    return Err(error);
-                }
+                return Ok(storage_result);
             }
             None => {
                 let previous_content_id_hex = previous_cached_content_id
@@ -2943,10 +3164,9 @@ impl Node {
                     previous_content_id = %previous_content_id_hex,
                     "cleared mirrored peer content"
                 );
+                return Ok(SyncPeerContentResult::RequesterContentCleared);
             }
         }
-
-        Ok(())
     }
 
     /// Return the persisted score state for a peer.
@@ -2981,7 +3201,7 @@ impl Node {
     }
 
     /// Persist which current local revision this peer most recently passed a
-    /// contract check for.
+    /// verification for.
     fn record_verified_our_content(
         &self,
         peer_public_key: &ed25519_dalek::PublicKey,
@@ -3327,6 +3547,7 @@ impl Node {
                 file_count: store.file_count(),
                 total_file_bytes: store.total_file_bytes(),
                 node_initialized_at: store.node_initialized_at(),
+                latest_recovered_revision: store.latest_recovered_revision(),
                 recovery_watermark: store.recovery_watermark(),
                 recovery_mode_enabled: store.recovery_mode_enabled(),
             }))
@@ -3376,7 +3597,7 @@ impl Node {
                 status,
                 pinned_by_us: tracked_peer.map(|peer| peer.pinned_by_us).unwrap_or(false),
                 pins_us: tracked_peer.map(|peer| peer.pins_us).unwrap_or(false),
-                has_contract: tracked_peer.is_some_and(peer_has_contract),
+                has_storage: tracked_peer.is_some_and(peer_has_contract),
                 score_seconds: tracked_peer
                     .map(|peer| peer.score_seconds)
                     .unwrap_or_default(),
@@ -3460,16 +3681,16 @@ impl Node {
                 .count(),
         )
         .unwrap_or(i64::MAX);
-        let working_contract_peers = snapshot
+        let mutual_storage_peers = snapshot
             .tracked_peers
             .iter()
             .filter(|peer| peer_has_contract(peer))
             .collect::<Vec<_>>();
-        let working_contract_scores = working_contract_peers
+        let mutual_storage_scores = mutual_storage_peers
             .iter()
             .map(|peer| peer.score_seconds)
             .collect::<Vec<_>>();
-        let working_contracts = i64::try_from(working_contract_scores.len()).unwrap_or(i64::MAX);
+        let mutual_storage_peers = i64::try_from(mutual_storage_scores.len()).unwrap_or(i64::MAX);
         let current_content_id = snapshot
             .current_content
             .as_ref()
@@ -3478,7 +3699,7 @@ impl Node {
             snapshot
                 .tracked_peers
                 .iter()
-                .filter(|peer| !peer.our_content_last_verified_content_id.is_empty())
+                .filter(|peer| peer.requester_latest_stored_content.is_some())
                 .count(),
         )
         .unwrap_or(i64::MAX);
@@ -3490,7 +3711,8 @@ impl Node {
                         .tracked_peers
                         .iter()
                         .filter(|peer| {
-                            peer.our_content_last_verified_content_id == *current_content_id
+                            peer_requester_latest_stored_content(peer)
+                                .is_some_and(|content| content.content_id == *current_content_id)
                         })
                         .count(),
                 )
@@ -3498,7 +3720,24 @@ impl Node {
             })
             .unwrap_or(0);
         let min_replicas_target = self.storage_config.lock().unwrap().min_replicas.max(0);
-        let desired_synced_replicas = working_contracts.max(min_replicas_target);
+        let predicted_fresh_replicas_now = current_content_id
+            .as_ref()
+            .map(|current_content_id| {
+                i64::try_from(
+                    snapshot
+                        .tracked_peers
+                        .iter()
+                        .filter(|peer| {
+                            peer.reachability == storedpb::PeerReachability::Online as i32
+                                && peer_requester_latest_stored_content(peer).is_some_and(
+                                    |content| content.content_id == *current_content_id,
+                                )
+                        })
+                        .count(),
+                )
+                .unwrap_or(i64::MAX)
+            })
+            .unwrap_or(0);
         let publish_blocked_reason = self.publish_blocked_reason()?.unwrap_or_default();
         let predicted_replica_horizon = current_content_id
             .as_ref()
@@ -3506,7 +3745,11 @@ impl Node {
                 snapshot
                     .tracked_peers
                     .iter()
-                    .filter(|peer| peer.our_content_last_verified_content_id == *current_content_id)
+                    .filter(|peer| {
+                        peer.reachability == storedpb::PeerReachability::Online as i32
+                            && peer_requester_latest_stored_content(peer)
+                                .is_some_and(|content| content.content_id == *current_content_id)
+                    })
                     .map(|peer| {
                         if peer.pins_us {
                             None
@@ -3517,6 +3760,32 @@ impl Node {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let latest_recovered_revision = snapshot
+            .recovery_mode_enabled
+            .then(|| snapshot.latest_recovered_revision.clone())
+            .flatten();
+        let newer_known_recovery_hint = if snapshot.recovery_mode_enabled {
+            snapshot
+                .tracked_peers
+                .iter()
+                .filter_map(|peer| {
+                    let known = peer_requester_latest_known_content(peer)?;
+                    let known_content = rpc_content_info(known.clone());
+                    let timestamp = self
+                        .requester_revision_in_recovery_window(&known_content)
+                        .ok()
+                        .flatten()?;
+                    let stored_matches_known = peer_requester_latest_stored_content(peer)
+                        .is_some_and(|stored| stored.content_id == known.content_id);
+                    (!stored_matches_known).then_some((known, timestamp))
+                })
+                .max_by_key(|(content, _)| {
+                    self.revision_key(&content.content_id)
+                        .unwrap_or((0, 0, 0, 0))
+                })
+        } else {
+            None
+        };
 
         Ok(Some(clirpc::StateLocalSummary {
             content: Some(clirpc::StateContentSummary {
@@ -3537,21 +3806,20 @@ impl Node {
                     })
                     .unwrap_or_default(),
                 has_pending_update: snapshot.current_content.is_some()
-                    && storing_latest_our_data < desired_synced_replicas,
+                    && predicted_fresh_replicas_now < min_replicas_target,
             }),
             peers: Some(clirpc::StatePeerSummary {
                 total_known,
                 connected,
                 storing_our_data,
                 storing_latest_our_data,
-                working_contracts,
-                mean_working_contract_score_seconds: mean_score_seconds(&working_contract_scores),
+                mutual_storage_peers,
+                mean_mutual_storage_score_seconds: mean_score_seconds(&mutual_storage_scores),
                 mirrored_peers,
                 mirrored_total_size_bytes,
             }),
             durability: Some(clirpc::StateDurabilitySummary {
-                predicted_fresh_replicas_now: i64::try_from(predicted_replica_horizon.len())
-                    .unwrap_or(i64::MAX),
+                predicted_fresh_replicas_now,
                 predicted_min_replicas_target: min_replicas_target,
                 predicted_replica_horizon: replica_horizon_points(&predicted_replica_horizon),
             }),
@@ -3574,6 +3842,30 @@ impl Node {
                     .map(|timestamp| i32::try_from(timestamp.1).unwrap_or(i32::MAX))
                     .unwrap_or_default(),
                 publish_blocked_reason,
+                latest_recovered_content_id: latest_recovered_revision
+                    .as_ref()
+                    .map(|revision| revision.content_id.clone())
+                    .unwrap_or_default(),
+                latest_recovered_at: latest_recovered_revision
+                    .as_ref()
+                    .map(|revision| revision.created_at)
+                    .unwrap_or_default(),
+                latest_recovered_at_ns: latest_recovered_revision
+                    .as_ref()
+                    .map(|revision| i32::try_from(revision.created_at_ns).unwrap_or(i32::MAX))
+                    .unwrap_or_default(),
+                newer_known_content_id: newer_known_recovery_hint
+                    .as_ref()
+                    .map(|(content, _)| content.content_id.clone())
+                    .unwrap_or_default(),
+                newer_known_at: newer_known_recovery_hint
+                    .as_ref()
+                    .map(|(_, timestamp)| timestamp.0)
+                    .unwrap_or_default(),
+                newer_known_at_ns: newer_known_recovery_hint
+                    .as_ref()
+                    .map(|(_, timestamp)| i32::try_from(timestamp.1).unwrap_or(i32::MAX))
+                    .unwrap_or_default(),
             }),
         }))
     }
@@ -3607,7 +3899,7 @@ impl Node {
                     status: proto_peer_status(peer.status),
                     pinned_by_us: peer.pinned_by_us,
                     pins_us: peer.pins_us,
-                    has_contract: peer.has_contract,
+                    has_storage: peer.has_storage,
                     score_seconds: peer.score_seconds,
                     score_measured_at: peer.score_measured_at,
                     stored_content_bytes: peer.stored_content_bytes,
@@ -3627,7 +3919,7 @@ impl Node {
         })
     }
 
-    /// Build a live contract snapshot for the configured peers.
+    /// Build a live peer-storage snapshot for the configured peers.
     pub async fn get_contracts_response(&self) -> Result<clirpc::GetContractsResponse, Status> {
         let mut contracts = Vec::new();
 
@@ -3643,7 +3935,7 @@ impl Node {
             let mut our_content_synced = false;
             let mut our_remaining_seconds = 0;
 
-            // Probe the peer live so the contract view reflects reachability
+            // Probe the peer live so the peer-storage view reflects reachability
             // and can opportunistically refresh mirrored peer blobs.
             if let Ok(mut client) = self.connect_peer_client(&peer_onion).await {
                 if let Ok(revision) = self
@@ -3657,6 +3949,7 @@ impl Node {
                     online = true;
                     let _ =
                         self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned);
+                    let _ = self.record_requester_revision_observation(&peer_public_key, &revision);
                     our_remaining_seconds = revision.requester_remaining_seconds;
                     our_content_synced = self.our_content_synced_with_peer(
                         revision.requester_latest_stored_content.as_ref(),
@@ -3831,83 +4124,66 @@ impl Node {
                 Some((peer_onion, contract))
             })
             .collect::<BTreeMap<_, _>>();
-
-        let fresh_replica_peers = current_content
-            .as_ref()
-            .map(|current_content| {
-                contract_by_onion
-                    .values()
-                    .filter(|contract| contract.online && contract.our_content_synced)
-                    .filter_map(|contract| {
-                        let peer_onion = contract.peer.as_ref()?.onion_service_id.clone();
-                        let tracked_peer = tracked_by_onion.get(&peer_onion)?;
-                        (tracked_peer.our_content_last_verified_content_id
-                            == current_content.content_id)
-                            .then_some(peer_onion)
-                    })
-                    .collect::<BTreeSet<_>>()
+        let fresh_replica_peers = contract_by_onion
+            .iter()
+            .filter_map(|(peer_onion, contract)| {
+                (contract.online && contract.our_content_synced).then_some(peer_onion.clone())
             })
-            .unwrap_or_default();
+            .collect::<BTreeSet<_>>();
         let fresh_replica_count = i64::try_from(fresh_replica_peers.len()).unwrap_or(i64::MAX);
         let min_replicas_target = self.storage_config.lock().unwrap().min_replicas.max(0);
         let missing_fresh_replicas = (min_replicas_target - fresh_replica_count).max(0);
-        let mut remaining_deficit = usize::try_from(missing_fresh_replicas).unwrap_or(usize::MAX);
+        let missing_fresh_replicas = usize::try_from(missing_fresh_replicas).unwrap_or(usize::MAX);
         let publication_allowed = self.publish_blocked_reason()?.is_none();
-
         let mut action_by_onion = BTreeMap::<String, BackgroundMaintenancePeerAction>::new();
-
-        for peer in &inventory {
-            let Some(contract) = contract_by_onion.get(&peer.onion_service_id) else {
-                continue;
-            };
-            if current_content.is_none() {
-                break;
-            }
-            if !contract.online || fresh_replica_peers.contains(&peer.onion_service_id) {
-                continue;
-            }
-            if contract.our_content_synced && remaining_deficit > 0 {
-                action_by_onion.insert(
-                    peer.onion_service_id.clone(),
-                    BackgroundMaintenancePeerAction {
-                        peer_onion: peer.onion_service_id.clone(),
-                        propose: false,
-                        check: true,
-                    },
-                );
-                remaining_deficit = remaining_deficit.saturating_sub(1);
-                continue;
-            }
+        for peer_onion in &fresh_replica_peers {
+            action_by_onion.insert(
+                peer_onion.clone(),
+                BackgroundMaintenancePeerAction {
+                    peer_onion: peer_onion.clone(),
+                    propose: false,
+                    check: true,
+                },
+            );
         }
 
-        for peer in &inventory {
-            let Some(contract) = contract_by_onion.get(&peer.onion_service_id) else {
-                continue;
-            };
-            if !contract.online {
-                continue;
-            }
-
-            let contributes_fresh_replica = fresh_replica_peers.contains(&peer.onion_service_id);
-            let needs_unsynced_fill = publication_allowed
-                && current_content.is_some()
-                && !contributes_fresh_replica
-                && !contract.our_content_synced
-                && remaining_deficit > 0;
-
-            if contributes_fresh_replica || needs_unsynced_fill {
-                let action = action_by_onion
-                    .entry(peer.onion_service_id.clone())
-                    .or_insert_with(|| BackgroundMaintenancePeerAction {
+        if publication_allowed && current_content.is_some() && missing_fresh_replicas > 0 {
+            let now_secs = i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX);
+            let candidates = inventory
+                .iter()
+                .filter_map(|peer| {
+                    let contract = contract_by_onion.get(&peer.onion_service_id)?;
+                    let tracked_peer = tracked_by_onion.get(&peer.onion_service_id)?;
+                    if !contract.online || contract.our_content_synced {
+                        return None;
+                    }
+                    Some(PublicationCandidate {
                         peer_onion: peer.onion_service_id.clone(),
+                        pinned_by_us: tracked_peer.pinned_by_us,
+                        pins_us: tracked_peer.pins_us,
+                        first_seen_at: (tracked_peer.first_seen_at, tracked_peer.first_seen_at_ns),
+                        successful_calls: tracked_peer.successful_calls,
+                        failed_calls: tracked_peer.failed_calls,
+                        stores_peer_data: peer.stored_content_bytes > 0,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut rng = rand::thread_rng();
+            for peer_onion in choose_publication_candidates(
+                &candidates,
+                missing_fresh_replicas,
+                now_secs,
+                &mut rng,
+            ) {
+                let action = action_by_onion
+                    .entry(peer_onion.clone())
+                    .or_insert_with(|| BackgroundMaintenancePeerAction {
+                        peer_onion: peer_onion.clone(),
                         propose: false,
                         check: false,
                     });
-                action.propose |= needs_unsynced_fill;
-                action.check |= contributes_fresh_replica || needs_unsynced_fill;
-                if needs_unsynced_fill {
-                    remaining_deficit = remaining_deficit.saturating_sub(1);
-                }
+                action.propose = true;
+                action.check = true;
             }
         }
 
@@ -3957,9 +4233,10 @@ impl Node {
             their_content_downloaded_bytes: 0,
             our_content_length: 0,
             our_content_uploaded_bytes: 0,
+            storage_result: clirpc::PublicationStorageResult::Unknown as i32,
         }];
 
-        // Query the peer's live contract state before deciding what needs to
+        // Query the peer's live storage state before deciding what needs to
         // be synchronized in either direction.
         let policy = transport::PeerRetryPolicy::for_operation(transport::PeerOperation::Proposal);
         let mut client = self
@@ -3973,6 +4250,7 @@ impl Node {
                 client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
             )
             .await?;
+        self.record_requester_revision_observation(&peer_public_key, &revision)?;
         if let Some(recoverable_revision) = self.recoverable_requester_revision(&revision)? {
             info!(
                 peer = %peer_onion,
@@ -4011,6 +4289,7 @@ impl Node {
             their_content_downloaded_bytes: downloaded_their_content,
             our_content_length: 0,
             our_content_uploaded_bytes: 0,
+            storage_result: clirpc::PublicationStorageResult::Unknown as i32,
         });
 
         // Upload our current revision only when the peer does not already hold
@@ -4029,6 +4308,7 @@ impl Node {
             .as_ref()
             .map(|content_info| content_info.content_id.clone());
         let mut retried_after_refresh = false;
+        let mut publication_storage_result = clirpc::PublicationStorageResult::Unknown;
         while peer_has_our_content != desired_content_id {
             let set_request = bbrpc::SetContentRevisionRequest {
                 previous_requester_content: revision.requester_latest_known_content.clone(),
@@ -4043,7 +4323,11 @@ impl Node {
                 )
                 .await
             {
-                Ok(_) => {
+                Ok(response) => {
+                    publication_storage_result = proto_publication_storage_result(
+                        bbrpc::SetContentRevisionStorageResult::try_from(response.storage_result)
+                            .unwrap_or(bbrpc::SetContentRevisionStorageResult::Unknown),
+                    );
                     if our_content.is_none() {
                         let previous_content_id = peer_has_our_content
                             .as_ref()
@@ -4053,6 +4337,14 @@ impl Node {
                             peer = %peer_onion,
                             previous_content_id = %previous_content_id,
                             "asked peer to clear our mirrored content because we currently have no local content"
+                        );
+                    } else if publication_storage_result
+                        == clirpc::PublicationStorageResult::SidecarOnly
+                    {
+                        info!(
+                            peer = %peer_onion,
+                            our_content_length,
+                            "peer accepted our sidecar update but did not cache mirrored bytes"
                         );
                     }
                     uploaded_our_content = our_content_length;
@@ -4080,6 +4372,7 @@ impl Node {
                             client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
                         )
                         .await?;
+                    self.record_requester_revision_observation(&peer_public_key, &revision)?;
                     if let Some(recoverable_revision) =
                         self.recoverable_requester_revision(&revision)?
                     {
@@ -4130,6 +4423,7 @@ impl Node {
             their_content_downloaded_bytes: downloaded_their_content,
             our_content_length,
             our_content_uploaded_bytes: uploaded_our_content,
+            storage_result: publication_storage_result as i32,
         });
         updates.push(clirpc::ProposeContractUpdate {
             state: clirpc::ContractState::Completed as i32,
@@ -4138,6 +4432,7 @@ impl Node {
             their_content_downloaded_bytes: downloaded_their_content,
             our_content_length,
             our_content_uploaded_bytes: uploaded_our_content,
+            storage_result: publication_storage_result as i32,
         });
 
         info!(
@@ -4146,13 +4441,15 @@ impl Node {
             their_content_downloaded_bytes = downloaded_their_content,
             our_content_length,
             our_content_uploaded_bytes = uploaded_our_content,
-            "peer contract proposal completed"
+            peer_storage = %publication_storage_result.as_str_name(),
+            "peer publication completed"
         );
 
         Ok(updates)
     }
 
-    /// Verify a peer contract, update the peer score, and return the streamed
+    /// Verify one peer's stored copy of our content, update the peer score,
+    /// and return the streamed
     /// progress updates that describe the check.
     pub async fn check_contract_updates(
         &self,
@@ -4165,7 +4462,7 @@ impl Node {
         .await
     }
 
-    /// Verify one peer contract under the provided retry and timeout policy.
+    /// Verify one peer under the provided retry and timeout policy.
     async fn check_contract_updates_with_policy(
         &self,
         peer_onion: &str,
@@ -4202,7 +4499,7 @@ impl Node {
                     new_score_seconds = new_score.unwrap_or_default(),
                     tracked = peer_was_tracked,
                     our_content_length,
-                    "peer contract check failed after retries"
+                    "peer verification failed after retries"
                 );
                 Ok(vec![
                     clirpc::CheckContractUpdate {
@@ -4265,6 +4562,7 @@ impl Node {
             .await?;
         if peer_was_tracked {
             self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned)?;
+            self.record_requester_revision_observation(&peer_public_key, &revision)?;
         }
 
         updates.push(clirpc::CheckContractUpdate {
@@ -4297,7 +4595,7 @@ impl Node {
                 success = true,
                 new_score_seconds = new_score.unwrap_or_default(),
                 tracked = peer_was_tracked,
-                "peer contract check completed without local content"
+                "peer verification completed without local content"
             );
             return Ok(updates);
         };
@@ -4330,7 +4628,7 @@ impl Node {
                 new_score_seconds = new_score.unwrap_or_default(),
                 our_content_length = our_content.content_length,
                 tracked = peer_was_tracked,
-                "peer contract check found our revision missing"
+                "peer verification found our revision missing"
             );
             return Ok(updates);
         }
@@ -4397,7 +4695,7 @@ impl Node {
                 section_offset,
                 section_length,
                 tracked = peer_was_tracked,
-                "peer contract check completed"
+                "peer verification completed"
             );
         } else {
             warn!(
@@ -4408,7 +4706,7 @@ impl Node {
                 section_offset,
                 section_length,
                 tracked = peer_was_tracked,
-                "peer contract check returned invalid content"
+                "peer verification returned invalid content"
             );
         }
 
@@ -4665,6 +4963,23 @@ impl Node {
                 .cloned(),
             ..Default::default()
         };
+        let newest_recoverable_key = recoverable_candidates
+            .values()
+            .map(|candidate| candidate.key)
+            .max();
+        if let Some(newest_known_only) = older_lineage_candidates
+            .values()
+            .filter(|candidate| Some(candidate.key) > newest_recoverable_key)
+            .max_by_key(|candidate| candidate.key)
+        {
+            info!(
+                content_id = %content_id_hex(&newest_known_only.content_id),
+                timestamp_secs = newest_known_only.key.1,
+                timestamp_nanos = newest_known_only.key.2,
+                peer_count = newest_known_only.peers.len(),
+                "recovery found a newer requester revision that peers know about but do not currently store"
+            );
+        }
         let mut applicable_candidates = recoverable_candidates.clone();
         for (content_id, candidate) in current_restore_candidates {
             applicable_candidates.entry(content_id).or_insert(candidate);
@@ -4887,7 +5202,7 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
     type GetFileStreamStream =
         Pin<Box<dyn Stream<Item = Result<clirpc::GetFileChunk, tonic::Status>> + Send + 'static>>;
 
-    /// ProposeContractStream is the streaming response for contract proposals.
+    /// ProposeContractStream is the streaming response for peer publication.
     type ProposeContractStream = Pin<
         Box<
             dyn Stream<Item = Result<clirpc::ProposeContractUpdate, tonic::Status>>
@@ -4896,7 +5211,7 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
         >,
     >;
 
-    /// CheckContractStream is the streaming response for contract checks.
+    /// CheckContractStream is the streaming response for peer verification.
     type CheckContractStream = Pin<
         Box<dyn Stream<Item = Result<clirpc::CheckContractUpdate, tonic::Status>> + Send + 'static>,
     >;
@@ -5348,7 +5663,8 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
             ));
         }
 
-        self.node
+        let storage_result = self
+            .node
             .sync_peer_content_info(
                 &peer_identity.onion_address,
                 &peer_identity.public_key,
@@ -5356,7 +5672,19 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
             )
             .await?;
 
-        Ok(Response::new(bbrpc::SetContentRevisionResponse {}))
+        Ok(Response::new(bbrpc::SetContentRevisionResponse {
+            storage_result: match storage_result {
+                SyncPeerContentResult::MirroredBytesCached => {
+                    bbrpc::SetContentRevisionStorageResult::MirroredBytesCached as i32
+                }
+                SyncPeerContentResult::SidecarOnly => {
+                    bbrpc::SetContentRevisionStorageResult::SidecarOnly as i32
+                }
+                SyncPeerContentResult::RequesterContentCleared => {
+                    bbrpc::SetContentRevisionStorageResult::RequesterContentCleared as i32
+                }
+            },
+        }))
     }
 
     async fn download(
@@ -5695,7 +6023,7 @@ mod tests {
             &self,
             _request: Request<bbrpc::SetContentRevisionRequest>,
         ) -> std::result::Result<Response<bbrpc::SetContentRevisionResponse>, Status> {
-            Ok(Response::new(bbrpc::SetContentRevisionResponse {}))
+            Ok(Response::new(bbrpc::SetContentRevisionResponse::default()))
         }
 
         async fn download(
@@ -5886,7 +6214,7 @@ mod tests {
                 return Err(Status::unavailable("transient after apply"));
             }
 
-            Ok(Response::new(bbrpc::SetContentRevisionResponse {}))
+            Ok(Response::new(bbrpc::SetContentRevisionResponse::default()))
         }
 
         async fn download(
@@ -6299,7 +6627,7 @@ mod tests {
             &self,
             _request: Request<bbrpc::SetContentRevisionRequest>,
         ) -> std::result::Result<Response<bbrpc::SetContentRevisionResponse>, Status> {
-            Ok(Response::new(bbrpc::SetContentRevisionResponse {}))
+            Ok(Response::new(bbrpc::SetContentRevisionResponse::default()))
         }
 
         async fn download(
@@ -6385,7 +6713,7 @@ mod tests {
             &self,
             _request: Request<bbrpc::SetContentRevisionRequest>,
         ) -> std::result::Result<Response<bbrpc::SetContentRevisionResponse>, Status> {
-            Ok(Response::new(bbrpc::SetContentRevisionResponse {}))
+            Ok(Response::new(bbrpc::SetContentRevisionResponse::default()))
         }
 
         async fn download(
@@ -6587,6 +6915,8 @@ mod tests {
         assert_eq!(recovery.node_initialized_at_ns, 7);
         assert_eq!(recovery.recovery_watermark_at, 0);
         assert_eq!(recovery.recovery_watermark_at_ns, 0);
+        assert!(recovery.latest_recovered_content_id.is_empty());
+        assert!(recovery.newer_known_content_id.is_empty());
         assert_eq!(
             recovery.publish_blocked_reason,
             "recovery mode is enabled; run `bbcli init complete` before publishing"
@@ -6607,6 +6937,8 @@ mod tests {
         assert_eq!(recovery.recovery_watermark_at, 100);
         assert_eq!(recovery.recovery_watermark_at_ns, 7);
         assert!(recovery.publish_blocked_reason.is_empty());
+        assert!(recovery.latest_recovered_content_id.is_empty());
+        assert!(recovery.newer_known_content_id.is_empty());
         Ok(())
     }
 
@@ -6685,8 +7017,8 @@ mod tests {
         assert_eq!(peers.connected, 1);
         assert_eq!(peers.storing_our_data, 1);
         assert_eq!(peers.storing_latest_our_data, 1);
-        assert_eq!(peers.working_contracts, 1);
-        assert_eq!(peers.mean_working_contract_score_seconds, 3_600);
+        assert_eq!(peers.mutual_storage_peers, 1);
+        assert_eq!(peers.mean_mutual_storage_score_seconds, 3_600);
         assert_eq!(peers.mirrored_peers, 0);
         assert_eq!(peers.mirrored_total_size_bytes, 0);
 
@@ -6727,6 +7059,10 @@ mod tests {
         peer.set_peer_connector(connector.clone());
         owner.add_known_peer(peer.address())?;
         peer.add_known_peer(owner.address())?;
+        *owner.storage_config.lock().unwrap() = clirpc::StorageConfig {
+            allocated_storage_for_peers: 0,
+            min_replicas: 1,
+        };
 
         CliService::new(owner.clone())
             .set_file(tonic::Request::new(clirpc::SetFileRequest {
@@ -6773,6 +7109,91 @@ mod tests {
         assert_eq!(peers.storing_latest_our_data, 0);
         assert_eq!(durability.predicted_fresh_replicas_now, 0);
         assert!(durability.predicted_replica_horizon.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_state_reports_newer_known_recovery_hint() -> anyhow::Result<()> {
+        let owner_clock = Arc::new(ManualClock::new(Timestamp::new(200, 0).unwrap()));
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner = Arc::new(Node::with_local_storage_and_clock(
+            "state-recovery-hint-owner",
+            owner_filesystem,
+            owner_clock.clone(),
+        )?);
+
+        owner_clock.set(Timestamp::new(100, 0).unwrap());
+        CliService::new(owner.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "shared.txt".to_string(),
+                    data: b"older".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+        let older = owner
+            .current_content_info()?
+            .ok_or_else(|| anyhow::anyhow!("missing older content"))?;
+
+        owner_clock.set(Timestamp::new(110, 0).unwrap());
+        CliService::new(owner.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "shared.txt".to_string(),
+                    data: b"newer".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+        let newer = owner
+            .current_content_info()?
+            .ok_or_else(|| anyhow::anyhow!("missing newer content"))?;
+        let newer_revision = owner.with_store(|store| {
+            let revision = store.parse_content_id(&newer.content_id)?;
+            Ok(storedpb::RecoveredRevision {
+                content_id: newer.content_id.clone(),
+                created_at: i64::try_from(revision.created_at_secs).unwrap_or(i64::MAX),
+                created_at_ns: i64::from(revision.created_at_nanos),
+            })
+        })?;
+
+        owner_clock.set(Timestamp::new(200, 0).unwrap());
+        owner.initialize_lineage((200, 0), true)?;
+        owner.with_store(|store| {
+            store.set_peer_requester_revision_state(
+                b"peer-a",
+                Some(&older.content_id),
+                Some(older.content_length),
+                Some(&newer.content_id),
+                Some(newer.content_length),
+            )?;
+            store.record_recovered_revision(storedpb::RecoveredRevision {
+                content_id: older.content_id.clone(),
+                created_at: 100,
+                created_at_ns: 0,
+            })?;
+            Ok(())
+        })?;
+
+        let summary = owner
+            .local_state_summary()?
+            .ok_or_else(|| anyhow::anyhow!("missing local state summary"))?;
+        let recovery = summary
+            .recovery
+            .ok_or_else(|| anyhow::anyhow!("missing local recovery summary"))?;
+
+        assert_eq!(recovery.latest_recovered_content_id, older.content_id);
+        assert_eq!(recovery.latest_recovered_at, 100);
+        assert_eq!(recovery.latest_recovered_at_ns, 0);
+        assert_eq!(recovery.newer_known_content_id, newer.content_id);
+        assert_eq!(
+            (recovery.newer_known_at, recovery.newer_known_at_ns),
+            (
+                newer_revision.created_at,
+                i32::try_from(newer_revision.created_at_ns).unwrap_or(i32::MAX)
+            )
+        );
         Ok(())
     }
 
@@ -7088,6 +7509,12 @@ mod tests {
             pins_us: false,
             our_content_last_verified_content_id: Vec::new(),
             our_content_last_verified_at: 0,
+            first_seen_at: 0,
+            first_seen_at_ns: 0,
+            successful_calls: 0,
+            failed_calls: 0,
+            requester_latest_stored_content: None,
+            requester_latest_known_content: None,
         }
     }
 
@@ -8073,14 +8500,20 @@ mod tests {
             .await
             .ok_or_else(|| anyhow::anyhow!("missing delayed peer metadata timer"))?;
         assert_eq!(timer.duration, Duration::from_secs(60));
-        assert_eq!(counting.peer_state_writes(), writes_before_delayed_updates);
+        assert_eq!(
+            counting.peer_state_writes(),
+            writes_before_delayed_updates + 1
+        );
 
         clock.advance(Duration::from_secs(59));
         tokio::task::yield_now().await;
-        assert_eq!(counting.peer_state_writes(), writes_before_delayed_updates);
+        assert_eq!(
+            counting.peer_state_writes(),
+            writes_before_delayed_updates + 1
+        );
 
         clock.advance(Duration::from_secs(1));
-        wait_until(|| counting.peer_state_writes() == writes_before_delayed_updates + 1).await;
+        wait_until(|| counting.peer_state_writes() == writes_before_delayed_updates + 2).await;
 
         let reloaded = Node::with_local_storage_and_clock_and_flush_delay(
             "batched-peer-metadata-owner",
@@ -9420,7 +9853,7 @@ mod tests {
         )?);
 
         *local_node.storage_config.lock().unwrap() = clirpc::StorageConfig {
-            allocated_storage_for_peers: best_effort_content.content_length,
+            allocated_storage_for_peers: max_peer_content_bytes_i64(),
             min_replicas: 0,
         };
         let reserved_public_key = keys::public_key_from_onion_hostname(reserved_node.address())?;
@@ -9518,7 +9951,7 @@ mod tests {
         )?);
 
         *local_node.storage_config.lock().unwrap() = clirpc::StorageConfig {
-            allocated_storage_for_peers: best_effort_content.content_length,
+            allocated_storage_for_peers: max_peer_content_bytes_i64(),
             min_replicas: 0,
         };
 
@@ -9585,14 +10018,17 @@ mod tests {
             spawn_registered_p2p_server(local_node.clone(), connector.as_ref()).await?;
         let mut remote_to_local =
             connect_p2p_client(remote_node.clone(), local_node.clone(), connector.as_ref()).await?;
-        let error = remote_to_local
+        let response = remote_to_local
             .set_content_revision(bbrpc::SetContentRevisionRequest {
                 previous_requester_content: None,
                 requester_content: Some(remote_node.responder_content()?.unwrap()),
             })
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+            .await?
+            .into_inner();
+        assert_eq!(
+            response.storage_result,
+            bbrpc::SetContentRevisionStorageResult::SidecarOnly as i32
+        );
 
         let remote_content = remote_node.current_content_info()?.unwrap();
         assert_eq!(
@@ -9685,14 +10121,17 @@ mod tests {
 
         let mut remote_to_local =
             connect_p2p_client(remote_node.clone(), local_node.clone(), connector.as_ref()).await?;
-        let error = remote_to_local
+        let response = remote_to_local
             .set_content_revision(bbrpc::SetContentRevisionRequest {
                 previous_requester_content: Some(version_1.clone()),
                 requester_content: Some(version_2.clone()),
             })
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+            .await?
+            .into_inner();
+        assert_eq!(
+            response.storage_result,
+            bbrpc::SetContentRevisionStorageResult::SidecarOnly as i32
+        );
         assert!(cached_peer_blob(
             local_node.as_ref(),
             &version_1.content_id
@@ -9787,14 +10226,17 @@ mod tests {
 
         let mut remote_to_local =
             connect_p2p_client(remote_node.clone(), local_node.clone(), connector.as_ref()).await?;
-        let error = remote_to_local
+        let response = remote_to_local
             .set_content_revision(bbrpc::SetContentRevisionRequest {
                 previous_requester_content: Some(version_1.clone()),
                 requester_content: Some(version_2.clone()),
             })
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+            .await?
+            .into_inner();
+        assert_eq!(
+            response.storage_result,
+            bbrpc::SetContentRevisionStorageResult::SidecarOnly as i32
+        );
         assert!(cached_peer_blob(
             local_node.as_ref(),
             &version_1.content_id
@@ -9877,8 +10319,11 @@ mod tests {
         }
         local_node.pin_peer(pinned_node.address())?;
 
+        // Start with enough room for one admission-sized peer slot plus the
+        // small mirrored blobs created by this test. We tighten the budget
+        // later to force the tracked-only path explicitly.
         *local_node.storage_config.lock().unwrap() = clirpc::StorageConfig {
-            allocated_storage_for_peers: 1_000_000,
+            allocated_storage_for_peers: max_peer_content_bytes_i64().saturating_mul(2),
             min_replicas: 0,
         };
         CliService::new(local_node.clone())
@@ -10001,14 +10446,16 @@ mod tests {
             connector.as_ref(),
         )
         .await?;
-        let track_only_error = tracked_only_to_local
+        let track_only_response = tracked_only_to_local
             .set_content_revision(bbrpc::SetContentRevisionRequest {
                 previous_requester_content: None,
                 requester_content: Some(tracked_only_node.responder_content()?.unwrap()),
             })
-            .await
-            .unwrap_err();
-        assert_eq!(track_only_error.code(), tonic::Code::ResourceExhausted);
+            .await?;
+        assert_eq!(
+            track_only_response.into_inner().storage_result,
+            bbrpc::SetContentRevisionStorageResult::SidecarOnly as i32
+        );
 
         protected_server.abort();
         local_node.evict_cached_peer_client(protected_node.address());
@@ -10176,8 +10623,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn background_maintenance_plan_prefers_synced_unverified_replicas() -> anyhow::Result<()>
-    {
+    async fn background_maintenance_plan_counts_live_synced_replicas_without_verification(
+    ) -> anyhow::Result<()> {
         let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let owner = Arc::new(Node::with_local_storage(
             "maintenance-plan-owner",
@@ -10244,7 +10691,7 @@ mod tests {
             .await?;
 
         let plan = owner.background_maintenance_plan().await?;
-        assert_eq!(plan.fresh_replica_count, 1);
+        assert_eq!(plan.fresh_replica_count, 2);
         assert_eq!(plan.min_replicas_target, 2);
 
         let actions = plan
@@ -10264,8 +10711,8 @@ mod tests {
             actions.get(synced_unverified_peer.address()),
             Some(&BackgroundMaintenancePeerAction {
                 peer_onion: synced_unverified_peer.address().to_string(),
-                propose: false,
                 check: true,
+                propose: false,
             })
         );
         assert!(!actions.contains_key(unsynced_peer.address()));
@@ -10342,6 +10789,78 @@ mod tests {
         fresh_server.abort();
         owner_server.abort();
         Ok(())
+    }
+
+    #[test]
+    fn choose_publication_candidates_prioritizes_reciprocal_storage_first() {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let mut rng = StdRng::seed_from_u64(7);
+        let selected = choose_publication_candidates(
+            &[
+                PublicationCandidate {
+                    peer_onion: "reciprocal.onion".to_string(),
+                    pinned_by_us: false,
+                    pins_us: false,
+                    first_seen_at: (100, 0),
+                    successful_calls: 0,
+                    failed_calls: 0,
+                    stores_peer_data: true,
+                },
+                PublicationCandidate {
+                    peer_onion: "ordinary.onion".to_string(),
+                    pinned_by_us: true,
+                    pins_us: true,
+                    first_seen_at: (0, 0),
+                    successful_calls: 100,
+                    failed_calls: 0,
+                    stores_peer_data: false,
+                },
+            ],
+            1,
+            10_000,
+            &mut rng,
+        );
+
+        assert_eq!(selected, vec!["reciprocal.onion".to_string()]);
+    }
+
+    #[test]
+    fn choose_publication_candidates_biases_toward_pinned_older_available_peers() {
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let strong = PublicationCandidate {
+            peer_onion: "strong.onion".to_string(),
+            pinned_by_us: true,
+            pins_us: true,
+            first_seen_at: (0, 0),
+            successful_calls: 100,
+            failed_calls: 2,
+            stores_peer_data: false,
+        };
+        let weak = PublicationCandidate {
+            peer_onion: "weak.onion".to_string(),
+            pinned_by_us: false,
+            pins_us: false,
+            first_seen_at: (9_900, 0),
+            successful_calls: 0,
+            failed_calls: 8,
+            stores_peer_data: false,
+        };
+        let mut rng = StdRng::seed_from_u64(9);
+        let mut strong_wins = 0usize;
+        for _ in 0..256 {
+            let selected =
+                choose_publication_candidates(&[strong.clone(), weak.clone()], 1, 10_000, &mut rng);
+            if selected == vec!["strong.onion".to_string()] {
+                strong_wins = strong_wins.saturating_add(1);
+            }
+        }
+
+        assert!(
+            strong_wins > 200,
+            "strong peer won only {strong_wins} draws"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -141,6 +141,28 @@ message Peer {
     // our_content_last_verified_at is when the last successful verification of
     // our content on this peer completed.
     int64 our_content_last_verified_at = 14;
+
+    // first_seen_at is when this peer was first admitted into local tracked
+    // peer state.
+    int64 first_seen_at = 15;
+
+    // first_seen_at_ns is the nanosecond component of first_seen_at.
+    int64 first_seen_at_ns = 16;
+
+    // successful_calls counts successful authenticated outbound peer
+    // operations observed locally.
+    int64 successful_calls = 17;
+
+    // failed_calls counts failed outbound peer operations observed locally.
+    int64 failed_calls = 18;
+
+    // requester_latest_stored_content is the newest local-owner revision this
+    // peer most recently reported that it still caches and can return.
+    PeerContent requester_latest_stored_content = 19;
+
+    // requester_latest_known_content is the newest local-owner revision this
+    // peer most recently reported knowing about, even if it cannot return it.
+    PeerContent requester_latest_known_content = 20;
 }
 
 // RecoveredRevision records one authenticated older-lineage revision that was
