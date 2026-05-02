@@ -25,11 +25,9 @@ There are two mostly separate directions:
 Those two directions are independent. Mutual storage happens when both have
 happened, not when only one has happened.
 
-The system reaches that state in two ways:
-
-- manually, when an operator runs `bbcli peer publish <peer>`
-- automatically, when background maintenance decides more fresh replicas are
-  needed and selects a peer as a publication target
+The system reaches that state automatically, when background maintenance
+decides more fresh replicas are needed and selects a peer as a publication
+target.
 
 ## Step 0: a peer becomes known
 
@@ -117,10 +115,8 @@ This means reciprocal storage is preferred, but not mandatory.
 
 ## Step 3: our node publishes to a peer
 
-This path is used by:
-
-- `bbcli peer publish <peer>`
-- background maintenance when it selects a peer for publication
+This path is used by background maintenance when it selects a peer for
+publication.
 
 The local operation is `publish_to_peer_updates()`.
 
@@ -275,10 +271,8 @@ Mutual storage exists only when both are true:
 The second direction starts separately, when the other peer decides to publish
 its data to us.
 
-That can happen because:
-
-- its operator ran `bbcli peer publish <our-onion>`
-- its own maintenance loop needed more fresh replicas and selected us
+That can happen because its own maintenance loop needed more fresh replicas
+and selected us.
 
 When that peer calls `SetContentRevision` on us, we go through the same accept /
 reject path described above.

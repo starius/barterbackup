@@ -3959,7 +3959,9 @@ impl Node {
     }
 
     /// Build a live peer-storage snapshot for the configured peers.
-    pub async fn get_peer_storage_response(&self) -> Result<clirpc::GetPeerStorageResponse, Status> {
+    pub async fn get_peer_storage_response(
+        &self,
+    ) -> Result<clirpc::GetPeerStorageResponse, Status> {
         let mut storage_peers = Vec::new();
 
         for peer_onion in self.known_peers() {
@@ -4137,7 +4139,8 @@ impl Node {
             tracked_only_peers_count,
             offline_blocking_storage_bytes: storage_accounting.offline_blocking_bytes,
             reclaimable_peer_storage_bytes: storage_accounting.reclaimable_bytes,
-            replica_horizon: self.replica_horizon(&storage_peers.storage_peers, &tracked_by_onion)?,
+            replica_horizon: self
+                .replica_horizon(&storage_peers.storage_peers, &tracked_by_onion)?,
         })
     }
 
@@ -5244,16 +5247,16 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
 
     /// PublishToPeerStream is the streaming response for peer publication.
     type PublishToPeerStream = Pin<
-        Box<
-            dyn Stream<Item = Result<clirpc::PublishToPeerUpdate, tonic::Status>>
-                + Send
-                + 'static,
-        >,
+        Box<dyn Stream<Item = Result<clirpc::PublishToPeerUpdate, tonic::Status>> + Send + 'static>,
     >;
 
     /// VerifyPeerStorageStream is the streaming response for peer verification.
     type VerifyPeerStorageStream = Pin<
-        Box<dyn Stream<Item = Result<clirpc::VerifyPeerStorageUpdate, tonic::Status>> + Send + 'static>,
+        Box<
+            dyn Stream<Item = Result<clirpc::VerifyPeerStorageUpdate, tonic::Status>>
+                + Send
+                + 'static,
+        >,
     >;
 
     async fn state(
@@ -10811,7 +10814,9 @@ mod tests {
         let unsynced_server =
             spawn_registered_p2p_server(unsynced_peer.clone(), connector.as_ref()).await?;
         owner.publish_to_peer_updates(fresh_peer.address()).await?;
-        owner.verify_peer_storage_updates(fresh_peer.address()).await?;
+        owner
+            .verify_peer_storage_updates(fresh_peer.address())
+            .await?;
 
         let plan = owner.background_maintenance_plan().await?;
         assert_eq!(plan.fresh_replica_count, 1);
@@ -11076,7 +11081,10 @@ mod tests {
         let offline_peer = Node::new("untracked-offline-probe")?;
         let offline_public_key = keys::public_key_from_onion_hostname(offline_peer.address())?;
         let updates = requester_node
-            .verify_peer_storage_updates_with_policy(offline_peer.address(), test_check_retry_policy())
+            .verify_peer_storage_updates_with_policy(
+                offline_peer.address(),
+                test_check_retry_policy(),
+            )
             .await?;
 
         assert_eq!(updates.last().map(|update| update.success), Some(false));
@@ -11318,7 +11326,10 @@ mod tests {
 
         requester_clock.advance(Duration::from_secs(3_600));
         let updates = requester_node
-            .verify_peer_storage_updates_with_policy(peer_identity.address(), test_check_retry_policy())
+            .verify_peer_storage_updates_with_policy(
+                peer_identity.address(),
+                test_check_retry_policy(),
+            )
             .await?;
         assert_eq!(
             updates.last().map(|update| update.state),
@@ -11382,7 +11393,10 @@ mod tests {
 
         requester_clock.advance(Duration::from_secs(1_800));
         let updates = requester_node
-            .verify_peer_storage_updates_with_policy(peer_identity.address(), test_check_retry_policy())
+            .verify_peer_storage_updates_with_policy(
+                peer_identity.address(),
+                test_check_retry_policy(),
+            )
             .await?;
         assert_eq!(
             updates.last().map(|update| update.state),
@@ -11443,7 +11457,10 @@ mod tests {
 
         requester_clock.advance(Duration::from_secs(900));
         let updates = requester_node
-            .verify_peer_storage_updates_with_policy(peer_identity.address(), test_check_retry_policy())
+            .verify_peer_storage_updates_with_policy(
+                peer_identity.address(),
+                test_check_retry_policy(),
+            )
             .await?;
         assert_eq!(
             updates.last().map(|update| update.state),
@@ -11605,7 +11622,9 @@ mod tests {
         let (endpoint, server) = spawn_plain_peer_server(static_service).await?;
         connector.register_peer(peer_identity.address(), &endpoint);
 
-        let updates = node.verify_peer_storage_updates(peer_identity.address()).await?;
+        let updates = node
+            .verify_peer_storage_updates(peer_identity.address())
+            .await?;
         assert_eq!(
             updates.last().map(|update| update.state),
             Some(clirpc::PeerStorageOperationState::InvalidContentReturned as i32)

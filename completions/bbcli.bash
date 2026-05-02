@@ -19,9 +19,6 @@ _bbcli() {
             bbcli,config)
                 cmd="bbcli__subcmd__config"
                 ;;
-            bbcli,contract)
-                cmd="bbcli__subcmd__contract"
-                ;;
             bbcli,file)
                 cmd="bbcli__subcmd__file"
                 ;;
@@ -61,30 +58,6 @@ _bbcli() {
             bbcli__subcmd__config__subcmd__help,set)
                 cmd="bbcli__subcmd__config__subcmd__help__subcmd__set"
                 ;;
-            bbcli__subcmd__contract,check)
-                cmd="bbcli__subcmd__contract__subcmd__check"
-                ;;
-            bbcli__subcmd__contract,help)
-                cmd="bbcli__subcmd__contract__subcmd__help"
-                ;;
-            bbcli__subcmd__contract,list)
-                cmd="bbcli__subcmd__contract__subcmd__list"
-                ;;
-            bbcli__subcmd__contract,propose)
-                cmd="bbcli__subcmd__contract__subcmd__propose"
-                ;;
-            bbcli__subcmd__contract__subcmd__help,check)
-                cmd="bbcli__subcmd__contract__subcmd__help__subcmd__check"
-                ;;
-            bbcli__subcmd__contract__subcmd__help,help)
-                cmd="bbcli__subcmd__contract__subcmd__help__subcmd__help"
-                ;;
-            bbcli__subcmd__contract__subcmd__help,list)
-                cmd="bbcli__subcmd__contract__subcmd__help__subcmd__list"
-                ;;
-            bbcli__subcmd__contract__subcmd__help,propose)
-                cmd="bbcli__subcmd__contract__subcmd__help__subcmd__propose"
-                ;;
             bbcli__subcmd__file,delete)
                 cmd="bbcli__subcmd__file__subcmd__delete"
                 ;;
@@ -118,9 +91,6 @@ _bbcli() {
             bbcli__subcmd__help,config)
                 cmd="bbcli__subcmd__help__subcmd__config"
                 ;;
-            bbcli__subcmd__help,contract)
-                cmd="bbcli__subcmd__help__subcmd__contract"
-                ;;
             bbcli__subcmd__help,file)
                 cmd="bbcli__subcmd__help__subcmd__file"
                 ;;
@@ -148,15 +118,6 @@ _bbcli() {
             bbcli__subcmd__help__subcmd__config,set)
                 cmd="bbcli__subcmd__help__subcmd__config__subcmd__set"
                 ;;
-            bbcli__subcmd__help__subcmd__contract,check)
-                cmd="bbcli__subcmd__help__subcmd__contract__subcmd__check"
-                ;;
-            bbcli__subcmd__help__subcmd__contract,list)
-                cmd="bbcli__subcmd__help__subcmd__contract__subcmd__list"
-                ;;
-            bbcli__subcmd__help__subcmd__contract,propose)
-                cmd="bbcli__subcmd__help__subcmd__contract__subcmd__propose"
-                ;;
             bbcli__subcmd__help__subcmd__file,delete)
                 cmd="bbcli__subcmd__help__subcmd__file__subcmd__delete"
                 ;;
@@ -171,6 +132,9 @@ _bbcli() {
                 ;;
             bbcli__subcmd__help__subcmd__init,complete)
                 cmd="bbcli__subcmd__help__subcmd__init__subcmd__complete"
+                ;;
+            bbcli__subcmd__help__subcmd__peer,check)
+                cmd="bbcli__subcmd__help__subcmd__peer__subcmd__check"
                 ;;
             bbcli__subcmd__help__subcmd__peer,connect)
                 cmd="bbcli__subcmd__help__subcmd__peer__subcmd__connect"
@@ -196,6 +160,9 @@ _bbcli() {
             bbcli__subcmd__init__subcmd__help,help)
                 cmd="bbcli__subcmd__init__subcmd__help__subcmd__help"
                 ;;
+            bbcli__subcmd__peer,check)
+                cmd="bbcli__subcmd__peer__subcmd__check"
+                ;;
             bbcli__subcmd__peer,connect)
                 cmd="bbcli__subcmd__peer__subcmd__connect"
                 ;;
@@ -210,6 +177,9 @@ _bbcli() {
                 ;;
             bbcli__subcmd__peer,unpin)
                 cmd="bbcli__subcmd__peer__subcmd__unpin"
+                ;;
+            bbcli__subcmd__peer__subcmd__help,check)
+                cmd="bbcli__subcmd__peer__subcmd__help__subcmd__check"
                 ;;
             bbcli__subcmd__peer__subcmd__help,connect)
                 cmd="bbcli__subcmd__peer__subcmd__help__subcmd__connect"
@@ -233,7 +203,7 @@ _bbcli() {
 
     case "${cmd}" in
         bbcli)
-            opts="-h --local-addr --data-dir --help state init unlock stop peer file contract config help"
+            opts="-h --local-addr --data-dir --help state init unlock stop peer file config help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -353,132 +323,6 @@ _bbcli() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        bbcli__subcmd__contract)
-            opts="-h --help list propose check help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        bbcli__subcmd__contract__subcmd__check)
-            opts="-h --help <ONION_SERVICE_ID>"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        bbcli__subcmd__contract__subcmd__help)
-            opts="list propose check help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        bbcli__subcmd__contract__subcmd__help__subcmd__check)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        bbcli__subcmd__contract__subcmd__help__subcmd__help)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        bbcli__subcmd__contract__subcmd__help__subcmd__list)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        bbcli__subcmd__contract__subcmd__help__subcmd__propose)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        bbcli__subcmd__contract__subcmd__list)
-            opts="-h --help"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        bbcli__subcmd__contract__subcmd__propose)
-            opts="-h --help <ONION_SERVICE_ID>"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
                 *)
                     COMPREPLY=()
                     ;;
@@ -641,7 +485,7 @@ _bbcli() {
             return 0
             ;;
         bbcli__subcmd__help)
-            opts="state init unlock stop peer file contract config help"
+            opts="state init unlock stop peer file config help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -683,62 +527,6 @@ _bbcli() {
             return 0
             ;;
         bbcli__subcmd__help__subcmd__config__subcmd__set)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        bbcli__subcmd__help__subcmd__contract)
-            opts="list propose check"
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        bbcli__subcmd__help__subcmd__contract__subcmd__check)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        bbcli__subcmd__help__subcmd__contract__subcmd__list)
-            opts=""
-            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
-                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-                return 0
-            fi
-            case "${prev}" in
-                *)
-                    COMPREPLY=()
-                    ;;
-            esac
-            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
-            return 0
-            ;;
-        bbcli__subcmd__help__subcmd__contract__subcmd__propose)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -865,8 +653,22 @@ _bbcli() {
             return 0
             ;;
         bbcli__subcmd__help__subcmd__peer)
-            opts="connect pin unpin list"
+            opts="connect pin unpin list check"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        bbcli__subcmd__help__subcmd__peer__subcmd__check)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -1051,8 +853,22 @@ _bbcli() {
             return 0
             ;;
         bbcli__subcmd__peer)
-            opts="-h --help connect pin unpin list help"
+            opts="-h --help connect pin unpin list check help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        bbcli__subcmd__peer__subcmd__check)
+            opts="-h --help <ONION_SERVICE_ID>"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -1079,8 +895,22 @@ _bbcli() {
             return 0
             ;;
         bbcli__subcmd__peer__subcmd__help)
-            opts="connect pin unpin list help"
+            opts="connect pin unpin list check help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        bbcli__subcmd__peer__subcmd__help__subcmd__check)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -1163,7 +993,7 @@ _bbcli() {
             return 0
             ;;
         bbcli__subcmd__peer__subcmd__list)
-            opts="-h --status --with-contract --without-contract --help"
+            opts="-h --status --with-storage --without-storage --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

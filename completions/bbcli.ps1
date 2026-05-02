@@ -31,7 +31,6 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             [CompletionResult]::new('stop', 'stop', [CompletionResultType]::ParameterValue, 'Ask the daemon to shut down gracefully')
             [CompletionResult]::new('peer', 'peer', [CompletionResultType]::ParameterValue, 'Manage known peers')
             [CompletionResult]::new('file', 'file', [CompletionResultType]::ParameterValue, 'Manage files in the latest encrypted content blob')
-            [CompletionResult]::new('contract', 'contract', [CompletionResultType]::ParameterValue, 'Inspect and drive contracts with peers')
             [CompletionResult]::new('config', 'config', [CompletionResultType]::ParameterValue, 'Read or update daemon configuration')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
@@ -87,6 +86,7 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             [CompletionResult]::new('pin', 'pin', [CompletionResultType]::ParameterValue, 'Pin a tracked peer so local policy treats it as operator-protected')
             [CompletionResult]::new('unpin', 'unpin', [CompletionResultType]::ParameterValue, 'Remove an existing operator pin from a tracked peer')
             [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print the daemon''s current peer inventory')
+            [CompletionResult]::new('check', 'check', [CompletionResultType]::ParameterValue, 'Check one peer''s current copy of our latest local revision')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
         }
@@ -107,10 +107,15 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
         }
         'bbcli;peer;list' {
             [CompletionResult]::new('--status', '--status', [CompletionResultType]::ParameterName, 'status filters peers by current local transport state')
-            [CompletionResult]::new('--with-contract', '--with-contract', [CompletionResultType]::ParameterName, 'with_contract keeps only peers with persisted contract state')
-            [CompletionResult]::new('--without-contract', '--without-contract', [CompletionResultType]::ParameterName, 'without_contract keeps only peers without persisted contract state')
+            [CompletionResult]::new('--with-storage', '--with-storage', [CompletionResultType]::ParameterName, 'with_storage keeps only peers with persisted storage state')
+            [CompletionResult]::new('--without-storage', '--without-storage', [CompletionResultType]::ParameterName, 'without_storage keeps only peers without persisted storage state')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
+        'bbcli;peer;check' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'bbcli;peer;help' {
@@ -118,6 +123,7 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             [CompletionResult]::new('pin', 'pin', [CompletionResultType]::ParameterValue, 'Pin a tracked peer so local policy treats it as operator-protected')
             [CompletionResult]::new('unpin', 'unpin', [CompletionResultType]::ParameterValue, 'Remove an existing operator pin from a tracked peer')
             [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print the daemon''s current peer inventory')
+            [CompletionResult]::new('check', 'check', [CompletionResultType]::ParameterValue, 'Check one peer''s current copy of our latest local revision')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
         }
@@ -131,6 +137,9 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             break
         }
         'bbcli;peer;help;list' {
+            break
+        }
+        'bbcli;peer;help;check' {
             break
         }
         'bbcli;peer;help;help' {
@@ -189,49 +198,6 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
         'bbcli;file;help;help' {
             break
         }
-        'bbcli;contract' {
-            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
-            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
-            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print current contract state for known peers')
-            [CompletionResult]::new('propose', 'propose', [CompletionResultType]::ParameterValue, 'Form or renew a contract with a peer and print streamed updates')
-            [CompletionResult]::new('check', 'check', [CompletionResultType]::ParameterValue, 'Verify a peer contract and print streamed updates')
-            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
-            break
-        }
-        'bbcli;contract;list' {
-            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
-            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
-            break
-        }
-        'bbcli;contract;propose' {
-            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
-            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
-            break
-        }
-        'bbcli;contract;check' {
-            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
-            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
-            break
-        }
-        'bbcli;contract;help' {
-            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print current contract state for known peers')
-            [CompletionResult]::new('propose', 'propose', [CompletionResultType]::ParameterValue, 'Form or renew a contract with a peer and print streamed updates')
-            [CompletionResult]::new('check', 'check', [CompletionResultType]::ParameterValue, 'Verify a peer contract and print streamed updates')
-            [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
-            break
-        }
-        'bbcli;contract;help;list' {
-            break
-        }
-        'bbcli;contract;help;propose' {
-            break
-        }
-        'bbcli;contract;help;check' {
-            break
-        }
-        'bbcli;contract;help;help' {
-            break
-        }
         'bbcli;config' {
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
@@ -277,7 +243,6 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             [CompletionResult]::new('stop', 'stop', [CompletionResultType]::ParameterValue, 'Ask the daemon to shut down gracefully')
             [CompletionResult]::new('peer', 'peer', [CompletionResultType]::ParameterValue, 'Manage known peers')
             [CompletionResult]::new('file', 'file', [CompletionResultType]::ParameterValue, 'Manage files in the latest encrypted content blob')
-            [CompletionResult]::new('contract', 'contract', [CompletionResultType]::ParameterValue, 'Inspect and drive contracts with peers')
             [CompletionResult]::new('config', 'config', [CompletionResultType]::ParameterValue, 'Read or update daemon configuration')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
@@ -303,6 +268,7 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             [CompletionResult]::new('pin', 'pin', [CompletionResultType]::ParameterValue, 'Pin a tracked peer so local policy treats it as operator-protected')
             [CompletionResult]::new('unpin', 'unpin', [CompletionResultType]::ParameterValue, 'Remove an existing operator pin from a tracked peer')
             [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print the daemon''s current peer inventory')
+            [CompletionResult]::new('check', 'check', [CompletionResultType]::ParameterValue, 'Check one peer''s current copy of our latest local revision')
             break
         }
         'bbcli;help;peer;connect' {
@@ -315,6 +281,9 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             break
         }
         'bbcli;help;peer;list' {
+            break
+        }
+        'bbcli;help;peer;check' {
             break
         }
         'bbcli;help;file' {
@@ -334,21 +303,6 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             break
         }
         'bbcli;help;file;delete' {
-            break
-        }
-        'bbcli;help;contract' {
-            [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print current contract state for known peers')
-            [CompletionResult]::new('propose', 'propose', [CompletionResultType]::ParameterValue, 'Form or renew a contract with a peer and print streamed updates')
-            [CompletionResult]::new('check', 'check', [CompletionResultType]::ParameterValue, 'Verify a peer contract and print streamed updates')
-            break
-        }
-        'bbcli;help;contract;list' {
-            break
-        }
-        'bbcli;help;contract;propose' {
-            break
-        }
-        'bbcli;help;contract;check' {
             break
         }
         'bbcli;help;config' {

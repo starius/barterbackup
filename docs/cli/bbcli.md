@@ -21,7 +21,6 @@ Usage: bbcli [OPTIONS] <COMMAND>
 - `stop`: Ask the daemon to shut down gracefully
 - `peer`: Manage known peers
 - `file`: Manage files in the latest encrypted content blob
-- `contract`: Inspect and drive contracts with peers
 - `config`: Read or update daemon configuration
 
 ## `bbcli state`
@@ -109,6 +108,7 @@ Usage: bbcli peer <COMMAND>
 - `pin`: Pin a tracked peer so local policy treats it as operator-protected
 - `unpin`: Remove an existing operator pin from a tracked peer
 - `list`: Print the daemon's current peer inventory
+- `check`: Check one peer's current copy of our latest local revision
 
 ### `bbcli peer connect`
 
@@ -165,8 +165,22 @@ Usage: bbcli peer list [OPTIONS]
 #### Options
 
 - `--status <STATUS>`: status filters peers by current local transport state
-- `--with-contract`: with_contract keeps only peers with persisted contract state
-- `--without-contract`: without_contract keeps only peers without persisted contract state
+- `--with-storage`: with_storage keeps only peers with persisted storage state
+- `--without-storage`: without_storage keeps only peers without persisted storage state
+
+### `bbcli peer check`
+
+Check one peer's current copy of our latest local revision
+
+#### Usage
+
+```text
+Usage: bbcli peer check <ONION_SERVICE_ID>
+```
+
+#### Options
+
+- `onion_service_id <ONION_SERVICE_ID>`: onion_service_id is the peer onion service identifier
 
 ## `bbcli file`
 
@@ -238,60 +252,6 @@ Usage: bbcli file delete <NAME>
 #### Options
 
 - `name <NAME>`: name is the stable file name inside the encrypted content set
-
-## `bbcli contract`
-
-Inspect and drive contracts with peers
-
-### Usage
-
-```text
-Usage: bbcli contract <COMMAND>
-```
-
-### Subcommands
-
-- `list`: Print current contract state for known peers
-- `propose`: Form or renew a contract with a peer and print streamed updates
-- `check`: Verify a peer contract and print streamed updates
-
-### `bbcli contract list`
-
-Print current contract state for known peers
-
-#### Usage
-
-```text
-Usage: bbcli contract list
-```
-
-### `bbcli contract propose`
-
-Form or renew a contract with a peer and print streamed updates
-
-#### Usage
-
-```text
-Usage: bbcli contract propose <ONION_SERVICE_ID>
-```
-
-#### Options
-
-- `onion_service_id <ONION_SERVICE_ID>`: onion_service_id is the peer onion service identifier
-
-### `bbcli contract check`
-
-Verify a peer contract and print streamed updates
-
-#### Usage
-
-```text
-Usage: bbcli contract check <ONION_SERVICE_ID>
-```
-
-#### Options
-
-- `onion_service_id <ONION_SERVICE_ID>`: onion_service_id is the peer onion service identifier
 
 ## `bbcli config`
 

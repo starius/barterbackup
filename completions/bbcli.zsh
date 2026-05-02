@@ -142,10 +142,17 @@ _arguments "${_arguments_options[@]}" : \
 '*--status=[status filters peers by current local transport state]:STATUS:((connected\:"Connected peers still have an open cached outbound client"
 online\:"Online peers were last observed live but are not connected now"
 offline\:"Offline peers were last observed unreachable or have never been seen live"))' \
-'(--without-contract)--with-contract[with_contract keeps only peers with persisted contract state]' \
-'(--with-contract)--without-contract[without_contract keeps only peers without persisted contract state]' \
+'(--without-storage)--with-storage[with_storage keeps only peers with persisted storage state]' \
+'(--with-storage)--without-storage[without_storage keeps only peers without persisted storage state]' \
 '-h[Print help (see more with '\''--help'\'')]' \
 '--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(check)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+':onion_service_id -- onion_service_id is the peer onion service identifier:_default' \
 && ret=0
 ;;
 (help)
@@ -173,6 +180,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(check)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -256,76 +267,6 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (delete)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(help)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-        esac
-    ;;
-esac
-;;
-        esac
-    ;;
-esac
-;;
-(contract)
-_arguments "${_arguments_options[@]}" : \
-'-h[Print help]' \
-'--help[Print help]' \
-":: :_bbcli__subcmd__contract_commands" \
-"*::: :->contract" \
-&& ret=0
-
-    case $state in
-    (contract)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:bbcli-contract-command-$line[1]:"
-        case $line[1] in
-            (list)
-_arguments "${_arguments_options[@]}" : \
-'-h[Print help]' \
-'--help[Print help]' \
-&& ret=0
-;;
-(propose)
-_arguments "${_arguments_options[@]}" : \
-'-h[Print help]' \
-'--help[Print help]' \
-':onion_service_id -- onion_service_id is the peer onion service identifier:_default' \
-&& ret=0
-;;
-(check)
-_arguments "${_arguments_options[@]}" : \
-'-h[Print help]' \
-'--help[Print help]' \
-':onion_service_id -- onion_service_id is the peer onion service identifier:_default' \
-&& ret=0
-;;
-(help)
-_arguments "${_arguments_options[@]}" : \
-":: :_bbcli__subcmd__contract__subcmd__help_commands" \
-"*::: :->help" \
-&& ret=0
-
-    case $state in
-    (help)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:bbcli-contract-help-command-$line[1]:"
-        case $line[1] in
-            (list)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(propose)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(check)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -476,6 +417,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(check)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
         esac
     ;;
 esac
@@ -505,34 +450,6 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (delete)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-        esac
-    ;;
-esac
-;;
-(contract)
-_arguments "${_arguments_options[@]}" : \
-":: :_bbcli__subcmd__help__subcmd__contract_commands" \
-"*::: :->contract" \
-&& ret=0
-
-    case $state in
-    (contract)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:bbcli-help-contract-command-$line[1]:"
-        case $line[1] in
-            (list)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(propose)
-_arguments "${_arguments_options[@]}" : \
-&& ret=0
-;;
-(check)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -586,7 +503,6 @@ _bbcli_commands() {
 'stop:Ask the daemon to shut down gracefully' \
 'peer:Manage known peers' \
 'file:Manage files in the latest encrypted content blob' \
-'contract:Inspect and drive contracts with peers' \
 'config:Read or update daemon configuration' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -634,61 +550,6 @@ _bbcli__subcmd__config__subcmd__help__subcmd__set_commands() {
 _bbcli__subcmd__config__subcmd__set_commands() {
     local commands; commands=()
     _describe -t commands 'bbcli config set commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__contract_commands] )) ||
-_bbcli__subcmd__contract_commands() {
-    local commands; commands=(
-'list:Print current contract state for known peers' \
-'propose:Form or renew a contract with a peer and print streamed updates' \
-'check:Verify a peer contract and print streamed updates' \
-'help:Print this message or the help of the given subcommand(s)' \
-    )
-    _describe -t commands 'bbcli contract commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__contract__subcmd__check_commands] )) ||
-_bbcli__subcmd__contract__subcmd__check_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli contract check commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__contract__subcmd__help_commands] )) ||
-_bbcli__subcmd__contract__subcmd__help_commands() {
-    local commands; commands=(
-'list:Print current contract state for known peers' \
-'propose:Form or renew a contract with a peer and print streamed updates' \
-'check:Verify a peer contract and print streamed updates' \
-'help:Print this message or the help of the given subcommand(s)' \
-    )
-    _describe -t commands 'bbcli contract help commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__contract__subcmd__help__subcmd__check_commands] )) ||
-_bbcli__subcmd__contract__subcmd__help__subcmd__check_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli contract help check commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__contract__subcmd__help__subcmd__help_commands] )) ||
-_bbcli__subcmd__contract__subcmd__help__subcmd__help_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli contract help help commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__contract__subcmd__help__subcmd__list_commands] )) ||
-_bbcli__subcmd__contract__subcmd__help__subcmd__list_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli contract help list commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__contract__subcmd__help__subcmd__propose_commands] )) ||
-_bbcli__subcmd__contract__subcmd__help__subcmd__propose_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli contract help propose commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__contract__subcmd__list_commands] )) ||
-_bbcli__subcmd__contract__subcmd__list_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli contract list commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__contract__subcmd__propose_commands] )) ||
-_bbcli__subcmd__contract__subcmd__propose_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli contract propose commands' commands "$@"
 }
 (( $+functions[_bbcli__subcmd__file_commands] )) ||
 _bbcli__subcmd__file_commands() {
@@ -766,7 +627,6 @@ _bbcli__subcmd__help_commands() {
 'stop:Ask the daemon to shut down gracefully' \
 'peer:Manage known peers' \
 'file:Manage files in the latest encrypted content blob' \
-'contract:Inspect and drive contracts with peers' \
 'config:Read or update daemon configuration' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -789,30 +649,6 @@ _bbcli__subcmd__help__subcmd__config__subcmd__get_commands() {
 _bbcli__subcmd__help__subcmd__config__subcmd__set_commands() {
     local commands; commands=()
     _describe -t commands 'bbcli help config set commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__help__subcmd__contract_commands] )) ||
-_bbcli__subcmd__help__subcmd__contract_commands() {
-    local commands; commands=(
-'list:Print current contract state for known peers' \
-'propose:Form or renew a contract with a peer and print streamed updates' \
-'check:Verify a peer contract and print streamed updates' \
-    )
-    _describe -t commands 'bbcli help contract commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__help__subcmd__contract__subcmd__check_commands] )) ||
-_bbcli__subcmd__help__subcmd__contract__subcmd__check_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli help contract check commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__help__subcmd__contract__subcmd__list_commands] )) ||
-_bbcli__subcmd__help__subcmd__contract__subcmd__list_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli help contract list commands' commands "$@"
-}
-(( $+functions[_bbcli__subcmd__help__subcmd__contract__subcmd__propose_commands] )) ||
-_bbcli__subcmd__help__subcmd__contract__subcmd__propose_commands() {
-    local commands; commands=()
-    _describe -t commands 'bbcli help contract propose commands' commands "$@"
 }
 (( $+functions[_bbcli__subcmd__help__subcmd__file_commands] )) ||
 _bbcli__subcmd__help__subcmd__file_commands() {
@@ -868,8 +704,14 @@ _bbcli__subcmd__help__subcmd__peer_commands() {
 'pin:Pin a tracked peer so local policy treats it as operator-protected' \
 'unpin:Remove an existing operator pin from a tracked peer' \
 'list:Print the daemon'\''s current peer inventory' \
+'check:Check one peer'\''s current copy of our latest local revision' \
     )
     _describe -t commands 'bbcli help peer commands' commands "$@"
+}
+(( $+functions[_bbcli__subcmd__help__subcmd__peer__subcmd__check_commands] )) ||
+_bbcli__subcmd__help__subcmd__peer__subcmd__check_commands() {
+    local commands; commands=()
+    _describe -t commands 'bbcli help peer check commands' commands "$@"
 }
 (( $+functions[_bbcli__subcmd__help__subcmd__peer__subcmd__connect_commands] )) ||
 _bbcli__subcmd__help__subcmd__peer__subcmd__connect_commands() {
@@ -944,9 +786,15 @@ _bbcli__subcmd__peer_commands() {
 'pin:Pin a tracked peer so local policy treats it as operator-protected' \
 'unpin:Remove an existing operator pin from a tracked peer' \
 'list:Print the daemon'\''s current peer inventory' \
+'check:Check one peer'\''s current copy of our latest local revision' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'bbcli peer commands' commands "$@"
+}
+(( $+functions[_bbcli__subcmd__peer__subcmd__check_commands] )) ||
+_bbcli__subcmd__peer__subcmd__check_commands() {
+    local commands; commands=()
+    _describe -t commands 'bbcli peer check commands' commands "$@"
 }
 (( $+functions[_bbcli__subcmd__peer__subcmd__connect_commands] )) ||
 _bbcli__subcmd__peer__subcmd__connect_commands() {
@@ -960,9 +808,15 @@ _bbcli__subcmd__peer__subcmd__help_commands() {
 'pin:Pin a tracked peer so local policy treats it as operator-protected' \
 'unpin:Remove an existing operator pin from a tracked peer' \
 'list:Print the daemon'\''s current peer inventory' \
+'check:Check one peer'\''s current copy of our latest local revision' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'bbcli peer help commands' commands "$@"
+}
+(( $+functions[_bbcli__subcmd__peer__subcmd__help__subcmd__check_commands] )) ||
+_bbcli__subcmd__peer__subcmd__help__subcmd__check_commands() {
+    local commands; commands=()
+    _describe -t commands 'bbcli peer help check commands' commands "$@"
 }
 (( $+functions[_bbcli__subcmd__peer__subcmd__help__subcmd__connect_commands] )) ||
 _bbcli__subcmd__peer__subcmd__help__subcmd__connect_commands() {

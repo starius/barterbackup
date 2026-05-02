@@ -95,10 +95,10 @@ service BarterBackupClient {
     rpc PublishToPeer(PublishToPeerRequest)
         returns (stream PublishToPeerUpdate);
 
-    // VerifyPeerStorage tells the server to verify one peer's current copy of our
-    // content. It checks whether the peer stores the most recent version, then
-    // downloads and verifies a random sample of our content from that peer.
-    // Such checks are also run in the background.
+    // VerifyPeerStorage tells the server to verify one peer's current copy of
+    // our content. It checks whether the peer stores the most recent version,
+    // then downloads and verifies a random sample of our content from that
+    // peer. Such checks are also run in the background.
     rpc VerifyPeerStorage(VerifyPeerStorageRequest)
         returns (stream VerifyPeerStorageUpdate);
 
@@ -879,7 +879,8 @@ message PublishToPeerUpdate {
     PublicationStorageResult storage_result = 7;
 }
 
-enum PublicationStorageResult {
+enum PublicationStorageResult
+{
     PUBLICATION_STORAGE_RESULT_UNKNOWN = 0;
     PUBLICATION_STORAGE_RESULT_MIRRORED_BYTES_CACHED = 1;
     PUBLICATION_STORAGE_RESULT_SIDECAR_ONLY = 2;

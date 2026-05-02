@@ -347,8 +347,7 @@ Inspect peers, storage, and recovery:
 bbcli peer list
 bbcli peer pin <peer-onion-id>
 bbcli peer unpin <peer-onion-id>
-bbcli peer publish <peer-onion-id>
-bbcli peer verify <peer-onion-id>
+bbcli peer check <peer-onion-id>
 bbcli config get
 bbcli config get --resource-policy
 bbcli init complete
@@ -385,8 +384,7 @@ Recovery workflow:
   the top of outbound connection-priority decisions
 - `bbcli peer unpin` removes that local operator override without changing the
   peer's current mirrored content directly
-- `bbcli peer publish` runs one manual owner-to-peer publication pass
-- `bbcli peer verify` checks one peer's current copy of our latest local
+- `bbcli peer check` checks one peer's current copy of our latest local
   revision and updates that peer's local durability score
 - `bbcli config get` reports the current writable storage config plus derived
   storage information, including pinned/protected/disposable byte totals,

@@ -1976,7 +1976,8 @@ async fn run_background_peer_maintenance(
 
     if action.check {
         let Some(check_result) =
-            wait_for_maintenance_step(&shutdown, node.verify_peer_storage_updates(&peer_onion)).await
+            wait_for_maintenance_step(&shutdown, node.verify_peer_storage_updates(&peer_onion))
+                .await
         else {
             return;
         };
@@ -3589,7 +3590,8 @@ mod tests {
             .into_inner();
         while let Some(update) = proposal_updates.next().await {
             let update = update?;
-            if update.state == clirpc::PeerStorageOperationState::Completed as i32 && update.success {
+            if update.state == clirpc::PeerStorageOperationState::Completed as i32 && update.success
+            {
                 break;
             }
         }
@@ -4720,7 +4722,8 @@ mod tests {
         let mut saw_successful_proposal = false;
         while let Some(update) = proposal_updates.next().await {
             let update = update?;
-            if update.state == clirpc::PeerStorageOperationState::Completed as i32 && update.success {
+            if update.state == clirpc::PeerStorageOperationState::Completed as i32 && update.success
+            {
                 saw_successful_proposal = true;
             }
         }
@@ -4740,7 +4743,8 @@ mod tests {
         let mut saw_successful_check = false;
         while let Some(update) = check_updates.next().await {
             let update = update?;
-            if update.state == clirpc::PeerStorageOperationState::Completed as i32 && update.success {
+            if update.state == clirpc::PeerStorageOperationState::Completed as i32 && update.success
+            {
                 saw_successful_check = true;
             }
         }

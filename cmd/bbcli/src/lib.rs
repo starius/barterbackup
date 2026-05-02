@@ -18,11 +18,11 @@ use dirs::home_dir;
 use futures_util::{stream, TryStreamExt};
 use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
 use protos::clirpc::{
-    VerifyPeerStorageRequest, ConnectPeerRequest, DeleteFileRequest, ExportBuiltInPeersRequest, File,
-    FileInfo, GetPeerStorageRequest, GetFileRequest, GetStorageConfigRequest, InitCompleteRequest,
+    ConnectPeerRequest, DeleteFileRequest, ExportBuiltInPeersRequest, File, FileInfo,
+    GetFileRequest, GetPeerStorageRequest, GetStorageConfigRequest, InitCompleteRequest,
     InitRequest, ListFilesRequest, PeerInfo, PeerStatus, PeersRequest, PeersResponse,
     PinPeerRequest, PublishToPeerRequest, SetStorageConfigRequest, StateRequest, StateResponse,
-    StopRequest, StorageConfig, UnlockRequest, UnpinPeerRequest,
+    StopRequest, StorageConfig, UnlockRequest, UnpinPeerRequest, VerifyPeerStorageRequest,
 };
 use tlsutil::{connect_pinned_channel, read_keys};
 use tokio::time::sleep;
@@ -250,14 +250,8 @@ enum PeerCommand {
         without_storage: bool,
     },
 
-    /// Publish the current local revision to one peer and print streamed updates.
-    Publish {
-        /// onion_service_id is the peer onion service identifier.
-        onion_service_id: String,
-    },
-
-    /// Verify one peer's current copy of our latest local revision.
-    Verify {
+    /// Check one peer's current copy of our latest local revision.
+    Check {
         /// onion_service_id is the peer onion service identifier.
         onion_service_id: String,
     },
@@ -493,10 +487,7 @@ async fn run_parsed(args: Args) -> Result<()> {
                 )
                 .await
             }
-            PeerCommand::Publish { onion_service_id } => {
-                propose_contract(&target, &onion_service_id).await
-            }
-            PeerCommand::Verify { onion_service_id } => {
+            PeerCommand::Check { onion_service_id } => {
                 check_contract(&target, &onion_service_id).await
             }
             PeerCommand::ExportBuiltIn => export_built_in_peers(&target).await,
@@ -1660,9 +1651,7 @@ fn format_storage_config_response(
 
 /// Format one peer-storage response for CLI output.
 #[cfg(test)]
-fn format_peer_storage_response(
-    response: &protos::clirpc::GetPeerStorageResponse,
-) -> Vec<String> {
+fn format_peer_storage_response(response: &protos::clirpc::GetPeerStorageResponse) -> Vec<String> {
     response
         .storage_peers
         .iter()
@@ -1707,57 +1696,7 @@ fn format_file_list(files: &[FileInfo]) -> Vec<String> {
         .collect()
 }
 
-/// Print the streamed updates for one peer publication.
-async fn propose_contract(target: &LocalCliTarget, onion_service_id: &str) -> Result<()> {
-    let mut client = connect_client(target).await?;
-    for update in publish_to_peer_with_client(&mut client, onion_service_id).await? {
-        println!(
-            "{}",
-            format_propose_contract_update(onion_service_id, &update)
-        );
-    }
-    Ok(())
-}
-
-/// Format one peer-publication progress update.
-fn format_propose_contract_update(
-    onion_service_id: &str,
-    update: &protos::clirpc::PublishToPeerUpdate,
-) -> String {
-    let state = protos::clirpc::PeerStorageOperationState::try_from(update.state)
-        .unwrap_or(protos::clirpc::PeerStorageOperationState::NotStarted);
-    let storage_result = protos::clirpc::PublicationStorageResult::try_from(update.storage_result)
-        .unwrap_or(protos::clirpc::PublicationStorageResult::Unknown);
-    let mut line = format!(
-        "peer publication: peer={onion_service_id} state={} success={}",
-        peer_storage_operation_state_label(state),
-        update.success
-    );
-    if update.their_content_length > 0 {
-        line.push_str(&format!(
-            " peer_content_bytes={}",
-            update.their_content_length
-        ));
-    }
-    if update.our_content_length > 0 {
-        line.push_str(&format!(" our_content_bytes={}", update.our_content_length));
-    }
-    if update.our_content_uploaded_bytes > 0 {
-        line.push_str(&format!(
-            " uploaded_content_bytes={}",
-            update.our_content_uploaded_bytes
-        ));
-    }
-    if update.success {
-        line.push_str(&format!(
-            " peer_storage={}",
-            publication_storage_result_label(storage_result)
-        ));
-    }
-    line
-}
-
-/// Print the streamed updates for one peer verification.
+/// Print one peer verification as an operator-facing summary.
 async fn check_contract(target: &LocalCliTarget, onion_service_id: &str) -> Result<()> {
     let mut client = connect_client(target).await?;
     let started_at = Instant::now();
@@ -1821,38 +1760,6 @@ fn format_verify_peer_storage_updates(
     }
 
     Ok(lines)
-}
-
-/// Return one short label for one peer-publication storage result.
-fn publication_storage_result_label(
-    result: protos::clirpc::PublicationStorageResult,
-) -> &'static str {
-    match result {
-        protos::clirpc::PublicationStorageResult::Unknown => "unknown",
-        protos::clirpc::PublicationStorageResult::MirroredBytesCached => "mirrored-bytes-cached",
-        protos::clirpc::PublicationStorageResult::SidecarOnly => "sidecar-only",
-        protos::clirpc::PublicationStorageResult::RequesterContentCleared => {
-            "requester-content-cleared"
-        }
-    }
-}
-
-/// Return one short CLI label for one publication/verification state.
-fn peer_storage_operation_state_label(
-    state: protos::clirpc::PeerStorageOperationState,
-) -> &'static str {
-    match state {
-        protos::clirpc::PeerStorageOperationState::NotStarted => "not-started",
-        protos::clirpc::PeerStorageOperationState::ConnectingToPeer => "connecting-to-peer",
-        protos::clirpc::PeerStorageOperationState::PublishingToPeer => "publishing",
-        protos::clirpc::PeerStorageOperationState::PeerRefused => "peer-refused",
-        protos::clirpc::PeerStorageOperationState::SyncingContents => "syncing-contents",
-        protos::clirpc::PeerStorageOperationState::VerifyingContent => "checking-contents",
-        protos::clirpc::PeerStorageOperationState::PeerMissingOurContent => "our-content-revision-missing",
-        protos::clirpc::PeerStorageOperationState::InvalidContentReturned => "invalid-content-returned",
-        protos::clirpc::PeerStorageOperationState::Completed => "completed",
-        protos::clirpc::PeerStorageOperationState::PeerUnavailable => "peer-unavailable",
-    }
 }
 
 /// Render one operator-facing reason for a failed peer verification.
@@ -2884,27 +2791,6 @@ mod tests {
     }
 
     #[test]
-    fn format_propose_contract_update_reports_sidecar_only_storage() {
-        let line = format_propose_contract_update(
-            "peer.onion",
-            &protos::clirpc::PublishToPeerUpdate {
-                state: protos::clirpc::PeerStorageOperationState::Completed as i32,
-                success: true,
-                their_content_length: 2048,
-                their_content_downloaded_bytes: 2048,
-                our_content_length: 4096,
-                our_content_uploaded_bytes: 4096,
-                storage_result: protos::clirpc::PublicationStorageResult::SidecarOnly as i32,
-            },
-        );
-
-        assert_eq!(
-            line,
-            "peer publication: peer=peer.onion state=completed success=true peer_content_bytes=2048 our_content_bytes=4096 uploaded_content_bytes=4096 peer_storage=sidecar-only"
-        );
-    }
-
-    #[test]
     fn assess_password_strength_uses_recursive_workaround_for_long_password() {
         let long_password = format!("{STRONG_TEST_PASSWORD} {STRONG_TEST_PASSWORD}");
         assert!(long_password.chars().count() > ZXCVBN_MAX_PASSWORD_CHARS);
@@ -3275,12 +3161,12 @@ mod tests {
     }
 
     #[test]
-    fn args_parse_grouped_peer_publish_and_init_commands() {
-        let args = Args::parse_from(["bbcli", "peer", "publish", "peer.onion"]);
+    fn args_parse_grouped_peer_check_and_init_commands() {
+        let args = Args::parse_from(["bbcli", "peer", "check", "peer.onion"]);
         assert!(matches!(
             args.cmd,
             Command::Peer {
-                cmd: PeerCommand::Publish { .. }
+                cmd: PeerCommand::Check { .. }
             }
         ));
 
