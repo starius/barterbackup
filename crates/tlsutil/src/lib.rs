@@ -731,14 +731,6 @@ mod tests {
                     + 'static,
             >,
         >;
-        type RecoverContentStream = std::pin::Pin<
-            Box<
-                dyn tokio_stream::Stream<
-                        Item = std::result::Result<protos::clirpc::RecoverContentUpdate, Status>,
-                    > + Send
-                    + 'static,
-            >,
-        >;
         async fn init(
             &self,
             _: Request<protos::clirpc::InitRequest>,
@@ -849,16 +841,10 @@ mod tests {
         ) -> std::result::Result<tonic::Response<Self::CheckContractStream>, Status> {
             Err(Status::unimplemented(""))
         }
-        async fn recover_content(
+        async fn init_complete(
             &self,
-            _: Request<protos::clirpc::RecoverContentRequest>,
-        ) -> std::result::Result<tonic::Response<Self::RecoverContentStream>, Status> {
-            Err(Status::unimplemented(""))
-        }
-        async fn finish_recovery(
-            &self,
-            _: Request<protos::clirpc::FinishRecoveryRequest>,
-        ) -> std::result::Result<tonic::Response<protos::clirpc::FinishRecoveryResponse>, Status>
+            _: Request<protos::clirpc::InitCompleteRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::InitCompleteResponse>, Status>
         {
             Err(Status::unimplemented(""))
         }

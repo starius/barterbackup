@@ -1291,9 +1291,48 @@ struct RecoveryCandidate {
     peers: Vec<String>,
 }
 
-/// RecoveryRunSummary accumulates one automatic recovery pass.
+/// RecoveryPassSummary reports one automatic recovery pass and its result.
 #[derive(Clone, Debug, Default)]
-struct RecoveryRunSummary {
+pub struct RecoveryPassSummary {
+    /// total_versions_found is the number of unique requester revisions peers reported.
+    pub total_versions_found: i64,
+    /// peers_with_any_versions is the number of peers that reported any requester revision.
+    pub peers_with_any_versions: i64,
+    /// older_lineage_versions_found is the number of unique older-lineage revisions in scope.
+    pub older_lineage_versions_found: i64,
+    /// older_lineage_recoverable_versions_found is the number of unique older-lineage revisions
+    /// that at least one peer could actually serve.
+    pub older_lineage_recoverable_versions_found: i64,
+    /// applied_versions is the number of recovered revisions merged locally.
+    pub applied_versions: i64,
+    /// downloaded_bytes is the total encrypted bytes fetched during recovery.
+    pub downloaded_bytes: i64,
+    /// added_files is the number of recovered files added under their original names.
+    pub added_files: i64,
+    /// renamed_files is the number of recovered files added under recovered names.
+    pub renamed_files: i64,
+    /// unchanged_files is the number of recovered files skipped as identical.
+    pub unchanged_files: i64,
+    /// newest_found_content_id is the newest requester revision observed from any peer.
+    pub newest_found_content_id: Vec<u8>,
+    /// newest_found_ts is newest_found_content_id's authenticated timestamp in Unix seconds.
+    pub newest_found_ts: i64,
+    /// newest_found_ts_ns is newest_found_content_id's authenticated sub-second nanoseconds.
+    pub newest_found_ts_ns: i64,
+    /// latest_applied_content_id is the newest older-lineage revision merged locally.
+    pub latest_applied_content_id: Vec<u8>,
+    /// latest_applied_ts is latest_applied_content_id's authenticated timestamp in Unix seconds.
+    pub latest_applied_ts: i64,
+    /// latest_applied_ts_ns is latest_applied_content_id's authenticated sub-second nanoseconds.
+    pub latest_applied_ts_ns: i64,
+    /// publication_blocked_reason explains why recovered local state still cannot publish.
+    pub publication_blocked_reason: String,
+}
+
+/// RecoveryPassAccumulator accumulates one automatic recovery pass before the
+/// final operator-facing summary is rendered.
+#[derive(Clone, Debug, Default)]
+struct RecoveryPassAccumulator {
     /// total_versions_found is the number of unique requester revisions peers reported.
     total_versions_found: i64,
     /// peers_with_any_versions is the number of peers that reported any requester revision.
@@ -1863,7 +1902,7 @@ impl Node {
                 timestamp_nanos = recoverable_revision.timestamp.1,
                 "running automatic recovery after a new live peer contact"
             );
-            let recovery_update = self.recover_content_update().await?;
+            let recovery_update = self.run_recovery_pass().await?;
             info!(
                 peer = %peer_onion,
                 applied_versions = recovery_update.applied_versions,
@@ -4259,7 +4298,7 @@ impl Node {
                 timestamp_nanos = recoverable_revision.timestamp.1,
                 "running automatic recovery before publishing to a peer"
             );
-            let recovery_update = self.recover_content_update().await?;
+            let recovery_update = self.run_recovery_pass().await?;
             info!(
                 peer = %peer_onion,
                 applied_versions = recovery_update.applied_versions,
@@ -4383,7 +4422,7 @@ impl Node {
                             timestamp_nanos = recoverable_revision.timestamp.1,
                             "running automatic recovery after a publication compare-and-swap mismatch"
                         );
-                        let recovery_update = self.recover_content_update().await?;
+                        let recovery_update = self.run_recovery_pass().await?;
                         info!(
                             peer = %peer_onion,
                             applied_versions = recovery_update.applied_versions,
@@ -4823,7 +4862,7 @@ impl Node {
 
     /// Scan known peers, restore the missing active blob when necessary, and
     /// merge every downloadable older-lineage revision in timestamp order.
-    pub async fn recover_content_update(&self) -> Result<clirpc::RecoverContentUpdate, Status> {
+    pub async fn run_recovery_pass(&self) -> Result<RecoveryPassSummary, Status> {
         let mut known_candidates = BTreeMap::<Vec<u8>, RecoveryCandidate>::new();
         let mut older_lineage_candidates = BTreeMap::<Vec<u8>, RecoveryCandidate>::new();
         let mut recoverable_candidates = BTreeMap::<Vec<u8>, RecoveryCandidate>::new();
@@ -4950,7 +4989,7 @@ impl Node {
             }
         }
 
-        let mut summary = RecoveryRunSummary {
+        let mut summary = RecoveryPassAccumulator {
             total_versions_found: i64::try_from(known_candidates.len()).unwrap_or(i64::MAX),
             peers_with_any_versions,
             older_lineage_versions_found: i64::try_from(older_lineage_candidates.len())
@@ -5020,7 +5059,7 @@ impl Node {
             summary.publication_blocked_reason = Some(reason);
         }
 
-        Ok(clirpc::RecoverContentUpdate {
+        Ok(RecoveryPassSummary {
             total_versions_found: summary.total_versions_found,
             peers_with_any_versions: summary.peers_with_any_versions,
             older_lineage_versions_found: summary.older_lineage_versions_found,
@@ -11676,7 +11715,7 @@ mod tests {
             spawn_plain_peer_server(PeerExchangePeerService::new(exchange_state.clone())).await?;
         connector.register_peer(peer_identity.address(), &endpoint);
 
-        let update = node.recover_content_update().await?;
+        let update = node.run_recovery_pass().await?;
         assert_eq!(update.applied_versions, 0);
         assert_eq!(exchange_state.peer_exchange_call_count(), 1);
         assert!(node
@@ -11916,7 +11955,7 @@ mod tests {
             })
             .await?;
 
-        let update = recovered_node.recover_content_update().await?;
+        let update = recovered_node.run_recovery_pass().await?;
         assert_eq!(update.applied_versions, 1);
         assert_eq!(
             update.latest_applied_content_id,
@@ -11973,7 +12012,7 @@ mod tests {
                 .await?;
         connector.register_peer(peer_identity.address(), &endpoint);
 
-        let update = recovered_node.recover_content_update().await?;
+        let update = recovered_node.run_recovery_pass().await?;
         assert_eq!(update.applied_versions, 1);
         assert_eq!(update.downloaded_bytes, owner_content.content_length);
         assert_eq!(service_state.download_call_count(), 2);
@@ -12186,7 +12225,7 @@ mod tests {
         .await?;
         connector.register_peer(peer_identity.address(), &endpoint);
 
-        let update = local_node.recover_content_update().await?;
+        let update = local_node.run_recovery_pass().await?;
         assert_eq!(update.total_versions_found, 1);
         assert_eq!(update.older_lineage_versions_found, 0);
         assert_eq!(update.older_lineage_recoverable_versions_found, 0);
@@ -12274,7 +12313,7 @@ mod tests {
         let (endpoint, server) = spawn_plain_peer_server(stale_service).await?;
         connector.register_peer(stale_peer_identity.address(), &endpoint);
 
-        let update = recovered_node.recover_content_update().await?;
+        let update = recovered_node.run_recovery_pass().await?;
         assert_eq!(update.total_versions_found, 2);
         assert_eq!(update.older_lineage_versions_found, 2);
         assert_eq!(update.older_lineage_recoverable_versions_found, 1);
@@ -12379,7 +12418,7 @@ mod tests {
         connector.register_peer(peer_a_identity.address(), &endpoint_a);
         connector.register_peer(peer_b_identity.address(), &endpoint_b);
 
-        let update = recovered_node.recover_content_update().await?;
+        let update = recovered_node.run_recovery_pass().await?;
         assert_eq!(update.applied_versions, 2);
         assert_eq!(update.added_files, 1);
         assert_eq!(update.renamed_files, 1);
@@ -12460,7 +12499,7 @@ mod tests {
         connector.register_peer(peer_identity.address(), &endpoint);
         recovered_node.add_known_peer(peer_identity.address())?;
 
-        let initial_update = recovered_node.recover_content_update().await?;
+        let initial_update = recovered_node.run_recovery_pass().await?;
         assert_eq!(initial_update.applied_versions, 1);
         assert_eq!(
             initial_update.latest_applied_content_id,
@@ -12470,7 +12509,7 @@ mod tests {
             recovered_node.with_store(|store| store.get_file("alpha.txt"))?,
             b"version-1".to_vec()
         );
-        let update = recovered_node.recover_content_update().await?;
+        let update = recovered_node.run_recovery_pass().await?;
         assert_eq!(update.total_versions_found, 1);
         assert_eq!(update.older_lineage_versions_found, 0);
         assert_eq!(update.older_lineage_recoverable_versions_found, 0);
@@ -12555,7 +12594,7 @@ mod tests {
         connector.register_peer(bad_peer_identity.address(), &bad_endpoint);
         connector.register_peer(good_peer_identity.address(), &good_endpoint);
 
-        let update = recovered_node.recover_content_update().await?;
+        let update = recovered_node.run_recovery_pass().await?;
         assert_eq!(update.total_versions_found, 1);
         assert_eq!(update.peers_with_any_versions, 2);
         assert_eq!(update.applied_versions, 1);
