@@ -94,7 +94,6 @@
             nativeBuildInputs = [ rustToolchain crossCc ];
 
             CARGO_BUILD_PIPELINING = "false";
-            RUSTFLAGS = "-Zmir-opt-level=0";
             "CARGO_TARGET_${staticTargetEnv}_LINKER" = linker;
             "AR_${staticTargetEnv}" = archiver;
 

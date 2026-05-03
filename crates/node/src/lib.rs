@@ -9072,11 +9072,15 @@ mod tests {
             .await?;
 
         let published_content = owner_node.responder_content()?.unwrap();
-        let updates = owner_node.publish_to_peer_updates(peer_identity.address()).await?;
+        let updates = owner_node
+            .publish_to_peer_updates(peer_identity.address())
+            .await?;
         assert_eq!(updates.last().map(|update| update.success), Some(true));
         assert_eq!(service_state.set_call_count(), 1);
         assert_eq!(
-            service_state.requester_content().map(|content| content.content_id),
+            service_state
+                .requester_content()
+                .map(|content| content.content_id),
             Some(published_content.content_id.clone())
         );
         assert!(replacement_node.responder_content()?.is_none());
@@ -9086,7 +9090,9 @@ mod tests {
             .await?;
         assert_eq!(updates.last().map(|update| update.success), Some(true));
         assert_eq!(
-            service_state.requester_content().map(|content| content.content_id),
+            service_state
+                .requester_content()
+                .map(|content| content.content_id),
             Some(published_content.content_id.clone())
         );
         assert_eq!(service_state.set_call_count(), 1);

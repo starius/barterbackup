@@ -3759,6 +3759,10 @@ mod tests {
         let temp_dir = TempDir::new()?;
         let cli_addr = reserve_loopback_addr()?;
         let daemon_addr = format!("https://{cli_addr}");
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        let remote_peer = Arc::new(Node::new("peer-a")?);
+        let remote_server =
+            spawn_registered_mock_peer_server(remote_peer.clone(), connector.clone()).await?;
         let shutdown = CancellationToken::new();
         let shutdown_signal = shutdown.clone();
         let config = Config {
@@ -3770,9 +3774,13 @@ mod tests {
             peer_metadata_flush_delay_secs: 60,
         };
         let daemon_task = tokio::spawn(async move {
-            run_with_peer_runtime_until(config, Arc::new(NoopPeerRuntimeFactory), async move {
-                shutdown_signal.cancelled().await;
-            })
+            run_with_peer_runtime_until(
+                config,
+                Arc::new(MockPeerRuntimeFactory { connector }),
+                async move {
+                    shutdown_signal.cancelled().await;
+                },
+            )
             .await
         });
 
@@ -3841,7 +3849,6 @@ mod tests {
         ])
         .await?;
 
-        let remote_peer = Node::new("peer-a")?;
         run_with_args([
             "bbcli",
             "--local-addr",
@@ -3881,16 +3888,6 @@ mod tests {
             "--data-dir",
             data_dir.as_str(),
             "file",
-            "list",
-        ])
-        .await?;
-        run_with_args([
-            "bbcli",
-            "--local-addr",
-            daemon_addr.as_str(),
-            "--data-dir",
-            data_dir.as_str(),
-            "contract",
             "list",
         ])
         .await?;
@@ -4029,6 +4026,7 @@ mod tests {
         ])
         .await?;
 
+        remote_server.abort();
         daemon_task.await??;
         Ok(())
     }
@@ -5104,7 +5102,7 @@ mod tests {
     async fn shutdown_cancels_stuck_maintenance_pass() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let connector = Arc::new(HangingPeerConnector::default());
-        let (maintenance_config, _tick) = manual_maintenance();
+        let (maintenance_config, tick) = manual_maintenance();
         let service = DaemonService::with_maintenance_config(
             temp_dir.path().to_path_buf(),
             Arc::new(HangingPeerRuntimeFactory {
@@ -5116,13 +5114,20 @@ mod tests {
         init_and_unlock_service(&service, "shutdown-maintenance").await?;
 
         let stuck_peer = Node::new("stuck-maintenance-peer")?;
+        unlocked_node(&service)
+            .await
+            .add_known_peer(stuck_peer.address())?;
+        set_storage_config(&service, 4 * 1024 * 1024, 1).await?;
         service
-            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
-                peer: Some(clirpc::Peer {
-                    onion_service_id: stuck_peer.address().to_string(),
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                    ..Default::default()
                 }),
             }))
             .await?;
+        tick.notify_waiters();
         connector.wait_started(Duration::from_secs(1)).await?;
 
         tokio::time::timeout(Duration::from_secs(1), service.shutdown())
