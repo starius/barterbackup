@@ -518,6 +518,9 @@ fn build_metadata(files: &[PlainFile], peers: &[storedpb::Peer]) -> storedpb::Me
         recovery_watermark_at_ns: 0,
         recovery_mode_enabled: false,
         current_content: None,
+        metadata_rollup_due_at: 0,
+        metadata_rollup_due_at_ns: 0,
+        metadata_rollup_base_content_id: Vec::new(),
     }
 }
 

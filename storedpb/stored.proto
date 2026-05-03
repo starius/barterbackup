@@ -253,4 +253,16 @@ message Metadata {
     // sidecar so the node can restore that exact blob after a restart if the
     // local encrypted blob file is missing.
     PeerContent current_content = 11;
+
+    // metadata_rollup_due_at is when one delayed metadata-only local content
+    // rewrite becomes eligible to run.
+    int64 metadata_rollup_due_at = 12;
+
+    // metadata_rollup_due_at_ns is the nanosecond component of
+    // metadata_rollup_due_at.
+    int64 metadata_rollup_due_at_ns = 13;
+
+    // metadata_rollup_base_content_id is the local content revision that was
+    // current when the pending metadata-rollup epoch began.
+    bytes metadata_rollup_base_content_id = 14;
 }

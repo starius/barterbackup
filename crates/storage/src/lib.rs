@@ -11,7 +11,7 @@ use content::{ContentCodec, DecodedContent, PlainFile, RevisionDescriptor, Revis
 use prost::Message;
 use protos::storedpb;
 use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::{thread_rng, Rng, RngCore};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io;
@@ -19,6 +19,7 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
@@ -28,6 +29,7 @@ const PEER_STATE_TAG_LEN: usize = 16;
 const MIRRORED_BLOB_VERSION: u8 = 1;
 const MIRRORED_BLOB_NONCE_LEN: usize = 12;
 const MIRRORED_BLOB_TAG_LEN: usize = 16;
+const METADATA_ROLLUP_MEAN_DELAY_SECS: f64 = 24.0 * 60.0 * 60.0;
 /// MAX_SHARED_CONTENT_BLOB_BYTES is the fixed largest local shared blob that
 /// may be accepted as the active current revision.
 pub const MAX_SHARED_CONTENT_BLOB_BYTES: usize = 4 * 1024 * 1024;
@@ -267,6 +269,28 @@ pub struct RecoveryMergeOutcome {
     pub unchanged_files: i64,
 }
 
+/// MetadataRollupOutcome reports what one metadata-only rollout attempt did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MetadataRollupOutcome {
+    /// NotPending means no metadata-only rollout is currently scheduled.
+    NotPending,
+    /// NotDue means one metadata-only rollout is scheduled but not eligible yet.
+    NotDue,
+    /// ClearedWithoutCurrentContent means the pending rollout was dropped
+    /// because no local content blob remained to rewrite.
+    ClearedWithoutCurrentContent,
+    /// ClearedSuperseded means a later real content rewrite already replaced
+    /// the base revision for this pending rollout.
+    ClearedSuperseded,
+    /// Rewritten means the current content blob was rewritten successfully.
+    Rewritten {
+        /// content_id is the new local content identifier.
+        content_id: Vec<u8>,
+    },
+}
+
+type MetadataRollupDelaySampler = Arc<dyn Fn() -> Duration + Send + Sync>;
+
 /// Store owns the live local file set and the encrypted content blobs on disk.
 pub struct Store {
     fs: Arc<dyn Filesystem>,
@@ -282,6 +306,9 @@ pub struct Store {
     recovery_watermark: Option<(i64, i64)>,
     recovery_mode_enabled: bool,
     current: Option<CurrentContent>,
+    metadata_rollup_due_at: Option<(i64, i64)>,
+    metadata_rollup_base_content_id: Vec<u8>,
+    metadata_rollup_delay_sampler: MetadataRollupDelaySampler,
 }
 
 /// Return the higher-priority peer origin.
@@ -310,6 +337,14 @@ fn current_content_summary(current: Option<&CurrentContent>) -> Option<storedpb:
         content_id: current.content_id.clone(),
         content_length: i64::try_from(current.blob_len).unwrap_or(i64::MAX),
     })
+}
+
+/// Sample one exponential metadata-rollup delay with a one-day mean.
+fn sample_metadata_rollup_delay() -> Duration {
+    let mut rng = thread_rng();
+    let draw = rng.gen_range(f64::MIN_POSITIVE..1.0);
+    let delay_secs = (-draw.ln() * METADATA_ROLLUP_MEAN_DELAY_SECS).max(0.0);
+    Duration::from_secs_f64(delay_secs)
 }
 
 /// Return one optional persisted timestamp from whole-second and nanosecond fields.
@@ -419,6 +454,21 @@ impl Store {
         master: &[u8],
         time_source: Arc<dyn Clock>,
     ) -> Result<Self, StorageError> {
+        Self::new_with_time_source_and_rollup_sampler(
+            fs,
+            master,
+            time_source,
+            Arc::new(sample_metadata_rollup_delay),
+        )
+    }
+
+    /// Create a store with an explicit time source and metadata-rollup sampler.
+    pub fn new_with_time_source_and_rollup_sampler(
+        fs: Arc<dyn Filesystem>,
+        master: &[u8],
+        time_source: Arc<dyn Clock>,
+        metadata_rollup_delay_sampler: MetadataRollupDelaySampler,
+    ) -> Result<Self, StorageError> {
         if master.len() < 32 {
             return Err(StorageError::InvalidMasterKey(master.len()));
         }
@@ -457,6 +507,9 @@ impl Store {
             recovery_watermark: None,
             recovery_mode_enabled: false,
             current: None,
+            metadata_rollup_due_at: None,
+            metadata_rollup_base_content_id: Vec::new(),
+            metadata_rollup_delay_sampler,
         };
         store.load()?;
         Ok(store)
@@ -512,6 +565,17 @@ impl Store {
         self.recovery_mode_enabled
     }
 
+    /// Return the pending metadata-rollup deadline, if one exists.
+    pub fn metadata_rollup_due_at(&self) -> Option<(i64, i64)> {
+        self.metadata_rollup_due_at
+    }
+
+    /// Return the base content id for the pending metadata-rollup epoch, if any.
+    pub fn metadata_rollup_base_content_id(&self) -> Option<&[u8]> {
+        (!self.metadata_rollup_base_content_id.is_empty())
+            .then_some(self.metadata_rollup_base_content_id.as_slice())
+    }
+
     /// Initialize the persisted lineage state once for this store.
     pub fn initialize_lineage(
         &mut self,
@@ -561,6 +625,71 @@ impl Store {
         self.recovery_mode_enabled = false;
         self.recovery_watermark = Some(node_initialized_at);
         self.persist_peer_state()
+    }
+
+    /// Return whether one metadata-only rollup is currently pending.
+    fn has_pending_metadata_rollup(&self) -> bool {
+        self.metadata_rollup_due_at.is_some() && !self.metadata_rollup_base_content_id.is_empty()
+    }
+
+    /// Clear any pending metadata-only rollup state.
+    fn clear_metadata_rollup(&mut self) {
+        self.metadata_rollup_due_at = None;
+        self.metadata_rollup_base_content_id.clear();
+    }
+
+    /// Schedule one metadata-only rollup if there is current content and no
+    /// earlier pending rollout already exists.
+    fn schedule_metadata_rollup_if_needed(&mut self) {
+        let Some(current) = self.current.as_ref() else {
+            return;
+        };
+        if self.has_pending_metadata_rollup() {
+            return;
+        }
+        let now = self.time_source.now();
+        let due_at = now.advance((self.metadata_rollup_delay_sampler)());
+        self.metadata_rollup_due_at = Some((
+            i64::try_from(due_at.secs).unwrap_or(i64::MAX),
+            i64::from(due_at.nanos),
+        ));
+        self.metadata_rollup_base_content_id = current.content_id.clone();
+    }
+
+    /// Rewrite the current local content blob with newer peer metadata when
+    /// one pending rollout is due.
+    pub fn roll_up_peer_metadata_if_due(&mut self) -> Result<MetadataRollupOutcome, StorageError> {
+        let Some(due_at) = self.metadata_rollup_due_at else {
+            return Ok(MetadataRollupOutcome::NotPending);
+        };
+        let now = self.time_source.now();
+        let now = (
+            i64::try_from(now.secs).unwrap_or(i64::MAX),
+            i64::from(now.nanos),
+        );
+        if now < due_at {
+            return Ok(MetadataRollupOutcome::NotDue);
+        }
+
+        let Some(current) = self.current.as_ref() else {
+            self.clear_metadata_rollup();
+            self.persist_peer_state()?;
+            return Ok(MetadataRollupOutcome::ClearedWithoutCurrentContent);
+        };
+        if current.content_id != self.metadata_rollup_base_content_id {
+            self.clear_metadata_rollup();
+            self.persist_peer_state()?;
+            return Ok(MetadataRollupOutcome::ClearedSuperseded);
+        }
+
+        self.persist_files()?;
+        let content_id = self
+            .current
+            .as_ref()
+            .map(|current| current.content_id.clone())
+            .unwrap_or_default();
+        self.persist_peer_state()?;
+        Ok(MetadataRollupOutcome::Rewritten { content_id })
     }
 
     /// Persist whether recovery mode blocks owner-originated publication.
@@ -1365,6 +1494,7 @@ impl Store {
         let files = self.current_plain_files();
         self.enforce_shared_blob_limit_for_state(&files, &migrated)?;
         self.peers = std::mem::take(&mut migrated);
+        self.schedule_metadata_rollup_if_needed();
         self.persist_peer_state()
     }
 
@@ -1645,6 +1775,7 @@ impl Store {
             return Err(StorageError::InvalidTimestamp);
         }
 
+        let had_pending_metadata_rollup = self.has_pending_metadata_rollup();
         let next_sequence = self
             .current
             .as_ref()
@@ -1673,11 +1804,16 @@ impl Store {
             blob_len: encoded.bytes.len(),
             file_name: new_name.clone(),
         });
+        self.clear_metadata_rollup();
 
         if let Some(previous_name) = previous_name {
             if previous_name != new_name {
                 let _ = self.fs.remove(&previous_name);
             }
+        }
+
+        if had_pending_metadata_rollup {
+            self.persist_peer_state()?;
         }
 
         Ok(())
@@ -1858,6 +1994,7 @@ impl Store {
         let files = self.current_plain_files();
         self.enforce_shared_blob_limit_for_state(&files, &next_peers)?;
         self.peers = next_peers;
+        self.schedule_metadata_rollup_if_needed();
         if persist {
             self.persist_peer_state()?;
         }
@@ -1888,6 +2025,15 @@ impl Store {
                 .unwrap_or(0),
             recovery_mode_enabled: self.recovery_mode_enabled,
             current_content: current_content_summary(self.current.as_ref()),
+            metadata_rollup_due_at: self
+                .metadata_rollup_due_at
+                .map(|timestamp| timestamp.0)
+                .unwrap_or(0),
+            metadata_rollup_due_at_ns: self
+                .metadata_rollup_due_at
+                .map(|timestamp| timestamp.1)
+                .unwrap_or(0),
+            metadata_rollup_base_content_id: self.metadata_rollup_base_content_id.clone(),
         };
         let plaintext = metadata.encode_to_vec();
         let ciphertext = encrypt_sidecar(&self.peer_cipher, &plaintext);
@@ -1926,6 +2072,11 @@ impl Store {
                 .map(|revision| (revision.created_at, revision.created_at_ns))
         });
         self.recovery_mode_enabled = metadata.recovery_mode_enabled;
+        self.metadata_rollup_due_at = optional_metadata_timestamp(
+            metadata.metadata_rollup_due_at,
+            metadata.metadata_rollup_due_at_ns,
+        );
+        self.metadata_rollup_base_content_id = metadata.metadata_rollup_base_content_id;
         self.current = metadata
             .current_content
             .as_ref()
@@ -2170,6 +2321,20 @@ mod tests {
 
     fn master() -> Vec<u8> {
         keys::derive_master_priv("storage-master")
+    }
+
+    fn store_with_fixed_rollup_delay(
+        fs: Arc<dyn Filesystem>,
+        clock: Arc<dyn Clock>,
+        delay: Duration,
+    ) -> Store {
+        Store::new_with_time_source_and_rollup_sampler(
+            fs,
+            &master(),
+            clock,
+            Arc::new(move || delay),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2588,8 +2753,8 @@ mod tests {
                 .map(|content| (content.content_id.clone(), content.content_length)),
             Some((b"revision-a".to_vec(), 111))
         );
-        assert_eq!(peer.requester_last_downloaded_at, 16);
-        assert_eq!(peer.requester_last_downloaded_at_ns, 1);
+        assert_eq!(peer.requester_last_downloaded_advertised_at, 16);
+        assert_eq!(peer.requester_last_downloaded_advertised_at_ns, 1);
         assert_eq!(peer.requester_last_download_latency_seconds, 6);
     }
 
@@ -2670,6 +2835,9 @@ mod tests {
             recovery_watermark_at_ns: 0,
             recovery_mode_enabled: false,
             current_content: None,
+            metadata_rollup_due_at: 0,
+            metadata_rollup_due_at_ns: 0,
+            metadata_rollup_base_content_id: Vec::new(),
         };
         let peer_state_key = keys::derive_key(&master(), "bb/storage/peer-state", 32).unwrap();
         let peer_cipher = Aes256GcmSiv::new_from_slice(&peer_state_key).unwrap();
@@ -2752,6 +2920,137 @@ mod tests {
         );
         assert!(reloaded.latest_recovered_revision().is_none());
         assert_eq!(reloaded.recovery_watermark(), None);
+    }
+
+    #[test]
+    fn metadata_rollup_schedules_once_per_dirty_epoch_and_persists() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let clock = Arc::new(clock::ManualClock::new(
+            clock::Timestamp::new(100, 7).unwrap(),
+        ));
+        let mut store =
+            store_with_fixed_rollup_delay(fs.clone(), clock.clone(), Duration::from_secs(86_400));
+        store.set_file("alpha.txt", b"secret".to_vec()).unwrap();
+        let base_content_id = store.current_content().unwrap().content_id.clone();
+
+        store
+            .set_peer_content_id(b"peer-a", b"peer-revision-a")
+            .unwrap();
+        let first_due = store.metadata_rollup_due_at().unwrap();
+        assert_eq!(
+            store.metadata_rollup_base_content_id(),
+            Some(base_content_id.as_slice())
+        );
+
+        clock.set(clock::Timestamp::new(200, 9).unwrap());
+        store.record_peer_call_outcome(b"peer-a", true).unwrap();
+        assert_eq!(store.metadata_rollup_due_at(), Some(first_due));
+        assert_eq!(
+            store.metadata_rollup_base_content_id(),
+            Some(base_content_id.as_slice())
+        );
+
+        let reloaded = store_with_fixed_rollup_delay(fs, clock, Duration::from_secs(86_400));
+        assert_eq!(reloaded.metadata_rollup_due_at(), Some(first_due));
+        assert_eq!(
+            reloaded.metadata_rollup_base_content_id(),
+            Some(base_content_id.as_slice())
+        );
+    }
+
+    #[test]
+    fn metadata_rollup_is_not_scheduled_without_current_content() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let clock = Arc::new(clock::ManualClock::new(
+            clock::Timestamp::new(50, 1).unwrap(),
+        ));
+        let mut store = store_with_fixed_rollup_delay(fs, clock, Duration::from_secs(86_400));
+
+        store.ensure_peer(b"peer-a").unwrap();
+        store.record_peer_call_outcome(b"peer-a", true).unwrap();
+
+        assert_eq!(store.metadata_rollup_due_at(), None);
+        assert_eq!(store.metadata_rollup_base_content_id(), None);
+    }
+
+    #[test]
+    fn file_rewrite_clears_pending_metadata_rollup_state() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let clock = Arc::new(clock::ManualClock::new(
+            clock::Timestamp::new(100, 7).unwrap(),
+        ));
+        let mut store =
+            store_with_fixed_rollup_delay(fs.clone(), clock.clone(), Duration::from_secs(86_400));
+        store.set_file("alpha.txt", b"secret".to_vec()).unwrap();
+        store
+            .set_peer_content_id(b"peer-a", b"peer-revision-a")
+            .unwrap();
+        assert!(store.metadata_rollup_due_at().is_some());
+
+        clock.set(clock::Timestamp::new(101, 8).unwrap());
+        store.set_file("alpha.txt", b"new-secret".to_vec()).unwrap();
+        assert_eq!(store.metadata_rollup_due_at(), None);
+        assert_eq!(store.metadata_rollup_base_content_id(), None);
+
+        let reloaded = store_with_fixed_rollup_delay(fs, clock, Duration::from_secs(86_400));
+        assert_eq!(reloaded.metadata_rollup_due_at(), None);
+        assert_eq!(reloaded.metadata_rollup_base_content_id(), None);
+    }
+
+    #[test]
+    fn due_metadata_rollup_rewrites_current_content_and_preserves_files() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let clock = Arc::new(clock::ManualClock::new(
+            clock::Timestamp::new(100, 0).unwrap(),
+        ));
+        let mut store = store_with_fixed_rollup_delay(fs, clock.clone(), Duration::from_secs(5));
+        store.set_file("alpha.txt", b"secret".to_vec()).unwrap();
+        let initial_content_id = store.current_content().unwrap().content_id.clone();
+
+        store
+            .set_peer_content_id(b"peer-a", b"peer-revision-a")
+            .unwrap();
+        clock.set(clock::Timestamp::new(104, 0).unwrap());
+        assert_eq!(
+            store.roll_up_peer_metadata_if_due().unwrap(),
+            MetadataRollupOutcome::NotDue
+        );
+
+        clock.set(clock::Timestamp::new(105, 0).unwrap());
+        let outcome = store.roll_up_peer_metadata_if_due().unwrap();
+        let MetadataRollupOutcome::Rewritten { content_id } = outcome else {
+            panic!("expected a rewritten metadata rollup");
+        };
+        assert_ne!(content_id, initial_content_id);
+        assert_eq!(store.get_file("alpha.txt").unwrap(), b"secret".to_vec());
+        assert_eq!(store.metadata_rollup_due_at(), None);
+        assert_eq!(store.metadata_rollup_base_content_id(), None);
+    }
+
+    #[test]
+    fn stale_metadata_rollup_is_cleared_when_base_revision_changed() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let clock = Arc::new(clock::ManualClock::new(
+            clock::Timestamp::new(100, 0).unwrap(),
+        ));
+        let mut store = store_with_fixed_rollup_delay(fs, clock.clone(), Duration::from_secs(5));
+        store.set_file("alpha.txt", b"secret".to_vec()).unwrap();
+        let stale_base_content_id = store.current_content().unwrap().content_id.clone();
+
+        store
+            .set_peer_content_id(b"peer-a", b"peer-revision-a")
+            .unwrap();
+        clock.set(clock::Timestamp::new(101, 0).unwrap());
+        store.set_file("alpha.txt", b"new-secret".to_vec()).unwrap();
+        store.metadata_rollup_due_at = Some((100, 0));
+        store.metadata_rollup_base_content_id = stale_base_content_id;
+
+        assert_eq!(
+            store.roll_up_peer_metadata_if_due().unwrap(),
+            MetadataRollupOutcome::ClearedSuperseded
+        );
+        assert_eq!(store.metadata_rollup_due_at(), None);
+        assert_eq!(store.metadata_rollup_base_content_id(), None);
     }
 
     #[test]
