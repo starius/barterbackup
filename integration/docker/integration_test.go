@@ -429,6 +429,39 @@ func TestDockerMaintenanceRefillsReplicaTargetFromKnownPeer(t *testing.T) {
 	waitForContractSynced(t, owner, peerBOnion)
 }
 
+func TestDockerMaintenanceReciprocatesWithStoredPeerAtReplicaTarget(t *testing.T) {
+	t.Parallel()
+
+	scenario := newScenario(t)
+	owner := addNode(t, scenario, "owner", "correct horse battery staple")
+	peerA := addNode(t, scenario, "peer-a", "peer-a password")
+	peerB := addNode(t, scenario, "peer-b", "peer-b password")
+
+	ownerOnion := startInitializedReadyNode(t, owner)
+	peerAOnion := startInitializedReadyNode(t, peerA)
+	peerBOnion := startInitializedReadyNode(t, peerB)
+
+	connectPeer(t, owner, peerAOnion)
+	connectPeer(t, owner, peerBOnion)
+	connectPeer(t, peerA, ownerOnion)
+	connectPeer(t, peerB, ownerOnion)
+
+	ownerPayload := randomPayload(160 * 1024)
+	setFile(t, owner, "owner.bin", ownerPayload)
+	proposeContract(t, owner, peerAOnion)
+	waitForPeerStorage(t, peerA, ownerOnion, int64(len(ownerPayload)))
+	checkContract(t, owner, peerAOnion)
+	setMinReplicas(t, owner, 1)
+
+	peerPayload := randomPayload(96 * 1024)
+	setFile(t, peerB, "peer.bin", peerPayload)
+	proposeContract(t, peerB, ownerOnion)
+	waitForPeerStorage(t, owner, peerBOnion, int64(len(peerPayload)))
+
+	waitForPeerStorage(t, peerB, ownerOnion, int64(len(ownerPayload)))
+	waitForContractSynced(t, owner, peerBOnion)
+}
+
 func TestDockerDelayedPeerMetadataFlushPersistsAfterConfiguredDelay(t *testing.T) {
 	t.Parallel()
 

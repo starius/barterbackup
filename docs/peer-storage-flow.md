@@ -78,8 +78,9 @@ A peer counts as a fresh replica only when both are true:
 That is stricter than "the peer knows about our revision" and stricter than
 "the peer accepted our sidecar".
 
-If `fresh_replica_count >= min_replicas`, maintenance only verifies existing
-fresh replicas.
+If `fresh_replica_count >= min_replicas`, maintenance still verifies existing
+fresh replicas, but it may also continue publishing to peers whose data we
+already store so reciprocal storage is not one-sided.
 
 If `fresh_replica_count < min_replicas`, maintenance also looks for more peers
 that could store our current content.
@@ -99,19 +100,25 @@ A peer is eligible only if:
 - it is online
 - it does not already store our current content
 - owner publication is currently allowed
-- we currently have local content to publish
 
-Selection is weighted-random, not fixed-order.
+Selection is not one flat weighted lottery.
 
-The weights favor:
+The daemon first applies hard priority tiers:
 
 - peers whose data we already store locally
 - peers pinned by us
 - peers that pin us
+
+Only after those tiers are exhausted does it use weighted-random selection for
+the remaining eligible peers.
+
+The weighted remainder favors:
+
 - peers first seen longer ago
 - peers with better observed call-success history
 
-This means reciprocal storage is preferred, but not mandatory.
+This means reciprocal storage is actively prioritized instead of being only a
+soft preference.
 
 ## Step 3: our node publishes to a peer
 
@@ -119,6 +126,12 @@ This path is used by background maintenance when it selects a peer for
 publication.
 
 The local operation is `publish_to_peer_updates()`.
+
+If the local node currently has no content blob, publication still performs one
+safe sidecar refresh with `requester_content = nil`. Because nil no longer
+clears remote content, this preserves the publication relationship without
+forcing "first real content" to also be the first publication event the peer
+ever observes.
 
 ### 3.1 Connect and inspect current remote state
 
@@ -248,13 +261,24 @@ This is not a protocol failure. The responder is explicitly saying:
 
 This peer does not count as a fresh replica of our data.
 
-#### Outcome C: `RequesterContentCleared`
+#### Outcome C: `requester_content = nil`
 
-If `requester_content` is `nil`, the responder clears the caller's mirrored
-content state and removes the blob if no other peer sidecar still references
-it.
+If `requester_content` is `nil`, the responder leaves any previously recorded
+requester content unchanged.
 
-That is logged at `INFO` because it is data-destructive.
+This is a safe sidecar refresh, not a destructive clear.
+
+### 4.4 Score delayed peer uptake
+
+When we first attempt to advertise a concrete content id to a peer, we remember
+that content id and the first advertisement time.
+
+If the peer later calls `Download` for that same content id, the elapsed time
+is recorded and deducted from the peer's score.
+
+If we advertise a newer revision before the peer ever downloads the older one,
+the pending delay of that superseded advertisement is also deducted from the
+score.
 
 ## Step 5: what makes storage mutual
 

@@ -393,16 +393,21 @@ Recovery workflow:
 - `bbd` maintains the configured `min_replicas` target in the background; when
   fresh online replicas drop below that target, it actively searches for more
   peers to store our current revision on
-- candidate search is peer-centric and weighted:
-  - peers whose data we already store locally are tried first
-  - peers pinned by us or pinning us get strong weight boosts
+- if we already store a peer's data, maintenance will still try to publish our
+  side to that peer even when the fresh-replica target is already satisfied
+- candidate search is peer-centric and tiered first, then weighted:
+  - peers whose data we already store locally are unconditional first-priority
+    publication targets
+  - peers pinned by us or pinning us are the next unconditional priority tier
   - older first-seen peers get a moderate boost
   - peers with better observed live success history get a moderate boost
-  - all eligible peers still keep some chance because selection remains
-    weighted-random rather than fixed-order
+  - the remaining eligible peers still keep some chance because selection
+    remains weighted-random inside the non-priority remainder
 - a peer may accept our sidecar update but decline to cache mirrored bytes when
   its peer-storage budget is full; that is not a protocol failure, but such a
   peer does not count as one of the current fresh replicas
+- owner-side publication also records how long peers take to download newly
+  advertised revisions; long delays are deducted from peer score
 - `bbcli config get --resource-policy` reports the current fixed peer-content
   ceiling, peer transport message limit, retry timing policy, and related
   runtime resource bounds
