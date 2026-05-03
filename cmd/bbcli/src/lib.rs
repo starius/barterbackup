@@ -786,11 +786,17 @@ fn format_state_response_at_offset(
             ));
             lines.push(format!(
                 "node_initialized_at: {}",
-                format_timestamp_or_unknown(recovery.node_initialized_at.as_ref())
+                format_timestamp_local_or_unknown(
+                    recovery.node_initialized_at.as_ref(),
+                    local_offset
+                )
             ));
             lines.push(format!(
                 "recovery_watermark_at: {}",
-                format_timestamp_or_unknown(recovery.recovery_watermark_at.as_ref())
+                format_timestamp_local_or_unknown(
+                    recovery.recovery_watermark_at.as_ref(),
+                    local_offset
+                )
             ));
             if !recovery.publish_blocked_reason.is_empty() {
                 lines.push(format!(
@@ -805,7 +811,10 @@ fn format_state_response_at_offset(
                 ));
                 lines.push(format!(
                     "latest_recovered_at: {}",
-                    format_timestamp_or_unknown(recovery.latest_recovered_at.as_ref())
+                    format_timestamp_local_or_unknown(
+                        recovery.latest_recovered_at.as_ref(),
+                        local_offset
+                    )
                 ));
             }
             if !recovery.newer_known_content_id.is_empty() {
@@ -815,7 +824,10 @@ fn format_state_response_at_offset(
                 ));
                 lines.push(format!(
                     "newer_known_at: {}",
-                    format_timestamp_or_unknown(recovery.newer_known_at.as_ref())
+                    format_timestamp_local_or_unknown(
+                        recovery.newer_known_at.as_ref(),
+                        local_offset
+                    )
                 ));
             }
         }
@@ -917,12 +929,13 @@ fn format_unix_datetime_local(seconds: i64, offset: UtcOffset) -> String {
         .unwrap_or(OffsetDateTime::UNIX_EPOCH)
         .to_offset(offset);
     format!(
-        "{:04}-{:02}-{:02} {:02}:{:02} {}",
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} {}",
         datetime.year(),
         month_number(datetime.month()),
         datetime.day(),
         datetime.hour(),
         datetime.minute(),
+        datetime.second(),
         format_utc_offset(offset)
     )
 }
@@ -1021,6 +1034,16 @@ fn format_offline_durability_lines(
 fn format_timestamp_or_unknown(timestamp: Option<&ProtoTimestamp>) -> String {
     timestamp
         .map(|timestamp| format!("{}.{:09}", timestamp.seconds, timestamp.nanos.max(0)))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Render one protobuf timestamp in local time without subseconds, or `unknown`.
+fn format_timestamp_local_or_unknown(
+    timestamp: Option<&ProtoTimestamp>,
+    offset: UtcOffset,
+) -> String {
+    timestamp
+        .map(|timestamp| format_unix_datetime_local(timestamp.seconds, offset))
         .unwrap_or_else(|| "unknown".to_string())
 }
 
@@ -2858,6 +2881,12 @@ mod tests {
             .any(|line| line == "publish_blocked_reason: recovery mode is enabled"));
         assert!(lines
             .iter()
+            .any(|line| line == "node_initialized_at: 1969-12-31 19:01:40 -05:00"));
+        assert!(lines
+            .iter()
+            .any(|line| line == "recovery_watermark_at: 1969-12-31 19:01:30 -05:00"));
+        assert!(lines
+            .iter()
             .any(|line| line == "files_total_size_bytes: 99"));
         assert!(lines
             .iter()
@@ -2894,15 +2923,15 @@ mod tests {
         }));
         assert!(lines
             .iter()
-            .any(|line| line == "latest_recovered_at: 80.000000009"));
+            .any(|line| line == "latest_recovered_at: 1969-12-31 19:01:20 -05:00"));
         assert!(lines.iter().any(|line| {
             *line == format!("newer_known_content_id: {}", hex::encode(b"known-id"))
         }));
         assert!(lines
             .iter()
-            .any(|line| line == "newer_known_at: 95.000000010"));
+            .any(|line| line == "newer_known_at: 1969-12-31 19:01:35 -05:00"));
         assert!(lines.iter().any(|line| {
-            line == "  the data will become best-effort on 2023-11-14 18:13 -05:00 (in 1 hour)."
+            line == "  the data will become best-effort on 2023-11-14 18:13:20 -05:00 (in 1 hour)."
         }));
     }
 
@@ -2928,11 +2957,11 @@ mod tests {
         let offset = UtcOffset::from_hms(-5, 0, 0).unwrap();
         assert_eq!(
             format_unix_datetime_local(0, offset),
-            "1969-12-31 19:00 -05:00"
+            "1969-12-31 19:00:00 -05:00"
         );
         assert_eq!(
             format_unix_datetime_local(1_700_003_600, offset),
-            "2023-11-14 18:13 -05:00"
+            "2023-11-14 18:13:20 -05:00"
         );
     }
 
@@ -2963,10 +2992,12 @@ mod tests {
             line == "  2 fresh replicas are predicted immediately; the configured target is 3 replicas."
         }));
         assert!(lines.iter().any(|line| {
-            line == "  at least 1 replica will remain under storage obligation until 2023-11-15 18:13 -05:00 (in 1 day, 1 hour)."
+            line
+                == "  at least 1 replica will remain under storage obligation until 2023-11-15 18:13:20 -05:00 (in 1 day, 1 hour)."
         }));
         assert!(lines.iter().any(|line| {
-            line == "  the data will become best-effort on 2023-11-16 19:13 -05:00 (in 2 days, 2 hours)."
+            line
+                == "  the data will become best-effort on 2023-11-16 19:13:20 -05:00 (in 2 days, 2 hours)."
         }));
     }
 
