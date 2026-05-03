@@ -741,8 +741,8 @@ fn format_state_response(response: &StateResponse) -> Vec<String> {
                 peers.mutual_storage_peers
             ));
             lines.push(format!(
-                "mean_mutual_storage_score_seconds: {}",
-                peers.mean_mutual_storage_score_seconds
+                "mean_mutual_storage_score: {}",
+                format_duration_human(peers.mean_mutual_storage_score_seconds)
             ));
             lines.push(format!("mirrored_peers: {}", peers.mirrored_peers));
             lines.push(format!(
@@ -761,8 +761,10 @@ fn format_state_response(response: &StateResponse) -> Vec<String> {
             ));
             for point in &durability.predicted_replica_horizon {
                 lines.push(format!(
-                    "predicted_replica_horizon remaining_fresh_replicas={} seconds_until_threshold={} never={}",
-                    point.remaining_fresh_replicas, point.seconds_until_threshold, point.never
+                    "predicted_replica_horizon remaining_fresh_replicas={} until_threshold={} never={}",
+                    point.remaining_fresh_replicas,
+                    format_duration_human(point.seconds_until_threshold),
+                    point.never
                 ));
             }
         }
@@ -1460,12 +1462,12 @@ fn format_peer_info_line(peer: &PeerInfo) -> String {
         protos::clirpc::PeerStorageProtection::try_from(peer.storage_protection)
             .unwrap_or(protos::clirpc::PeerStorageProtection::None);
     let mut line = format!(
-        "peer={} status={} pinned_by_us={} pins_us={} score_seconds={} score_measured_at={} stored_content_bytes={} latest_known_content_length={} latest_cached_content_length={} stale_cache={} storage_protection={} tracked_only={} last_live_at={}",
+        "peer={} status={} pinned_by_us={} pins_us={} score={} score_measured_at={} stored_content_bytes={} latest_known_content_length={} latest_cached_content_length={} stale_cache={} storage_protection={} tracked_only={} last_live_at={}",
         onion_service_id,
         status,
         peer.pinned_by_us,
         peer.pins_us,
-        peer.score_seconds,
+        format_duration_human(peer.score_seconds),
         peer.score_measured_at,
         peer.stored_content_bytes,
         peer.latest_known_content_length,
@@ -1608,8 +1610,10 @@ fn format_storage_config_response(
             .flat_map(|info| info.replica_horizon.iter())
         {
             lines.push(format!(
-                "replica_horizon remaining_fresh_replicas={} seconds_until_threshold={} never={}",
-                point.remaining_fresh_replicas, point.seconds_until_threshold, point.never
+                "replica_horizon remaining_fresh_replicas={} until_threshold={} never={}",
+                point.remaining_fresh_replicas,
+                format_duration_human(point.seconds_until_threshold),
+                point.never
             ));
         }
     }
@@ -1697,12 +1701,12 @@ fn format_peer_storage_response(response: &protos::clirpc::GetPeerStorageRespons
             let cache_is_stale = peer_storage.their_latest_known_content_id
                 != peer_storage.their_latest_cached_content_id;
             format!(
-                "peer={} online={} synced={} our_remaining_seconds={} their_remaining_seconds={} their_content_length={} latest_known_id={} latest_known_length={} latest_cached_id={} latest_cached_length={} stale_cache={}",
+                "peer={} online={} synced={} our_remaining={} their_remaining={} their_content_length={} latest_known_id={} latest_known_length={} latest_cached_id={} latest_cached_length={} stale_cache={}",
                 peer,
                 peer_storage.online,
                 peer_storage.our_content_synced,
-                peer_storage.our_remaining_seconds,
-                peer_storage.their_remaining_seconds,
+                format_duration_human(peer_storage.our_remaining_seconds),
+                format_duration_human(peer_storage.their_remaining_seconds),
                 peer_storage.their_content_length,
                 latest_known_id,
                 peer_storage.their_latest_known_content_length,
@@ -2710,7 +2714,7 @@ mod tests {
         assert!(lines.iter().any(|line| line == "mutual_storage_peers: 2"));
         assert!(lines
             .iter()
-            .any(|line| line == "mean_mutual_storage_score_seconds: 3600"));
+            .any(|line| line == "mean_mutual_storage_score: 1h"));
         assert!(lines.iter().any(|line| line == "mirrored_peers: 1"));
         assert!(lines
             .iter()
@@ -2738,7 +2742,7 @@ mod tests {
             .iter()
             .any(|line| line == "predicted_min_replicas_target: 2"));
         assert!(lines.iter().any(|line| {
-            line == "predicted_replica_horizon remaining_fresh_replicas=0 seconds_until_threshold=3600 never=false"
+            line == "predicted_replica_horizon remaining_fresh_replicas=0 until_threshold=1h never=false"
         }));
     }
 
@@ -3458,6 +3462,7 @@ mod tests {
             .iter()
             .any(|line| line.contains("storage_protection=pinned")));
         assert!(lines.iter().any(|line| line.contains("status=connected")));
+        assert!(lines.iter().any(|line| line.contains("score=7s")));
         assert!(lines.iter().any(|line| line == "online: 1"));
         assert!(lines.iter().any(|line| line.contains("peer=online.onion")));
         assert!(lines.iter().any(|line| line == "offline: 0"));
@@ -3531,6 +3536,7 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line.contains("consecutive_failures=2")));
+        assert!(lines.iter().any(|line| line.contains("score=-5s")));
         assert!(!lines
             .iter()
             .any(|line| line.contains("peer=contract.onion")));
@@ -3674,10 +3680,10 @@ mod tests {
             .any(|line| line == "reclaimable_peer_storage_bytes: 90"));
         assert!(lines.iter().any(|line| line == "fresh_replicas_now: 2"));
         assert!(lines.iter().any(|line| {
-            line == "replica_horizon remaining_fresh_replicas=1 seconds_until_threshold=120 never=false"
+            line == "replica_horizon remaining_fresh_replicas=1 until_threshold=2m never=false"
         }));
         assert!(lines.iter().any(|line| {
-            line == "replica_horizon remaining_fresh_replicas=0 seconds_until_threshold=0 never=true"
+            line == "replica_horizon remaining_fresh_replicas=0 until_threshold=0s never=true"
         }));
         assert!(lines
             .iter()
@@ -3810,8 +3816,8 @@ mod tests {
 
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("peer=peer.onion"));
-        assert!(lines[0].contains("our_remaining_seconds=11"));
-        assert!(lines[0].contains("their_remaining_seconds=22"));
+        assert!(lines[0].contains("our_remaining=11s"));
+        assert!(lines[0].contains("their_remaining=22s"));
         assert!(lines[0].contains("latest_known_id=aa"));
         assert!(lines[0].contains("latest_cached_id=bb"));
         assert!(lines[0].contains("stale_cache=true"));
