@@ -53,6 +53,16 @@ const LOCAL_FILE_CHUNK_BYTES: usize = 256 * 1024;
 /// UNLOCK_RETRY_INTERVAL is the delay between unlock readiness probes.
 const UNLOCK_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
+const VERSION_STRING: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (git ",
+    env!("BB_GIT_COMMIT_HASH"),
+    " ",
+    env!("BB_GIT_COMMIT_DATE"),
+    env!("BB_GIT_DIRTY_SUFFIX"),
+    ")"
+);
+
 /// PasswordAssessment captures the password-quality fields used by the CLI.
 #[derive(Debug, Clone, PartialEq)]
 struct PasswordAssessment {
@@ -78,7 +88,7 @@ struct CollectedStreamedFile {
 
 /// Args configures the top-level `bbcli` command-line interface.
 #[derive(Parser, Debug)]
-#[command(name = "bbcli", about = "BarterBackup CLI")]
+#[command(name = "bbcli", about = "BarterBackup CLI", version = VERSION_STRING)]
 pub struct Args {
     /// local_addr is the local daemon endpoint.
     #[arg(long, alias = "daemon-addr", env = "BBCLI_LOCAL_ADDR")]

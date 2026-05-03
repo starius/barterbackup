@@ -43,9 +43,19 @@ const TIMER_LABEL_PEER_RUNTIME_RESTART_BACKOFF: &str = "peer-runtime.restart-bac
 
 type MetadataRollupDelaySampler = Arc<dyn Fn() -> Duration + Send + Sync>;
 
+const VERSION_STRING: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (git ",
+    env!("BB_GIT_COMMIT_HASH"),
+    " ",
+    env!("BB_GIT_COMMIT_DATE"),
+    env!("BB_GIT_DIRTY_SUFFIX"),
+    ")"
+);
+
 /// Config configures the BarterBackup daemon process.
 #[derive(Clone, Debug, Parser)]
-#[command(name = "bbd", about = "BarterBackup daemon")]
+#[command(name = "bbd", about = "BarterBackup daemon", version = VERSION_STRING)]
 pub struct Config {
     /// local_addr is the local loopback address for the CLI gRPC service.
     #[arg(long, alias = "cli-addr", env = "BBD_LOCAL_ADDR")]
