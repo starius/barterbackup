@@ -14,6 +14,7 @@ content = { path = "../content" }
 hex = "0.4"
 keys = { path = "../keys" }
 prost = "0.14.3"
+prost-types = "0.14.3"
 protos = { path = "../protos" }
 rand = "0.8"
 tempfile = "3"

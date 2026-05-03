@@ -16,6 +16,7 @@ use crossterm::style::Stylize;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use dirs::home_dir;
 use futures_util::{stream, TryStreamExt};
+use prost_types::Timestamp as ProtoTimestamp;
 use protos::clirpc::barter_backup_client_client::BarterBackupClientClient;
 use protos::clirpc::{
     ConnectPeerRequest, DeleteFileRequest, ExportBuiltInPeersRequest, File, FileInfo,
@@ -726,11 +727,7 @@ fn format_state_response_at_offset(
             lines.push(format!(
                 "files_last_updated_at: {}",
                 if content.file_count > 0 {
-                    format!(
-                        "{}.{:09}",
-                        content.last_updated_at,
-                        content.last_updated_at_ns.max(0)
-                    )
+                    format_timestamp_or_unknown(content.last_updated_at.as_ref())
                 } else {
                     "never".to_string()
                 }
@@ -779,27 +776,11 @@ fn format_state_response_at_offset(
             ));
             lines.push(format!(
                 "node_initialized_at: {}",
-                if recovery.node_initialized_at != 0 || recovery.node_initialized_at_ns != 0 {
-                    format!(
-                        "{}.{:09}",
-                        recovery.node_initialized_at,
-                        recovery.node_initialized_at_ns.max(0)
-                    )
-                } else {
-                    "unknown".to_string()
-                }
+                format_timestamp_or_unknown(recovery.node_initialized_at.as_ref())
             ));
             lines.push(format!(
                 "recovery_watermark_at: {}",
-                if recovery.recovery_watermark_at != 0 || recovery.recovery_watermark_at_ns != 0 {
-                    format!(
-                        "{}.{:09}",
-                        recovery.recovery_watermark_at,
-                        recovery.recovery_watermark_at_ns.max(0)
-                    )
-                } else {
-                    "unknown".to_string()
-                }
+                format_timestamp_or_unknown(recovery.recovery_watermark_at.as_ref())
             ));
             if !recovery.publish_blocked_reason.is_empty() {
                 lines.push(format!(
@@ -814,10 +795,7 @@ fn format_state_response_at_offset(
                 ));
                 lines.push(format!(
                     "latest_recovered_at: {}",
-                    format_timestamp_or_unknown(
-                        recovery.latest_recovered_at,
-                        recovery.latest_recovered_at_ns
-                    )
+                    format_timestamp_or_unknown(recovery.latest_recovered_at.as_ref())
                 ));
             }
             if !recovery.newer_known_content_id.is_empty() {
@@ -827,10 +805,7 @@ fn format_state_response_at_offset(
                 ));
                 lines.push(format!(
                     "newer_known_at: {}",
-                    format_timestamp_or_unknown(
-                        recovery.newer_known_at,
-                        recovery.newer_known_at_ns
-                    )
+                    format_timestamp_or_unknown(recovery.newer_known_at.as_ref())
                 ));
             }
         }
@@ -1032,13 +1007,23 @@ fn format_offline_durability_lines(
     lines
 }
 
-/// Render one `(seconds, nanos)` pair or `unknown` for operator-facing state output.
-fn format_timestamp_or_unknown(seconds: i64, nanos: i32) -> String {
-    if seconds != 0 || nanos != 0 {
-        format!("{}.{:09}", seconds, nanos.max(0))
-    } else {
-        "unknown".to_string()
+/// Render one protobuf timestamp or `unknown` for operator-facing state output.
+fn format_timestamp_or_unknown(timestamp: Option<&ProtoTimestamp>) -> String {
+    timestamp
+        .map(|timestamp| format!("{}.{:09}", timestamp.seconds, timestamp.nanos.max(0)))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Build one protobuf timestamp from file metadata.
+fn proto_timestamp_from_parts(seconds: i64, nanos: i64) -> Result<ProtoTimestamp> {
+    if !(0..1_000_000_000).contains(&nanos) {
+        bail!("timestamp nanoseconds must be between 0 and 999999999");
     }
+
+    Ok(ProtoTimestamp {
+        seconds,
+        nanos: i32::try_from(nanos).context("timestamp nanoseconds are out of range")?,
+    })
 }
 
 /// Run the init command, checking daemon state before asking for a password.
@@ -1406,13 +1391,12 @@ fn build_set_file_upload(
     data: Vec<u8>,
     modified_at: i64,
     modified_at_ns: i64,
-) -> Vec<protos::clirpc::SetFileChunk> {
+) -> Result<Vec<protos::clirpc::SetFileChunk>> {
     let mut chunks = vec![protos::clirpc::SetFileChunk {
         chunk: Some(protos::clirpc::set_file_chunk::Chunk::File(FileInfo {
             name: name.to_string(),
             size_bytes: i64::try_from(data.len()).unwrap_or(i64::MAX),
-            modified_at,
-            modified_at_ns,
+            modified_at: Some(proto_timestamp_from_parts(modified_at, modified_at_ns)?),
         })),
     }];
     for chunk in data.chunks(LOCAL_FILE_CHUNK_BYTES) {
@@ -1420,7 +1404,7 @@ fn build_set_file_upload(
             chunk: Some(protos::clirpc::set_file_chunk::Chunk::Data(chunk.to_vec())),
         });
     }
-    chunks
+    Ok(chunks)
 }
 
 /// Start collecting one streamed file after receiving its metadata chunk.
@@ -1434,7 +1418,6 @@ fn start_streamed_file(file: FileInfo) -> Result<CollectedStreamedFile> {
             name: file.name,
             data: Vec::new(),
             modified_at: file.modified_at,
-            modified_at_ns: file.modified_at_ns,
         },
         expected_size_bytes: usize::try_from(file.size_bytes)
             .context("daemon reported a file size that does not fit on this platform")?,
@@ -1890,8 +1873,10 @@ fn format_file_list(files: &[FileInfo]) -> Vec<String> {
         .iter()
         .map(|file| {
             format!(
-                "name={} size_bytes={} modified_at={}.{:09}",
-                file.name, file.size_bytes, file.modified_at, file.modified_at_ns
+                "name={} size_bytes={} modified_at={}",
+                file.name,
+                file.size_bytes,
+                format_timestamp_or_unknown(file.modified_at.as_ref())
             )
         })
         .collect()
@@ -2362,7 +2347,7 @@ pub async fn set_file_with_client(
             data,
             modified_at,
             modified_at_ns,
-        )))
+        )?))
         .await?;
     Ok(())
 }
@@ -2807,8 +2792,7 @@ mod tests {
                 content: Some(protos::clirpc::StateContentSummary {
                     file_count: 2,
                     total_size_bytes: 99,
-                    last_updated_at: 123,
-                    last_updated_at_ns: 45,
+                    last_updated_at: Some(proto_timestamp_from_parts(123, 45).unwrap()),
                     has_pending_update: true,
                 }),
                 peers: Some(protos::clirpc::StatePeerSummary {
@@ -2832,17 +2816,13 @@ mod tests {
                 }),
                 recovery: Some(protos::clirpc::StateRecoverySummary {
                     recovery_mode_enabled: true,
-                    node_initialized_at: 100,
-                    node_initialized_at_ns: 7,
-                    recovery_watermark_at: 90,
-                    recovery_watermark_at_ns: 8,
+                    node_initialized_at: Some(proto_timestamp_from_parts(100, 7).unwrap()),
+                    recovery_watermark_at: Some(proto_timestamp_from_parts(90, 8).unwrap()),
                     publish_blocked_reason: "recovery mode is enabled".to_string(),
                     latest_recovered_content_id: b"recovered-id".to_vec(),
-                    latest_recovered_at: 80,
-                    latest_recovered_at_ns: 9,
+                    latest_recovered_at: Some(proto_timestamp_from_parts(80, 9).unwrap()),
                     newer_known_content_id: b"known-id".to_vec(),
-                    newer_known_at: 95,
-                    newer_known_at_ns: 10,
+                    newer_known_at: Some(proto_timestamp_from_parts(95, 10).unwrap()),
                 }),
             }),
         };
@@ -3521,7 +3501,10 @@ mod tests {
         assert_eq!(info.len(), 2);
         assert_eq!(info[0].name, "alpha.txt");
         assert_eq!(info[0].size_bytes, 5);
-        assert_eq!(info[0].modified_at, 0);
+        assert_eq!(
+            info[0].modified_at,
+            Some(proto_timestamp_from_parts(0, 0).unwrap())
+        );
 
         let data = get_file_with_client(&mut client, "alpha.txt").await?;
         assert_eq!(data, b"alpha".to_vec());
@@ -3551,8 +3534,7 @@ mod tests {
         let lines = format_file_list(&[FileInfo {
             name: "alpha.txt".to_string(),
             size_bytes: 5,
-            modified_at: 123,
-            modified_at_ns: 45,
+            modified_at: Some(proto_timestamp_from_parts(123, 45).unwrap()),
         }]);
 
         assert_eq!(

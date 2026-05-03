@@ -11,6 +11,7 @@ use clock::{Clock, SystemClock, Timestamp};
 use content::{PlainFile, CONTENT_ID_LEN};
 use futures::{stream, Stream};
 use prost::Message;
+use prost_types::Timestamp as ProtoTimestamp;
 use protos::{bbrpc, clirpc, storedpb};
 use rand::Rng;
 use sha2::{Digest, Sha256};
@@ -863,26 +864,14 @@ fn peer_origin_code(built_in: bool, manual: bool) -> i32 {
     }
 }
 
-/// Return the newest locally cached peer content summary, including legacy fallback.
+/// Return the newest locally cached peer content summary.
 fn peer_latest_cached_content(peer: &storedpb::Peer) -> Option<storedpb::PeerContent> {
-    peer.latest_cached_content.clone().or_else(|| {
-        (peer.latest_known_content.is_none() && !peer.content_id.is_empty()).then(|| {
-            storedpb::PeerContent {
-                content_id: peer.content_id.clone(),
-                content_length: 0,
-            }
-        })
-    })
+    peer.latest_cached_content.clone()
 }
 
-/// Return the newest known peer content summary, including legacy fallback.
+/// Return the newest known peer content summary.
 fn peer_latest_known_content(peer: &storedpb::Peer) -> Option<storedpb::PeerContent> {
-    peer.latest_known_content.clone().or_else(|| {
-        (!peer.content_id.is_empty()).then(|| storedpb::PeerContent {
-            content_id: peer.content_id.clone(),
-            content_length: 0,
-        })
-    })
+    peer.latest_known_content.clone()
 }
 
 /// Return whether persisted metadata indicates any storage relationship.
@@ -1241,13 +1230,66 @@ fn rpc_content_info(content: storedpb::PeerContent) -> bbrpc::ContentInfo {
     }
 }
 
+/// Encode one `(seconds, nanos)` pair as a protobuf timestamp.
+fn proto_timestamp_from_parts(seconds: i64, nanos: i64) -> Result<ProtoTimestamp, Status> {
+    if !(0..1_000_000_000).contains(&nanos) {
+        return Err(Status::invalid_argument(
+            "timestamp nanoseconds must be below one second",
+        ));
+    }
+
+    Ok(ProtoTimestamp {
+        seconds,
+        nanos: i32::try_from(nanos)
+            .map_err(|_| Status::invalid_argument("timestamp nanoseconds are out of range"))?,
+    })
+}
+
+/// Encode one file mtime as a protobuf timestamp.
+fn proto_timestamp_from_file_parts(seconds: u64, nanos: u32) -> ProtoTimestamp {
+    ProtoTimestamp {
+        seconds: i64::try_from(seconds).unwrap_or(i64::MAX),
+        nanos: i32::try_from(nanos).unwrap_or(i32::MAX),
+    }
+}
+
+/// Decode one optional protobuf timestamp into integer parts.
+fn timestamp_parts(timestamp: Option<&ProtoTimestamp>) -> Result<(u64, u32), Status> {
+    let timestamp =
+        timestamp.ok_or_else(|| Status::invalid_argument("file modified_at is required"))?;
+    if timestamp.seconds < 0 {
+        return Err(Status::invalid_argument(
+            "file modified_at must not be negative",
+        ));
+    }
+    if !(0..1_000_000_000).contains(&timestamp.nanos) {
+        return Err(Status::invalid_argument(
+            "file modified_at nanos must be below one second",
+        ));
+    }
+
+    Ok((
+        u64::try_from(timestamp.seconds)
+            .map_err(|_| Status::invalid_argument("file modified_at is out of range"))?,
+        u32::try_from(timestamp.nanos)
+            .map_err(|_| Status::invalid_argument("file modified_at nanos is out of range"))?,
+    ))
+}
+
+/// Decode one optional stored timestamp into integer parts.
+fn optional_timestamp_parts(timestamp: Option<&ProtoTimestamp>) -> Option<(i64, i64)> {
+    timestamp.map(|timestamp| (timestamp.seconds, i64::from(timestamp.nanos)))
+}
+
 /// Convert one stored file summary into the local RPC metadata shape.
 fn rpc_file_info(file: storage::StoredFileInfo) -> clirpc::FileInfo {
     clirpc::FileInfo {
         name: file.name,
         size_bytes: file.size_bytes,
-        modified_at: file.modified_at_secs,
-        modified_at_ns: file.modified_at_nanos,
+        modified_at: Some(
+            proto_timestamp_from_parts(file.modified_at_secs, file.modified_at_nanos)
+                .expect("stored file timestamps must be valid"),
+        ),
     }
 }
 
@@ -1256,8 +1298,10 @@ fn rpc_file_info_from_plain_file(file: &PlainFile) -> clirpc::FileInfo {
     clirpc::FileInfo {
         name: file.name.clone(),
         size_bytes: i64::try_from(file.data.len()).unwrap_or(i64::MAX),
-        modified_at: i64::try_from(file.modified_at_secs).unwrap_or(i64::MAX),
-        modified_at_ns: i64::from(file.modified_at_nanos),
+        modified_at: Some(proto_timestamp_from_file_parts(
+            file.modified_at_secs,
+            file.modified_at_nanos,
+        )),
     }
 }
 
@@ -3963,20 +4007,12 @@ impl Node {
             content: Some(clirpc::StateContentSummary {
                 file_count: snapshot.file_count,
                 total_size_bytes: snapshot.total_file_bytes,
-                last_updated_at: snapshot
-                    .current_content
-                    .as_ref()
-                    .map(|content| {
-                        i64::try_from(content.revision.created_at_secs).unwrap_or(i64::MAX)
-                    })
-                    .unwrap_or_default(),
-                last_updated_at_ns: snapshot
-                    .current_content
-                    .as_ref()
-                    .map(|content| {
-                        i32::try_from(content.revision.created_at_nanos).unwrap_or(i32::MAX)
-                    })
-                    .unwrap_or_default(),
+                last_updated_at: snapshot.current_content.as_ref().map(|content| {
+                    proto_timestamp_from_file_parts(
+                        content.revision.created_at_secs,
+                        content.revision.created_at_nanos,
+                    )
+                }),
                 has_pending_update: snapshot.current_content.is_some()
                     && predicted_fresh_replicas_now < min_replicas_target,
             }),
@@ -3999,20 +4035,12 @@ impl Node {
                 recovery_mode_enabled: snapshot.recovery_mode_enabled,
                 node_initialized_at: snapshot
                     .node_initialized_at
-                    .map(|timestamp| timestamp.0)
-                    .unwrap_or_default(),
-                node_initialized_at_ns: snapshot
-                    .node_initialized_at
-                    .map(|timestamp| i32::try_from(timestamp.1).unwrap_or(i32::MAX))
-                    .unwrap_or_default(),
+                    .map(|timestamp| proto_timestamp_from_parts(timestamp.0, timestamp.1))
+                    .transpose()?,
                 recovery_watermark_at: snapshot
                     .recovery_watermark
-                    .map(|timestamp| timestamp.0)
-                    .unwrap_or_default(),
-                recovery_watermark_at_ns: snapshot
-                    .recovery_watermark
-                    .map(|timestamp| i32::try_from(timestamp.1).unwrap_or(i32::MAX))
-                    .unwrap_or_default(),
+                    .map(|timestamp| proto_timestamp_from_parts(timestamp.0, timestamp.1))
+                    .transpose()?,
                 publish_blocked_reason,
                 latest_recovered_content_id: latest_recovered_revision
                     .as_ref()
@@ -4020,24 +4048,15 @@ impl Node {
                     .unwrap_or_default(),
                 latest_recovered_at: latest_recovered_revision
                     .as_ref()
-                    .map(|revision| revision.created_at)
-                    .unwrap_or_default(),
-                latest_recovered_at_ns: latest_recovered_revision
-                    .as_ref()
-                    .map(|revision| i32::try_from(revision.created_at_ns).unwrap_or(i32::MAX))
-                    .unwrap_or_default(),
+                    .and_then(|revision| revision.created_at.clone()),
                 newer_known_content_id: newer_known_recovery_hint
                     .as_ref()
                     .map(|(content, _)| content.content_id.clone())
                     .unwrap_or_default(),
                 newer_known_at: newer_known_recovery_hint
                     .as_ref()
-                    .map(|(_, timestamp)| timestamp.0)
-                    .unwrap_or_default(),
-                newer_known_at_ns: newer_known_recovery_hint
-                    .as_ref()
-                    .map(|(_, timestamp)| i32::try_from(timestamp.1).unwrap_or(i32::MAX))
-                    .unwrap_or_default(),
+                    .map(|(_, timestamp)| proto_timestamp_from_parts(timestamp.0, timestamp.1))
+                    .transpose()?,
             }),
         }))
     }
@@ -4367,7 +4386,10 @@ impl Node {
                         peer_onion: peer.onion_service_id.clone(),
                         pinned_by_us: tracked_peer.pinned_by_us,
                         pins_us: tracked_peer.pins_us,
-                        first_seen_at: (tracked_peer.first_seen_at, tracked_peer.first_seen_at_ns),
+                        first_seen_at: optional_timestamp_parts(
+                            tracked_peer.first_seen_at.as_ref(),
+                        )
+                        .unwrap_or((0, 0)),
                         successful_calls: tracked_peer.successful_calls,
                         failed_calls: tracked_peer.failed_calls,
                         stores_peer_data: peer.stored_content_bytes > 0,
@@ -5015,11 +5037,12 @@ impl Node {
                 &candidate.content_id,
             )
         })?;
+        let recovered_created_at =
+            proto_timestamp_from_parts(recovered_timestamp.0, recovered_timestamp.1)?;
         self.with_store(|store| {
             store.record_recovered_revision(storedpb::RecoveredRevision {
                 content_id: candidate.content_id.clone(),
-                created_at: recovered_timestamp.0,
-                created_at_ns: recovered_timestamp.1,
+                created_at: Some(recovered_created_at),
             })
         })?;
         info!(
@@ -5305,23 +5328,9 @@ async fn collect_set_file_upload(
     if info.size_bytes < 0 {
         return Err(Status::invalid_argument("file size must be non-negative"));
     }
-    if info.modified_at < 0 {
-        return Err(Status::invalid_argument(
-            "file modified_at must not be negative",
-        ));
-    }
-    if info.modified_at_ns < 0 || info.modified_at_ns >= 1_000_000_000 {
-        return Err(Status::invalid_argument(
-            "file modified_at_ns must be below one second",
-        ));
-    }
-
     let expected_len = usize::try_from(info.size_bytes)
         .map_err(|_| Status::invalid_argument("file size is too large"))?;
-    let modified_at_secs = u64::try_from(info.modified_at)
-        .map_err(|_| Status::invalid_argument("file modified_at is out of range"))?;
-    let modified_at_nanos = u32::try_from(info.modified_at_ns)
-        .map_err(|_| Status::invalid_argument("file modified_at_ns is out of range"))?;
+    let (modified_at_secs, modified_at_nanos) = timestamp_parts(info.modified_at.as_ref())?;
 
     let mut data = Vec::with_capacity(expected_len.min(LOCAL_CLI_FILE_CHUNK_BYTES));
     while let Some(chunk) = stream.message().await? {
@@ -5379,20 +5388,10 @@ impl CliService {
         if file.name.is_empty() {
             return Err(Status::invalid_argument("file name is required"));
         }
-        if file.modified_at_ns < 0 || file.modified_at_ns >= 1_000_000_000 {
-            return Err(Status::invalid_argument(
-                "file modified_at_ns must be below one second",
-            ));
-        }
-        if file.modified_at < 0 {
-            return Err(Status::invalid_argument(
-                "file modified_at must not be negative",
-            ));
-        }
-        let modified_at_secs = u64::try_from(file.modified_at)
-            .map_err(|_| Status::invalid_argument("file modified_at is out of range"))?;
-        let modified_at_nanos = u32::try_from(file.modified_at_ns)
-            .map_err(|_| Status::invalid_argument("file modified_at_ns is out of range"))?;
+        let modified_at = file
+            .modified_at
+            .unwrap_or_else(|| proto_timestamp_from_parts(0, 0).expect("zero timestamp is valid"));
+        let (modified_at_secs, modified_at_nanos) = timestamp_parts(Some(&modified_at))?;
         self.node.with_store(|store| {
             store.set_file_with_modified_at(
                 &file.name,
@@ -6124,11 +6123,13 @@ mod tests {
             let file = request
                 .file
                 .ok_or_else(|| Status::invalid_argument("file is required"))?;
+            let modified_at = file.modified_at.or_else(|| {
+                Some(proto_timestamp_from_parts(0, 0).expect("zero timestamp is valid"))
+            });
             let metadata = clirpc::FileInfo {
                 name: file.name,
                 size_bytes: i64::try_from(file.data.len()).unwrap_or(i64::MAX),
-                modified_at: file.modified_at,
-                modified_at_ns: file.modified_at_ns,
+                modified_at,
             };
             let mut chunks = vec![clirpc::SetFileChunk {
                 chunk: Some(clirpc::set_file_chunk::Chunk::File(metadata)),
@@ -6167,7 +6168,6 @@ mod tests {
                     name: metadata.name,
                     data,
                     modified_at: metadata.modified_at,
-                    modified_at_ns: metadata.modified_at_ns,
                 }),
             }))
         }
@@ -7151,10 +7151,11 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("missing recovery summary"))?;
 
         assert!(recovery.recovery_mode_enabled);
-        assert_eq!(recovery.node_initialized_at, 100);
-        assert_eq!(recovery.node_initialized_at_ns, 7);
-        assert_eq!(recovery.recovery_watermark_at, 0);
-        assert_eq!(recovery.recovery_watermark_at_ns, 0);
+        assert_eq!(
+            recovery.node_initialized_at,
+            Some(proto_timestamp_from_parts(100, 7).unwrap())
+        );
+        assert_eq!(recovery.recovery_watermark_at, None);
         assert!(recovery.latest_recovered_content_id.is_empty());
         assert!(recovery.newer_known_content_id.is_empty());
         assert_eq!(
@@ -7172,10 +7173,14 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("missing recovery summary"))?;
 
         assert!(!recovery.recovery_mode_enabled);
-        assert_eq!(recovery.node_initialized_at, 100);
-        assert_eq!(recovery.node_initialized_at_ns, 7);
-        assert_eq!(recovery.recovery_watermark_at, 100);
-        assert_eq!(recovery.recovery_watermark_at_ns, 7);
+        assert_eq!(
+            recovery.node_initialized_at,
+            Some(proto_timestamp_from_parts(100, 7).unwrap())
+        );
+        assert_eq!(
+            recovery.recovery_watermark_at,
+            Some(proto_timestamp_from_parts(100, 7).unwrap())
+        );
         assert!(recovery.publish_blocked_reason.is_empty());
         assert!(recovery.latest_recovered_content_id.is_empty());
         assert!(recovery.newer_known_content_id.is_empty());
@@ -7249,8 +7254,10 @@ mod tests {
 
         assert_eq!(content.file_count, 1);
         assert_eq!(content.total_size_bytes, 10);
-        assert_eq!(content.last_updated_at, 100);
-        assert_eq!(content.last_updated_at_ns, 0);
+        assert_eq!(
+            content.last_updated_at,
+            Some(proto_timestamp_from_parts(100, 0).unwrap())
+        );
         assert!(!content.has_pending_update);
 
         assert_eq!(peers.total_known, 1);
@@ -7393,8 +7400,13 @@ mod tests {
             let revision = store.parse_content_id(&newer.content_id)?;
             Ok(storedpb::RecoveredRevision {
                 content_id: newer.content_id.clone(),
-                created_at: i64::try_from(revision.created_at_secs).unwrap_or(i64::MAX),
-                created_at_ns: i64::from(revision.created_at_nanos),
+                created_at: Some(
+                    proto_timestamp_from_parts(
+                        i64::try_from(revision.created_at_secs).unwrap_or(i64::MAX),
+                        i64::from(revision.created_at_nanos),
+                    )
+                    .unwrap(),
+                ),
             })
         })?;
 
@@ -7410,8 +7422,7 @@ mod tests {
             )?;
             store.record_recovered_revision(storedpb::RecoveredRevision {
                 content_id: older.content_id.clone(),
-                created_at: 100,
-                created_at_ns: 0,
+                created_at: Some(proto_timestamp_from_parts(100, 0).unwrap()),
             })?;
             Ok(())
         })?;
@@ -7424,16 +7435,12 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("missing local recovery summary"))?;
 
         assert_eq!(recovery.latest_recovered_content_id, older.content_id);
-        assert_eq!(recovery.latest_recovered_at, 100);
-        assert_eq!(recovery.latest_recovered_at_ns, 0);
-        assert_eq!(recovery.newer_known_content_id, newer.content_id);
         assert_eq!(
-            (recovery.newer_known_at, recovery.newer_known_at_ns),
-            (
-                newer_revision.created_at,
-                i32::try_from(newer_revision.created_at_ns).unwrap_or(i32::MAX)
-            )
+            recovery.latest_recovered_at,
+            Some(proto_timestamp_from_parts(100, 0).unwrap())
         );
+        assert_eq!(recovery.newer_known_content_id, newer.content_id);
+        assert_eq!(recovery.newer_known_at, newer_revision.created_at);
         Ok(())
     }
 
@@ -7738,7 +7745,6 @@ mod tests {
             onion_pubkey: identity.ed25519_keypair().public.to_bytes().to_vec(),
             score_seconds,
             score_measured_at: 0,
-            content_id: Vec::new(),
             latest_known_content: None,
             latest_cached_content: None,
             origin,
@@ -7749,18 +7755,15 @@ mod tests {
             pins_us: false,
             our_content_last_verified_content_id: Vec::new(),
             our_content_last_verified_at: 0,
-            first_seen_at: 0,
-            first_seen_at_ns: 0,
+            first_seen_at: Some(proto_timestamp_from_parts(0, 0).unwrap()),
             successful_calls: 0,
             failed_calls: 0,
             requester_latest_stored_content: None,
             requester_latest_known_content: None,
             requester_last_advertised_content: None,
-            requester_last_advertised_at: 0,
-            requester_last_advertised_at_ns: 0,
+            requester_last_advertised_at: None,
             requester_last_downloaded_advertised_content: None,
-            requester_last_downloaded_advertised_at: 0,
-            requester_last_downloaded_advertised_at_ns: 0,
+            requester_last_downloaded_advertised_at: None,
             requester_last_download_latency_seconds: 0,
         }
     }

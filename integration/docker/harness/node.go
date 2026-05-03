@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"barterbackup/integration/docker/gen/clirpc"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const localFileChunkBytes = 256 * 1024
@@ -322,7 +323,7 @@ func (n *Node) SetFile(ctx context.Context, name string, data []byte) error {
 			File: &clirpc.FileInfo{
 				Name:       name,
 				SizeBytes:  int64(len(data)),
-				ModifiedAt: 0,
+				ModifiedAt: timestamppb.New(time.Unix(0, 0)),
 			},
 		},
 	}); err != nil {
@@ -403,9 +404,8 @@ func (n *Node) GetFile(ctx context.Context, name string) (*clirpc.File, error) {
 				return nil, fmt.Errorf("get file %s from %s started a second file", name, n.name)
 			}
 			file = &clirpc.File{
-				Name:         typed.File.GetName(),
-				ModifiedAt:   typed.File.GetModifiedAt(),
-				ModifiedAtNs: typed.File.GetModifiedAtNs(),
+				Name:       typed.File.GetName(),
+				ModifiedAt: typed.File.GetModifiedAt(),
 			}
 		case *clirpc.GetFileChunk_Data:
 			if file == nil {

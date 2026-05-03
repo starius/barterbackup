@@ -7,6 +7,7 @@
 use aes_gcm_siv::aead::{Aead, Payload};
 use aes_gcm_siv::{Aes256GcmSiv, KeyInit, Nonce};
 use prost::Message;
+use prost_types::Timestamp;
 use protos::storedpb;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -38,6 +39,32 @@ pub const CONTENT_ID_LEN: usize = REVISION_PLAINTEXT_LEN + TAG_LEN;
 
 /// Blob alignment used to reduce size leakage.
 pub const CONTENT_ALIGNMENT: usize = 32 * 1024;
+
+fn timestamp_from_parts(secs: u64, nanos: u32) -> Timestamp {
+    Timestamp {
+        seconds: i64::try_from(secs).unwrap_or(i64::MAX),
+        nanos: i32::try_from(nanos).unwrap_or(i32::MAX),
+    }
+}
+
+fn timestamp_to_parts(timestamp: &Timestamp) -> Result<(u64, u32), ContentError> {
+    if timestamp.seconds < 0 {
+        return Err(ContentError::InvalidFileMetadata(
+            "modified_at must not be negative",
+        ));
+    }
+    if !(0..1_000_000_000).contains(&timestamp.nanos) {
+        return Err(ContentError::InvalidFileMetadata(
+            "modified_at nanos must be below one second",
+        ));
+    }
+    Ok((
+        u64::try_from(timestamp.seconds)
+            .map_err(|_| ContentError::InvalidFileMetadata("modified_at is out of range"))?,
+        u32::try_from(timestamp.nanos)
+            .map_err(|_| ContentError::InvalidFileMetadata("modified_at nanos is out of range"))?,
+    ))
+}
 
 const CONTENT_ID_NONCE: [u8; NONCE_LEN] = *b"bb-cid-v001!";
 
@@ -349,15 +376,15 @@ impl ContentCodec {
             offset += ciphertext_len;
 
             verify_file_hash(&file_header.name, &file_header.file_sha256, &plaintext)?;
+            let (modified_at_secs, modified_at_nanos) =
+                timestamp_to_parts(file_header.modified_at.as_ref().ok_or_else(|| {
+                    ContentError::InvalidFileMetadata("modified_at is required")
+                })?)?;
             let file = PlainFile {
                 name: file_header.name.clone(),
                 data: plaintext,
-                modified_at_secs: u64::try_from(file_header.modified_at).map_err(|_| {
-                    ContentError::InvalidFileMetadata("modified_at is out of range")
-                })?,
-                modified_at_nanos: u32::try_from(file_header.modified_at_ns).map_err(|_| {
-                    ContentError::InvalidFileMetadata("modified_at_ns is out of range")
-                })?,
+                modified_at_secs,
+                modified_at_nanos,
             };
             if files.insert(file_header.name.clone(), file).is_some() {
                 return Err(ContentError::DuplicateFileName(file_header.name.clone()));
@@ -503,23 +530,22 @@ fn build_metadata(files: &[PlainFile], peers: &[storedpb::Peer]) -> storedpb::Me
             name: file.name.clone(),
             file_length: i64::try_from(file.data.len()).unwrap(),
             file_sha256: Sha256::digest(&file.data).to_vec(),
-            modified_at: i64::try_from(file.modified_at_secs).unwrap_or(i64::MAX),
-            modified_at_ns: i64::from(file.modified_at_nanos),
+            modified_at: Some(timestamp_from_parts(
+                file.modified_at_secs,
+                file.modified_at_nanos,
+            )),
         })
         .collect();
 
     storedpb::Metadata {
         files: file_headers,
         peers: peers.to_vec(),
-        node_initialized_at: 0,
-        node_initialized_at_ns: 0,
+        node_initialized_at: None,
         latest_recovered_revision: None,
-        recovery_watermark_at: 0,
-        recovery_watermark_at_ns: 0,
+        recovery_watermark_at: None,
         recovery_mode_enabled: false,
         current_content: None,
-        metadata_rollup_due_at: 0,
-        metadata_rollup_due_at_ns: 0,
+        metadata_rollup_due_at: None,
         metadata_rollup_base_content_id: Vec::new(),
     }
 }
@@ -555,16 +581,11 @@ fn validate_file_headers(file_headers: &[storedpb::FileHeader]) -> Result<(), Co
     }
 
     for file in file_headers {
-        if file.modified_at < 0 {
-            return Err(ContentError::InvalidFileMetadata(
-                "modified_at must not be negative",
-            ));
-        }
-        if !(0..1_000_000_000).contains(&file.modified_at_ns) {
-            return Err(ContentError::InvalidFileMetadata(
-                "modified_at_ns must be below one second",
-            ));
-        }
+        let timestamp = file
+            .modified_at
+            .as_ref()
+            .ok_or(ContentError::InvalidFileMetadata("modified_at is required"))?;
+        timestamp_to_parts(timestamp)?;
     }
 
     Ok(())
@@ -746,7 +767,10 @@ mod tests {
             onion_pubkey: b"peer".to_vec(),
             score_seconds: 9,
             score_measured_at: 77,
-            content_id: b"cid".to_vec(),
+            latest_known_content: Some(storedpb::PeerContent {
+                content_id: b"cid".to_vec(),
+                content_length: 0,
+            }),
             origin: storedpb::PeerOrigin::Discovered as i32,
             first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
             reachability: storedpb::PeerReachability::Unknown as i32,

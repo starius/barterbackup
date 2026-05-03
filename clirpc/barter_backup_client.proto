@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package clirpc;
 
+import "google/protobuf/timestamp.proto";
+
 // BarterBackupClient is the local gRPC service exposed by the daemon.
 service BarterBackupClient {
     // State returns the current local daemon status.
@@ -213,15 +215,12 @@ message StateContentSummary {
     // total_size_bytes is the total plaintext size of all logical user files.
     int64 total_size_bytes = 2;
 
-    // last_updated_at is the Unix timestamp (seconds) of the active revision.
-    int64 last_updated_at = 3;
-
-    // last_updated_at_ns is the nanosecond component of last_updated_at.
-    int32 last_updated_at_ns = 4;
+    // last_updated_at is the timestamp of the active revision.
+    google.protobuf.Timestamp last_updated_at = 3;
 
     // has_pending_update reports whether local state predicts that the latest
     // revision still needs background propagation or verification.
-    bool has_pending_update = 5;
+    bool has_pending_update = 4;
 }
 
 // StatePeerSummary reports locally persisted peer counts and mirrored storage
@@ -283,46 +282,31 @@ message StateRecoverySummary {
 
     // node_initialized_at is the local node-generation boundary recorded when
     // `bbcli init` succeeded.
-    int64 node_initialized_at = 2;
-
-    // node_initialized_at_ns is the nanosecond component of
-    // node_initialized_at.
-    int32 node_initialized_at_ns = 3;
+    google.protobuf.Timestamp node_initialized_at = 2;
 
     // recovery_watermark_at is the newest older-lineage revision timestamp
     // already applied locally, or the initialization boundary after recovery
     // mode is finished.
-    int64 recovery_watermark_at = 4;
-
-    // recovery_watermark_at_ns is the nanosecond component of
-    // recovery_watermark_at.
-    int32 recovery_watermark_at_ns = 5;
+    google.protobuf.Timestamp recovery_watermark_at = 3;
 
     // publish_blocked_reason describes why owner-originated publication is
     // currently blocked, if any.
-    string publish_blocked_reason = 6;
+    string publish_blocked_reason = 4;
 
     // latest_recovered_content_id is the newest older-lineage revision that
     // was already merged locally during recovery, if any.
-    bytes latest_recovered_content_id = 7;
+    bytes latest_recovered_content_id = 5;
 
     // latest_recovered_at is the authenticated timestamp of
     // latest_recovered_content_id.
-    int64 latest_recovered_at = 8;
-
-    // latest_recovered_at_ns is the nanosecond component of
-    // latest_recovered_at.
-    int32 latest_recovered_at_ns = 9;
+    google.protobuf.Timestamp latest_recovered_at = 6;
 
     // newer_known_content_id is a newer recoverable requester revision that a
     // peer reported knowing about but did not report still storing.
-    bytes newer_known_content_id = 10;
+    bytes newer_known_content_id = 7;
 
     // newer_known_at is the authenticated timestamp of newer_known_content_id.
-    int64 newer_known_at = 11;
-
-    // newer_known_at_ns is the nanosecond component of newer_known_at.
-    int32 newer_known_at_ns = 12;
+    google.protobuf.Timestamp newer_known_at = 8;
 }
 
 // StateLocalSummary groups all local-only state data that can be reported
@@ -547,11 +531,8 @@ message File {
     // data is the raw file bytes.
     bytes data = 2;
 
-    // modified_at is the Unix timestamp (seconds) of the source file mtime.
-    int64 modified_at = 3;
-
-    // modified_at_ns is the nanosecond component corresponding to modified_at.
-    int64 modified_at_ns = 4;
+    // modified_at is the source file mtime.
+    google.protobuf.Timestamp modified_at = 3;
 }
 
 // FileInfo is one metadata-only description of a stored logical file.
@@ -563,11 +544,8 @@ message FileInfo {
     // size_bytes is the plaintext file length in bytes.
     int64 size_bytes = 2;
 
-    // modified_at is the Unix timestamp (seconds) of the source file mtime.
-    int64 modified_at = 3;
-
-    // modified_at_ns is the nanosecond component corresponding to modified_at.
-    int64 modified_at_ns = 4;
+    // modified_at is the source file mtime.
+    google.protobuf.Timestamp modified_at = 3;
 }
 
 message SetFileRequest {

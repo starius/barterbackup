@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package storedpb;
 
+import "google/protobuf/timestamp.proto";
+
 // ContentRevision specifies a particular version of user content produced
 // from client-provided files and set by a clirpc.SetFile call.
 // AEAD(ContentRevision) is used as content_id in bbrpc. The content of this
@@ -14,6 +16,10 @@ message ContentRevision {
     int64 created_at = 1;
 
     // created_at_ns is the nanosecond component corresponding to created_at.
+    // This split timestamp stays inline instead of using
+    // google.protobuf.Timestamp because ContentRevision is embedded directly in
+    // the encrypted revision identifier and the embedded well-known type would
+    // make that payload larger.
     int64 created_at_ns = 2;
 
     // metadata_aead_length is the length of AEAD-encrypted Metadata in bytes.
@@ -33,11 +39,8 @@ message FileHeader {
     // file_sha256 is the SHA-256 hash of the file.
     bytes file_sha256 = 3;
 
-    // modified_at is the Unix timestamp (seconds) of the source file mtime.
-    int64 modified_at = 4;
-
-    // modified_at_ns is the nanosecond component corresponding to modified_at.
-    int64 modified_at_ns = 5;
+    // modified_at is the source file mtime.
+    google.protobuf.Timestamp modified_at = 4;
 }
 
 // Peer is data about the peer that should survive a node reset.
@@ -102,96 +105,80 @@ message Peer {
     // score_measured_at is a Unix timestamp (seconds) when score was measured.
     int64 score_measured_at = 3;
 
-    // content_id is the legacy latest content identifier written by older
-    // versions. Newer code keeps it in sync with latest_known_content for
-    // migration compatibility.
-    bytes content_id = 4;
-
     // latest_known_content is the newest peer revision we know exists.
-    PeerContent latest_known_content = 5;
+    PeerContent latest_known_content = 4;
 
     // latest_cached_content is the newest peer revision we currently keep in
     // our local cache and can serve or inspect later.
-    PeerContent latest_cached_content = 6;
+    PeerContent latest_cached_content = 5;
 
     // origin is the highest-priority origin class recorded for this peer.
-    PeerOrigin origin = 7;
+    PeerOrigin origin = 6;
 
     // first_contact_direction records who connected first, if known.
-    FirstContactDirection first_contact_direction = 8;
+    FirstContactDirection first_contact_direction = 7;
 
     // reachability records whether the most recent completed transport
     // interaction reached the peer successfully.
-    PeerReachability reachability = 9;
+    PeerReachability reachability = 8;
 
     // last_live_at is the Unix timestamp (seconds) when this peer last
     // responded successfully over the transport.
-    int64 last_live_at = 10;
+    int64 last_live_at = 9;
 
     // pinned_by_us reports whether the local operator pinned this peer.
-    bool pinned_by_us = 11;
+    bool pinned_by_us = 10;
 
     // pins_us reports whether this peer most recently told us that it pins us.
-    bool pins_us = 12;
+    bool pins_us = 11;
 
     // our_content_last_verified_content_id is the most recent local content
     // revision that this peer successfully returned during a contract check.
-    bytes our_content_last_verified_content_id = 13;
+    bytes our_content_last_verified_content_id = 12;
 
     // our_content_last_verified_at is when the last successful verification of
     // our content on this peer completed.
-    int64 our_content_last_verified_at = 14;
+    int64 our_content_last_verified_at = 13;
 
     // first_seen_at is when this peer was first admitted into local tracked
     // peer state.
-    int64 first_seen_at = 15;
-
-    // first_seen_at_ns is the nanosecond component of first_seen_at.
-    int64 first_seen_at_ns = 16;
+    google.protobuf.Timestamp first_seen_at = 14;
 
     // successful_calls counts successful authenticated outbound peer
     // operations observed locally.
-    int64 successful_calls = 17;
+    int64 successful_calls = 15;
 
     // failed_calls counts failed outbound peer operations observed locally.
-    int64 failed_calls = 18;
+    int64 failed_calls = 16;
 
     // requester_latest_stored_content is the newest local-owner revision this
     // peer most recently reported that it still caches and can return.
-    PeerContent requester_latest_stored_content = 19;
+    PeerContent requester_latest_stored_content = 17;
 
     // requester_latest_known_content is the newest local-owner revision this
     // peer most recently reported knowing about, even if it cannot return it.
-    PeerContent requester_latest_known_content = 20;
+    PeerContent requester_latest_known_content = 18;
 
     // requester_last_advertised_content is the newest local-owner revision we
     // most recently attempted to advertise to this peer.
-    PeerContent requester_last_advertised_content = 21;
+    PeerContent requester_last_advertised_content = 19;
 
     // requester_last_advertised_at is when we first attempted to advertise the
     // currently pending requester_last_advertised_content to this peer.
-    int64 requester_last_advertised_at = 22;
-
-    // requester_last_advertised_at_ns is the nanosecond component of
-    // requester_last_advertised_at.
-    int64 requester_last_advertised_at_ns = 23;
+    google.protobuf.Timestamp requester_last_advertised_at = 20;
 
     // requester_last_downloaded_advertised_content is the newest advertised
     // requester revision this peer later downloaded from us.
-    PeerContent requester_last_downloaded_advertised_content = 24;
+    PeerContent requester_last_downloaded_advertised_content = 21;
 
     // requester_last_downloaded_advertised_at is when this peer first
     // downloaded requester_last_downloaded_advertised_content from us.
-    int64 requester_last_downloaded_advertised_at = 25;
-
-    // requester_last_downloaded_advertised_at_ns is the nanosecond component
-    // of requester_last_downloaded_advertised_at.
-    int64 requester_last_downloaded_advertised_at_ns = 26;
+    google.protobuf.Timestamp requester_last_downloaded_advertised_at = 22;
 
     // requester_last_download_latency_seconds is how long this peer took to
     // download requester_last_downloaded_advertised_content after we first
     // advertised it.
-    int64 requester_last_download_latency_seconds = 27;
+    int64 requester_last_download_latency_seconds = 23;
 }
 
 // RecoveredRevision records one authenticated older-lineage revision that was
@@ -200,11 +187,8 @@ message RecoveredRevision {
     // content_id is the encrypted revision identifier.
     bytes content_id = 1;
 
-    // created_at is the authenticated Unix timestamp from the revision id.
-    int64 created_at = 2;
-
-    // created_at_ns is the authenticated nanosecond component.
-    int64 created_at_ns = 3;
+    // created_at is the authenticated timestamp from the revision id.
+    google.protobuf.Timestamp created_at = 2;
 }
 
 // Metadata is short data that is stored together with the main content on
@@ -226,43 +210,31 @@ message Metadata {
 
     // node_initialized_at is the local node-generation boundary recorded
     // when `bbcli init` succeeded.
-    int64 node_initialized_at = 5;
-
-    // node_initialized_at_ns is the nanosecond component of
-    // node_initialized_at.
-    int64 node_initialized_at_ns = 6;
+    google.protobuf.Timestamp node_initialized_at = 3;
 
     // latest_recovered_revision is the newest older-lineage revision that was
     // actually merged locally, if any.
-    RecoveredRevision latest_recovered_revision = 7;
+    RecoveredRevision latest_recovered_revision = 4;
 
     // recovery_watermark_at is the newest older-lineage timestamp already
     // applied locally, or the initialization boundary after recovery mode is
     // finished.
-    int64 recovery_watermark_at = 8;
-
-    // recovery_watermark_at_ns is the nanosecond component of
-    // recovery_watermark_at.
-    int64 recovery_watermark_at_ns = 9;
+    google.protobuf.Timestamp recovery_watermark_at = 5;
 
     // recovery_mode_enabled blocks owner-originated publication until the
     // operator explicitly finishes recovery mode.
-    bool recovery_mode_enabled = 10;
+    bool recovery_mode_enabled = 6;
 
     // current_content is the active local revision summary persisted in the
     // sidecar so the node can restore that exact blob after a restart if the
     // local encrypted blob file is missing.
-    PeerContent current_content = 11;
+    PeerContent current_content = 7;
 
     // metadata_rollup_due_at is when one delayed metadata-only local content
     // rewrite becomes eligible to run.
-    int64 metadata_rollup_due_at = 12;
-
-    // metadata_rollup_due_at_ns is the nanosecond component of
-    // metadata_rollup_due_at.
-    int64 metadata_rollup_due_at_ns = 13;
+    google.protobuf.Timestamp metadata_rollup_due_at = 8;
 
     // metadata_rollup_base_content_id is the local content revision that was
     // current when the pending metadata-rollup epoch began.
-    bytes metadata_rollup_base_content_id = 14;
+    bytes metadata_rollup_base_content_id = 9;
 }

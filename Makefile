@@ -5,6 +5,7 @@ GO ?= go
 GOFMT ?= gofmt
 PROTOC_GEN_GO ?= protoc-gen-go
 PROTOC_GEN_GO_GRPC ?= protoc-gen-go-grpc
+PROTOC_INCLUDE ?= $(shell dirname $(shell dirname $(shell command -v protoc)))/include
 PROTO_FILES := $(shell find bbrpc clirpc storedpb -type f -name '*.proto' | sort)
 GO_FILES := $(shell find integration/docker -type f -name '*.go' 2>/dev/null | sort)
 HOST_TRIPLE := $(shell $(RUSTC) -vV | sed -n 's/^host: //p')
@@ -54,7 +55,7 @@ rpc:
 	rm -rf $(GO_RPC_OUT_DIR)
 	mkdir -p $(GO_RPC_OUT_DIR)
 	PATH="$(dir $(shell command -v $(PROTOC_GEN_GO))):$(dir $(shell command -v $(PROTOC_GEN_GO_GRPC))):$$PATH" \
-		protoc -I . \
+		protoc -I . -I $(PROTOC_INCLUDE) \
 			--go_out=integration/docker \
 			--go_opt=module=$(GO_RPC_MODULE) \
 			--go_opt=Mclirpc/barter_backup_client.proto=$(GO_RPC_MODULE)/gen/clirpc \

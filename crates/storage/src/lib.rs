@@ -9,6 +9,7 @@ use aes_gcm_siv::{Aes256GcmSiv, KeyInit, Nonce};
 use clock::{Clock, SystemClock};
 use content::{ContentCodec, DecodedContent, PlainFile, RevisionDescriptor, RevisionSeed};
 use prost::Message;
+use prost_types::Timestamp as ProtoTimestamp;
 use protos::storedpb;
 use rand::rngs::OsRng;
 use rand::{thread_rng, Rng, RngCore};
@@ -347,9 +348,38 @@ fn sample_metadata_rollup_delay() -> Duration {
     Duration::from_secs_f64(delay_secs)
 }
 
-/// Return one optional persisted timestamp from whole-second and nanosecond fields.
-fn optional_metadata_timestamp(secs: i64, nanos: i64) -> Option<(i64, i64)> {
-    ((secs != 0) || (nanos != 0)).then_some((secs, nanos))
+/// Encode one `(seconds, nanos)` pair as a protobuf timestamp.
+fn proto_timestamp(secs: i64, nanos: i64) -> Result<ProtoTimestamp, StorageError> {
+    if !(0..1_000_000_000).contains(&nanos) {
+        return Err(StorageError::InvalidTimestamp);
+    }
+
+    Ok(ProtoTimestamp {
+        seconds: secs,
+        nanos: i32::try_from(nanos).map_err(|_| StorageError::InvalidTimestamp)?,
+    })
+}
+
+/// Encode one optional metadata timestamp using the existing zero-is-absent convention.
+fn optional_proto_timestamp(secs: i64, nanos: i64) -> Result<Option<ProtoTimestamp>, StorageError> {
+    if secs == 0 && nanos == 0 {
+        return Ok(None);
+    }
+    Ok(Some(proto_timestamp(secs, nanos)?))
+}
+
+/// Decode one optional persisted protobuf timestamp into `(seconds, nanos)`.
+fn optional_metadata_timestamp(
+    timestamp: Option<&ProtoTimestamp>,
+) -> Result<Option<(i64, i64)>, StorageError> {
+    timestamp
+        .map(|timestamp| {
+            if !(0..1_000_000_000).contains(&timestamp.nanos) {
+                return Err(StorageError::InvalidTimestamp);
+            }
+            Ok((timestamp.seconds, i64::from(timestamp.nanos)))
+        })
+        .transpose()
 }
 
 /// Return whether one peer still has a pending advertised requester revision.
@@ -357,17 +387,18 @@ fn peer_has_pending_requester_advertisement(peer: &storedpb::Peer) -> bool {
     let Some(advertised_content) = peer.requester_last_advertised_content.as_ref() else {
         return false;
     };
-    let Some(advertised_at) = optional_metadata_timestamp(
-        peer.requester_last_advertised_at,
-        peer.requester_last_advertised_at_ns,
-    ) else {
+    let Some(advertised_at) =
+        optional_metadata_timestamp(peer.requester_last_advertised_at.as_ref())
+            .ok()
+            .flatten()
+    else {
         return false;
     };
     let downloaded_content = peer.requester_last_downloaded_advertised_content.as_ref();
-    let downloaded_at = optional_metadata_timestamp(
-        peer.requester_last_downloaded_advertised_at,
-        peer.requester_last_downloaded_advertised_at_ns,
-    );
+    let downloaded_at =
+        optional_metadata_timestamp(peer.requester_last_downloaded_advertised_at.as_ref())
+            .ok()
+            .flatten();
 
     match (downloaded_content, downloaded_at) {
         (Some(downloaded_content), Some(downloaded_at))
@@ -376,25 +407,6 @@ fn peer_has_pending_requester_advertisement(peer: &storedpb::Peer) -> bool {
             downloaded_at < advertised_at
         }
         _ => true,
-    }
-}
-
-/// Migrate one older peer record into the richer current representation.
-fn migrate_peer(peer: &mut storedpb::Peer) {
-    if peer.latest_known_content.is_none() && !peer.content_id.is_empty() {
-        peer.latest_known_content = Some(peer_content_summary(&peer.content_id, 0));
-    }
-    if peer.latest_cached_content.is_none() && !peer.content_id.is_empty() {
-        peer.latest_cached_content = Some(peer_content_summary(&peer.content_id, 0));
-    }
-    if peer_content_id(peer.latest_known_content.as_ref()).is_none() {
-        peer.content_id.clear();
-    } else if peer.content_id.is_empty() {
-        peer.content_id = peer
-            .latest_known_content
-            .as_ref()
-            .map(|content| content.content_id.clone())
-            .unwrap_or_default();
     }
 }
 
@@ -415,7 +427,6 @@ fn ensure_peer_entry(
         onion_pubkey: onion_pubkey.to_vec(),
         score_seconds: 0,
         score_measured_at: 0,
-        content_id: Vec::new(),
         latest_known_content: None,
         latest_cached_content: None,
         origin: storedpb::PeerOrigin::Discovered as i32,
@@ -426,18 +437,18 @@ fn ensure_peer_entry(
         pins_us: false,
         our_content_last_verified_content_id: Vec::new(),
         our_content_last_verified_at: 0,
-        first_seen_at: first_seen_at.0,
-        first_seen_at_ns: first_seen_at.1,
+        first_seen_at: Some(
+            proto_timestamp(first_seen_at.0, first_seen_at.1)
+                .expect("clock timestamps must be valid"),
+        ),
         successful_calls: 0,
         failed_calls: 0,
         requester_latest_stored_content: None,
         requester_latest_known_content: None,
         requester_last_advertised_content: None,
-        requester_last_advertised_at: 0,
-        requester_last_advertised_at_ns: 0,
+        requester_last_advertised_at: None,
         requester_last_downloaded_advertised_content: None,
-        requester_last_downloaded_advertised_at: 0,
-        requester_last_downloaded_advertised_at_ns: 0,
+        requester_last_downloaded_advertised_at: None,
         requester_last_download_latency_seconds: 0,
     });
 }
@@ -605,12 +616,11 @@ impl Store {
         if revision.content_id.is_empty() {
             return Err(StorageError::InvalidFileName);
         }
-        if !(0..1_000_000_000).contains(&revision.created_at_ns) {
-            return Err(StorageError::InvalidTimestamp);
-        }
+        let created_at = optional_metadata_timestamp(revision.created_at.as_ref())?
+            .ok_or(StorageError::InvalidTimestamp)?;
 
         self.latest_recovered_revision = Some(revision.clone());
-        self.recovery_watermark = Some((revision.created_at, revision.created_at_ns));
+        self.recovery_watermark = Some(created_at);
         self.persist_peer_state()
     }
 
@@ -861,7 +871,6 @@ impl Store {
                     onion_pubkey: onion_pubkey.to_vec(),
                     score_seconds: 0,
                     score_measured_at: 0,
-                    content_id: Vec::new(),
                     latest_known_content: None,
                     latest_cached_content: None,
                     origin,
@@ -872,18 +881,18 @@ impl Store {
                     pins_us: false,
                     our_content_last_verified_content_id: Vec::new(),
                     our_content_last_verified_at: 0,
-                    first_seen_at: first_seen_at.0,
-                    first_seen_at_ns: first_seen_at.1,
+                    first_seen_at: Some(
+                        proto_timestamp(first_seen_at.0, first_seen_at.1)
+                            .expect("clock timestamps must be valid"),
+                    ),
                     successful_calls: 0,
                     failed_calls: 0,
                     requester_latest_stored_content: None,
                     requester_latest_known_content: None,
                     requester_last_advertised_content: None,
-                    requester_last_advertised_at: 0,
-                    requester_last_advertised_at_ns: 0,
+                    requester_last_advertised_at: None,
                     requester_last_downloaded_advertised_content: None,
-                    requester_last_downloaded_advertised_at: 0,
-                    requester_last_downloaded_advertised_at_ns: 0,
+                    requester_last_downloaded_advertised_at: None,
                     requester_last_download_latency_seconds: 0,
                 });
             }
@@ -948,18 +957,13 @@ impl Store {
             let next_latest_cached = latest_cached_content_id.map(|content_id| {
                 peer_content_summary(content_id, latest_cached_content_length.unwrap_or(0))
             });
-            let next_content_id = latest_known_content_id
-                .map(|content_id| content_id.to_vec())
-                .unwrap_or_default();
             if peer.latest_known_content == next_latest_known
                 && peer.latest_cached_content == next_latest_cached
-                && peer.content_id == next_content_id
             {
                 return Ok(false);
             }
             peer.latest_known_content = next_latest_known;
             peer.latest_cached_content = next_latest_cached;
-            peer.content_id = next_content_id;
             Ok(true)
         })
     }
@@ -1348,10 +1352,9 @@ impl Store {
                 if previous_advertised.content_id != content_id
                     && peer_has_pending_requester_advertisement(peer)
                 {
-                    if let Some(previous_advertised_at) = optional_metadata_timestamp(
-                        peer.requester_last_advertised_at,
-                        peer.requester_last_advertised_at_ns,
-                    ) {
+                    if let Some(previous_advertised_at) =
+                        optional_metadata_timestamp(peer.requester_last_advertised_at.as_ref())?
+                    {
                         superseded_pending_penalty = advertised_at
                             .0
                             .saturating_sub(previous_advertised_at.0)
@@ -1361,8 +1364,8 @@ impl Store {
             }
 
             peer.requester_last_advertised_content = next_advertised;
-            peer.requester_last_advertised_at = advertised_at.0;
-            peer.requester_last_advertised_at_ns = advertised_at.1;
+            peer.requester_last_advertised_at =
+                Some(proto_timestamp(advertised_at.0, advertised_at.1)?);
             Ok(true)
         })?;
         Ok(superseded_pending_penalty)
@@ -1396,10 +1399,9 @@ impl Store {
             if advertised_content.content_id != content_id {
                 return Ok(false);
             }
-            let Some(advertised_at) = optional_metadata_timestamp(
-                peer.requester_last_advertised_at,
-                peer.requester_last_advertised_at_ns,
-            ) else {
+            let Some(advertised_at) =
+                optional_metadata_timestamp(peer.requester_last_advertised_at.as_ref())?
+            else {
                 return Ok(false);
             };
             if !peer_has_pending_requester_advertisement(peer) {
@@ -1408,8 +1410,8 @@ impl Store {
 
             let latency_seconds = downloaded_at.0.saturating_sub(advertised_at.0).max(0);
             peer.requester_last_downloaded_advertised_content = Some(advertised_content.clone());
-            peer.requester_last_downloaded_advertised_at = downloaded_at.0;
-            peer.requester_last_downloaded_advertised_at_ns = downloaded_at.1;
+            peer.requester_last_downloaded_advertised_at =
+                Some(proto_timestamp(downloaded_at.0, downloaded_at.1)?);
             peer.requester_last_download_latency_seconds = latency_seconds;
             completed_latency = Some(latency_seconds);
             Ok(true)
@@ -1458,13 +1460,9 @@ impl Store {
                 .iter_mut()
                 .find(|peer| peer.onion_pubkey == onion_pubkey)
             {
-                if peer.content_id.is_empty()
-                    && peer.latest_known_content.is_none()
-                    && peer.latest_cached_content.is_none()
-                {
+                if peer.latest_known_content.is_none() && peer.latest_cached_content.is_none() {
                     return Ok(false);
                 }
-                peer.content_id.clear();
                 peer.latest_known_content = None;
                 peer.latest_cached_content = None;
                 return Ok(true);
@@ -1484,13 +1482,7 @@ impl Store {
 
     /// Replace the persisted peer metadata set without touching current content.
     pub fn replace_peers(&mut self, peers: Vec<storedpb::Peer>) -> Result<(), StorageError> {
-        let mut migrated = peers
-            .into_iter()
-            .map(|mut peer| {
-                migrate_peer(&mut peer);
-                peer
-            })
-            .collect::<Vec<_>>();
+        let mut migrated = peers;
         let files = self.current_plain_files();
         self.enforce_shared_blob_limit_for_state(&files, &migrated)?;
         self.peers = std::mem::take(&mut migrated);
@@ -1617,15 +1609,7 @@ impl Store {
             }
         }
 
-        self.peers = decoded
-            .metadata
-            .peers
-            .into_iter()
-            .map(|mut peer| {
-                migrate_peer(&mut peer);
-                peer
-            })
-            .collect();
+        self.peers = decoded.metadata.peers;
         self.persist_peer_state()
     }
 
@@ -1663,7 +1647,6 @@ impl Store {
     fn load(&mut self) -> Result<(), StorageError> {
         let had_peer_state = self.load_peer_state()?;
         let foreign_files = self.foreign_content_files()?;
-        let legacy_foreign_content_ids = self.legacy_foreign_content_ids();
 
         let mut valid = Vec::new();
         let mut invalid = Vec::new();
@@ -1687,20 +1670,8 @@ impl Store {
                     blob_len: blob.len(),
                     decoded,
                 }),
-                Ok(_) => {
-                    if legacy_foreign_content_ids.contains(&content_id) {
-                        let _ = self.fs.remove(&name);
-                        continue;
-                    }
-                    invalid.push("content id does not match file name".to_string());
-                }
-                Err(err) => {
-                    if legacy_foreign_content_ids.contains(&content_id) {
-                        let _ = self.fs.remove(&name);
-                        continue;
-                    }
-                    invalid.push(err.to_string());
-                }
+                Ok(_) => invalid.push("content id does not match file name".to_string()),
+                Err(err) => invalid.push(err.to_string()),
             }
         }
 
@@ -1756,15 +1727,6 @@ impl Store {
             .iter()
             .filter_map(|peer| peer_content_id(peer.latest_cached_content.as_ref()))
             .map(|content_id| self.mirrored_blob_file_name(&content_id))
-            .collect()
-    }
-
-    /// Return the tracked legacy foreign content ids used before local wrapping.
-    fn legacy_foreign_content_ids(&self) -> BTreeSet<Vec<u8>> {
-        self.peers
-            .iter()
-            .filter(|peer| !peer.content_id.is_empty())
-            .map(|peer| peer.content_id.clone())
             .collect()
     }
 
@@ -2008,31 +1970,22 @@ impl Store {
             peers: self.peers.clone(),
             node_initialized_at: self
                 .node_initialized_at
-                .map(|timestamp| timestamp.0)
-                .unwrap_or(0),
-            node_initialized_at_ns: self
-                .node_initialized_at
-                .map(|timestamp| timestamp.1)
-                .unwrap_or(0),
+                .map(|timestamp| optional_proto_timestamp(timestamp.0, timestamp.1))
+                .transpose()?
+                .flatten(),
             latest_recovered_revision: self.latest_recovered_revision.clone(),
             recovery_watermark_at: self
                 .recovery_watermark
-                .map(|timestamp| timestamp.0)
-                .unwrap_or(0),
-            recovery_watermark_at_ns: self
-                .recovery_watermark
-                .map(|timestamp| timestamp.1)
-                .unwrap_or(0),
+                .map(|timestamp| optional_proto_timestamp(timestamp.0, timestamp.1))
+                .transpose()?
+                .flatten(),
             recovery_mode_enabled: self.recovery_mode_enabled,
             current_content: current_content_summary(self.current.as_ref()),
             metadata_rollup_due_at: self
                 .metadata_rollup_due_at
-                .map(|timestamp| timestamp.0)
-                .unwrap_or(0),
-            metadata_rollup_due_at_ns: self
-                .metadata_rollup_due_at
-                .map(|timestamp| timestamp.1)
-                .unwrap_or(0),
+                .map(|timestamp| optional_proto_timestamp(timestamp.0, timestamp.1))
+                .transpose()?
+                .flatten(),
             metadata_rollup_base_content_id: self.metadata_rollup_base_content_id.clone(),
         };
         let plaintext = metadata.encode_to_vec();
@@ -2049,33 +2002,23 @@ impl Store {
         };
         let plaintext = decrypt_sidecar(&self.peer_cipher, &ciphertext)?;
         let metadata = storedpb::Metadata::decode(plaintext.as_slice())?;
-        self.peers = metadata
-            .peers
-            .into_iter()
-            .map(|mut peer| {
-                migrate_peer(&mut peer);
-                peer
-            })
-            .collect();
-        self.node_initialized_at = optional_metadata_timestamp(
-            metadata.node_initialized_at,
-            metadata.node_initialized_at_ns,
-        );
+        self.peers = metadata.peers;
+        self.node_initialized_at =
+            optional_metadata_timestamp(metadata.node_initialized_at.as_ref())?;
         self.latest_recovered_revision = metadata.latest_recovered_revision;
-        self.recovery_watermark = optional_metadata_timestamp(
-            metadata.recovery_watermark_at,
-            metadata.recovery_watermark_at_ns,
-        )
-        .or_else(|| {
-            self.latest_recovered_revision
-                .as_ref()
-                .map(|revision| (revision.created_at, revision.created_at_ns))
-        });
+        self.recovery_watermark =
+            optional_metadata_timestamp(metadata.recovery_watermark_at.as_ref())?.or_else(|| {
+                self.latest_recovered_revision
+                    .as_ref()
+                    .and_then(|revision| {
+                        optional_metadata_timestamp(revision.created_at.as_ref())
+                            .ok()
+                            .flatten()
+                    })
+            });
         self.recovery_mode_enabled = metadata.recovery_mode_enabled;
-        self.metadata_rollup_due_at = optional_metadata_timestamp(
-            metadata.metadata_rollup_due_at,
-            metadata.metadata_rollup_due_at_ns,
-        );
+        self.metadata_rollup_due_at =
+            optional_metadata_timestamp(metadata.metadata_rollup_due_at.as_ref())?;
         self.metadata_rollup_base_content_id = metadata.metadata_rollup_base_content_id;
         self.current = metadata
             .current_content
@@ -2335,6 +2278,38 @@ mod tests {
             Arc::new(move || delay),
         )
         .unwrap()
+    }
+
+    fn test_proto_timestamp(secs: i64, nanos: i64) -> ProtoTimestamp {
+        proto_timestamp(secs, nanos).expect("test timestamps must be valid")
+    }
+
+    fn test_peer(onion_pubkey: &[u8], origin: storedpb::PeerOrigin) -> storedpb::Peer {
+        storedpb::Peer {
+            onion_pubkey: onion_pubkey.to_vec(),
+            score_seconds: 0,
+            score_measured_at: 0,
+            latest_known_content: None,
+            latest_cached_content: None,
+            origin: origin as i32,
+            first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
+            reachability: storedpb::PeerReachability::Unknown as i32,
+            last_live_at: 0,
+            pinned_by_us: false,
+            pins_us: false,
+            our_content_last_verified_content_id: Vec::new(),
+            our_content_last_verified_at: 0,
+            first_seen_at: Some(test_proto_timestamp(0, 0)),
+            successful_calls: 0,
+            failed_calls: 0,
+            requester_latest_stored_content: None,
+            requester_latest_known_content: None,
+            requester_last_advertised_content: None,
+            requester_last_advertised_at: None,
+            requester_last_downloaded_advertised_content: None,
+            requester_last_downloaded_advertised_at: None,
+            requester_last_download_latency_seconds: 0,
+        }
     }
 
     #[test]
@@ -2601,7 +2576,13 @@ mod tests {
         let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
         assert_eq!(reloaded.get_file("alpha.txt").unwrap(), b"local".to_vec());
         assert_eq!(reloaded.current_content().unwrap(), &local_current);
-        assert_eq!(reloaded.peers()[0].content_id, foreign_id);
+        assert_eq!(
+            reloaded.peers()[0]
+                .latest_known_content
+                .as_ref()
+                .map(|content| content.content_id.clone()),
+            Some(foreign_id)
+        );
     }
 
     #[test]
@@ -2627,7 +2608,13 @@ mod tests {
         let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
         assert!(reloaded.current_content().is_none());
         assert!(reloaded.list_files().is_empty());
-        assert_eq!(reloaded.peers()[0].content_id, foreign_id);
+        assert_eq!(
+            reloaded.peers()[0]
+                .latest_known_content
+                .as_ref()
+                .map(|content| content.content_id.clone()),
+            Some(foreign_id)
+        );
     }
 
     #[test]
@@ -2640,9 +2627,11 @@ mod tests {
         let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
         assert_eq!(reloaded.peers().len(), 1);
         assert_eq!(reloaded.peers()[0].onion_pubkey, b"peer-a".to_vec());
-        assert!(reloaded.peers()[0].content_id.is_empty());
-        assert_eq!(reloaded.peers()[0].first_seen_at, 10);
-        assert_eq!(reloaded.peers()[0].first_seen_at_ns, 1);
+        assert!(reloaded.peers()[0].latest_known_content.is_none());
+        assert_eq!(
+            optional_metadata_timestamp(reloaded.peers()[0].first_seen_at.as_ref()).unwrap(),
+            Some((10, 1))
+        );
     }
 
     #[test]
@@ -2707,8 +2696,10 @@ mod tests {
                 .map(|content| (content.content_id.clone(), content.content_length)),
             Some((b"revision-b".to_vec(), 222))
         );
-        assert_eq!(peer.requester_last_advertised_at, 19);
-        assert_eq!(peer.requester_last_advertised_at_ns, 1);
+        assert_eq!(
+            optional_metadata_timestamp(peer.requester_last_advertised_at.as_ref()).unwrap(),
+            Some((19, 1))
+        );
         assert_eq!(peer.requester_last_downloaded_advertised_content, None);
     }
 
@@ -2753,8 +2744,11 @@ mod tests {
                 .map(|content| (content.content_id.clone(), content.content_length)),
             Some((b"revision-a".to_vec(), 111))
         );
-        assert_eq!(peer.requester_last_downloaded_advertised_at, 16);
-        assert_eq!(peer.requester_last_downloaded_advertised_at_ns, 1);
+        assert_eq!(
+            optional_metadata_timestamp(peer.requester_last_downloaded_advertised_at.as_ref())
+                .unwrap(),
+            Some((16, 1))
+        );
         assert_eq!(peer.requester_last_download_latency_seconds, 6);
     }
 
@@ -2769,7 +2763,10 @@ mod tests {
 
         let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
         let peer = &reloaded.peers()[0];
-        assert_eq!((peer.first_seen_at, peer.first_seen_at_ns), (10, 1));
+        assert_eq!(
+            optional_metadata_timestamp(peer.first_seen_at.as_ref()).unwrap(),
+            Some((10, 1))
+        );
     }
 
     #[test]
@@ -2795,76 +2792,6 @@ mod tests {
     }
 
     #[test]
-    fn load_migrates_legacy_peer_content_id_into_known_and_cached_state() {
-        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
-        let metadata = storedpb::Metadata {
-            files: Vec::new(),
-            peers: vec![storedpb::Peer {
-                onion_pubkey: b"peer-a".to_vec(),
-                score_seconds: 7,
-                score_measured_at: 11,
-                content_id: b"legacy-content".to_vec(),
-                latest_known_content: None,
-                latest_cached_content: None,
-                origin: storedpb::PeerOrigin::Discovered as i32,
-                first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
-                reachability: storedpb::PeerReachability::Unknown as i32,
-                last_live_at: 0,
-                pinned_by_us: false,
-                pins_us: false,
-                our_content_last_verified_content_id: Vec::new(),
-                our_content_last_verified_at: 0,
-                first_seen_at: 0,
-                first_seen_at_ns: 0,
-                successful_calls: 0,
-                failed_calls: 0,
-                requester_latest_stored_content: None,
-                requester_latest_known_content: None,
-                requester_last_advertised_content: None,
-                requester_last_advertised_at: 0,
-                requester_last_advertised_at_ns: 0,
-                requester_last_downloaded_advertised_content: None,
-                requester_last_downloaded_advertised_at: 0,
-                requester_last_downloaded_advertised_at_ns: 0,
-                requester_last_download_latency_seconds: 0,
-            }],
-            node_initialized_at: 0,
-            node_initialized_at_ns: 0,
-            latest_recovered_revision: None,
-            recovery_watermark_at: 0,
-            recovery_watermark_at_ns: 0,
-            recovery_mode_enabled: false,
-            current_content: None,
-            metadata_rollup_due_at: 0,
-            metadata_rollup_due_at_ns: 0,
-            metadata_rollup_base_content_id: Vec::new(),
-        };
-        let peer_state_key = keys::derive_key(&master(), "bb/storage/peer-state", 32).unwrap();
-        let peer_cipher = Aes256GcmSiv::new_from_slice(&peer_state_key).unwrap();
-        fs.write_atomic(
-            PEER_STATE_FILE,
-            &encrypt_sidecar(&peer_cipher, &metadata.encode_to_vec()),
-        )
-        .unwrap();
-
-        let reloaded = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
-        let peer = &reloaded.peers()[0];
-        assert_eq!(peer.content_id, b"legacy-content".to_vec());
-        assert_eq!(
-            peer.latest_known_content
-                .as_ref()
-                .map(|content| content.content_id.clone()),
-            Some(b"legacy-content".to_vec())
-        );
-        assert_eq!(
-            peer.latest_cached_content
-                .as_ref()
-                .map(|content| content.content_id.clone()),
-            Some(b"legacy-content".to_vec())
-        );
-    }
-
-    #[test]
     fn lineage_metadata_round_trips_and_finishes_recovery() {
         let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
         let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
@@ -2877,8 +2804,7 @@ mod tests {
         store
             .record_recovered_revision(storedpb::RecoveredRevision {
                 content_id: vec![0x55; content::CONTENT_ID_LEN],
-                created_at: 90,
-                created_at_ns: 8,
+                created_at: Some(test_proto_timestamp(90, 8)),
             })
             .unwrap();
         assert_eq!(store.recovery_watermark(), Some((90, 8)));
@@ -2886,8 +2812,7 @@ mod tests {
             store.latest_recovered_revision(),
             Some(storedpb::RecoveredRevision {
                 content_id: vec![0x55; content::CONTENT_ID_LEN],
-                created_at: 90,
-                created_at_ns: 8,
+                created_at: Some(test_proto_timestamp(90, 8)),
             })
         );
 
@@ -3199,7 +3124,7 @@ mod tests {
     }
 
     #[test]
-    fn load_drops_legacy_raw_foreign_blobs() {
+    fn load_rejects_legacy_raw_foreign_blobs() {
         let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
         let mut local = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
 
@@ -3215,13 +3140,11 @@ mod tests {
         fs.write_atomic(&content_file_name(&foreign_id), &foreign_blob)
             .unwrap();
 
-        let reloaded = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
-        assert!(reloaded.current_content().is_none());
-        assert_eq!(reloaded.peers()[0].content_id, foreign_id);
         assert!(matches!(
-            fs.read(&content_file_name(&foreign_id)),
-            Err(StorageError::FileNotFound)
+            Store::new_with_time_source(fs.clone(), &master(), time_source()),
+            Err(StorageError::RecoveryRequired(_))
         ));
+        assert!(fs.read(&content_file_name(&foreign_id)).is_ok());
     }
 
     #[test]
@@ -3362,34 +3285,11 @@ mod tests {
         let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
         let store = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
         let peers = (0..peer_count)
-            .map(|index| storedpb::Peer {
-                onion_pubkey: format!("peer-{index:08}").into_bytes(),
-                score_seconds: 0,
-                score_measured_at: 0,
-                content_id: Vec::new(),
-                latest_known_content: None,
-                latest_cached_content: None,
-                origin: storedpb::PeerOrigin::Manual as i32,
-                first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
-                reachability: storedpb::PeerReachability::Unknown as i32,
-                last_live_at: 0,
-                pinned_by_us: false,
-                pins_us: false,
-                our_content_last_verified_content_id: Vec::new(),
-                our_content_last_verified_at: 0,
-                first_seen_at: 0,
-                first_seen_at_ns: 0,
-                successful_calls: 0,
-                failed_calls: 0,
-                requester_latest_stored_content: None,
-                requester_latest_known_content: None,
-                requester_last_advertised_content: None,
-                requester_last_advertised_at: 0,
-                requester_last_advertised_at_ns: 0,
-                requester_last_downloaded_advertised_content: None,
-                requester_last_downloaded_advertised_at: 0,
-                requester_last_downloaded_advertised_at_ns: 0,
-                requester_last_download_latency_seconds: 0,
+            .map(|index| {
+                test_peer(
+                    format!("peer-{index:08}").as_bytes(),
+                    storedpb::PeerOrigin::Manual,
+                )
             })
             .collect::<Vec<_>>();
 
@@ -3462,34 +3362,11 @@ mod tests {
         let files = store.current_plain_files();
         let make_peers = |count: usize| {
             (0..count)
-                .map(|index| storedpb::Peer {
-                    onion_pubkey: format!("peer-{index:08}").into_bytes(),
-                    score_seconds: 0,
-                    score_measured_at: 0,
-                    content_id: Vec::new(),
-                    latest_known_content: None,
-                    latest_cached_content: None,
-                    origin: storedpb::PeerOrigin::Discovered as i32,
-                    first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
-                    reachability: storedpb::PeerReachability::Unknown as i32,
-                    last_live_at: 0,
-                    pinned_by_us: false,
-                    pins_us: false,
-                    our_content_last_verified_content_id: Vec::new(),
-                    our_content_last_verified_at: 0,
-                    first_seen_at: 0,
-                    first_seen_at_ns: 0,
-                    successful_calls: 0,
-                    failed_calls: 0,
-                    requester_latest_stored_content: None,
-                    requester_latest_known_content: None,
-                    requester_last_advertised_content: None,
-                    requester_last_advertised_at: 0,
-                    requester_last_advertised_at_ns: 0,
-                    requester_last_downloaded_advertised_content: None,
-                    requester_last_downloaded_advertised_at: 0,
-                    requester_last_downloaded_advertised_at_ns: 0,
-                    requester_last_download_latency_seconds: 0,
+                .map(|index| {
+                    test_peer(
+                        format!("peer-{index:08}").as_bytes(),
+                        storedpb::PeerOrigin::Discovered,
+                    )
                 })
                 .collect::<Vec<_>>()
         };

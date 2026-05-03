@@ -983,7 +983,6 @@ impl DaemonService {
                 name: file.name,
                 data,
                 modified_at: file.modified_at,
-                modified_at_ns: file.modified_at_ns,
             }),
         }))
     }
@@ -4821,22 +4820,21 @@ mod tests {
             let restarted_service = &restarted_service;
             let owner_content_id = owner_content_id.clone();
             async move {
-                let content_id_matches = unlocked_node(restarted_service)
+                Ok(unlocked_node(restarted_service)
                     .await
                     .current_content_info()?
-                    .is_some_and(|content| content.content_id == owner_content_id);
-                let recovered = restarted_service
-                    .get_file(tonic::Request::new(clirpc::GetFileRequest {
-                        name: "alpha.txt".to_string(),
-                    }))
-                    .await?
-                    .into_inner()
-                    .file;
-                Ok(content_id_matches
-                    && recovered.is_some_and(|file| file.data == b"alpha-body".to_vec()))
+                    .is_some_and(|content| content.content_id == owner_content_id))
             }
         })
         .await?;
+        let recovered = restarted_service
+            .get_file(tonic::Request::new(clirpc::GetFileRequest {
+                name: "alpha.txt".to_string(),
+            }))
+            .await?
+            .into_inner()
+            .file;
+        assert!(recovered.is_some_and(|file| file.data == b"alpha-body".to_vec()));
 
         restarted_service.shutdown().await?;
         peer_server.abort();
@@ -4986,27 +4984,34 @@ mod tests {
 
         wait_for_async(Duration::from_secs(5), || {
             let owner_service = &owner_service;
-            let peer_onion = peer_onion.clone();
             let original_content_id = original_content_id.clone();
             async move {
                 let current_content = unlocked_node(owner_service)
                     .await
                     .current_content_info()?
                     .context("owner content should still exist")?;
+                Ok(current_content.content_id != original_content_id)
+            }
+        })
+        .await?;
+        tick.notify_waiters();
+        wait_for_async(Duration::from_secs(5), || {
+            let owner_service = &owner_service;
+            let peer_onion = peer_onion.clone();
+            async move {
                 let storage_peers = owner_service
                     .get_peer_storage(tonic::Request::new(clirpc::GetPeerStorageRequest {}))
                     .await?
                     .into_inner()
                     .storage_peers;
-                let synced = storage_peers.into_iter().any(|peer_storage| {
+                Ok(storage_peers.into_iter().any(|peer_storage| {
                     peer_storage
                         .peer
                         .as_ref()
                         .is_some_and(|peer| peer.onion_service_id == peer_onion)
                         && peer_storage.online
                         && peer_storage.our_content_synced
-                });
-                Ok(current_content.content_id != original_content_id && synced)
+                }))
             }
         })
         .await?;

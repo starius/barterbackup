@@ -1149,8 +1149,9 @@ func TestDockerListFilesReportsMetadata(t *testing.T) {
 	if file.GetSizeBytes() != int64(len(payload)) {
 		t.Fatalf("unexpected file size on %s: got %d want %d", node.Name(), file.GetSizeBytes(), len(payload))
 	}
-	if file.GetModifiedAt() != 0 || file.GetModifiedAtNs() != 0 {
-		t.Fatalf("unexpected file mtime on %s: got %d.%09d", node.Name(), file.GetModifiedAt(), file.GetModifiedAtNs())
+	modifiedAt := file.GetModifiedAt()
+	if modifiedAt == nil || modifiedAt.GetSeconds() != 0 || modifiedAt.GetNanos() != 0 {
+		t.Fatalf("unexpected file mtime on %s: got %#v", node.Name(), modifiedAt)
 	}
 }
 
