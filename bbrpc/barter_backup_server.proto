@@ -86,13 +86,12 @@ message SetContentRevisionRequest {
     ContentInfo previous_requester_content = 1;
 
     // requester_content is the description of the requester's content which
-    // the requester wants the responder to download and store. Can be empty
-    // if the requester wants to delete their content.
+    // the requester wants the responder to download and store.
     // Behavior:
     // - If requester_content is provided, both content_id and content_length
     //   must be set and content_length must be positive.
-    // - If requester_content is omitted (not set), the responder clears any
-    //   previously recorded requester content.
+    // - If requester_content is omitted (not set), the responder leaves any
+    //   previously recorded requester content unchanged.
     ContentInfo requester_content = 2;
 }
 
@@ -122,10 +121,6 @@ enum SetContentRevisionStorageResult
     // not cache the mirrored requester bytes because local peer-storage space
     // was exhausted.
     SET_CONTENT_REVISION_STORAGE_RESULT_SIDECAR_ONLY = 2;
-
-    // REQUESTER_CONTENT_CLEARED means the responder accepted a request to
-    // clear the requester's mirrored content state.
-    SET_CONTENT_REVISION_STORAGE_RESULT_REQUESTER_CONTENT_CLEARED = 3;
 }
 
 message SetContentRevisionResponse {

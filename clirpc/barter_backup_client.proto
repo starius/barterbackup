@@ -884,7 +884,6 @@ enum PublicationStorageResult
     PUBLICATION_STORAGE_RESULT_UNKNOWN = 0;
     PUBLICATION_STORAGE_RESULT_MIRRORED_BYTES_CACHED = 1;
     PUBLICATION_STORAGE_RESULT_SIDECAR_ONLY = 2;
-    PUBLICATION_STORAGE_RESULT_REQUESTER_CONTENT_CLEARED = 3;
 }
 
 // VerifyPeerStorageRequest asks the daemon to verify one peer's current stored

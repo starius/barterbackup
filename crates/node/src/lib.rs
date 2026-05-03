@@ -281,8 +281,6 @@ enum SyncPeerContentResult {
     MirroredBytesCached,
     /// SidecarOnly means only sidecar metadata was accepted locally.
     SidecarOnly,
-    /// RequesterContentCleared means requester content state was cleared.
-    RequesterContentCleared,
 }
 
 /// CachedPeerClient keeps one reusable outbound peer client with its last use time.
@@ -1057,9 +1055,6 @@ fn proto_publication_storage_result(
         }
         bbrpc::SetContentRevisionStorageResult::SidecarOnly => {
             clirpc::PublicationStorageResult::SidecarOnly
-        }
-        bbrpc::SetContentRevisionStorageResult::RequesterContentCleared => {
-            clirpc::PublicationStorageResult::RequesterContentCleared
         }
     }
 }
@@ -3190,20 +3185,11 @@ impl Node {
                 return Ok(storage_result);
             }
             None => {
-                let previous_content_id_hex = previous_cached_content_id
-                    .as_ref()
-                    .map(|content_id| content_id_hex(content_id))
-                    .unwrap_or_default();
-                self.with_store(|store| store.clear_peer_content_id(peer_public_key.as_bytes()))?;
-                if let Some(previous_content_id) = previous_cached_content_id {
-                    self.remove_unused_foreign_blob(&previous_content_id)?;
-                }
-                info!(
-                    peer = %peer_onion,
-                    previous_content_id = %previous_content_id_hex,
-                    "cleared mirrored peer content"
-                );
-                return Ok(SyncPeerContentResult::RequesterContentCleared);
+                return Ok(if previous_cached_content_id.is_some() {
+                    SyncPeerContentResult::MirroredBytesCached
+                } else {
+                    SyncPeerContentResult::SidecarOnly
+                });
             }
         }
     }
@@ -4352,7 +4338,7 @@ impl Node {
             .map(|content_info| content_info.content_id.clone());
         let mut retried_after_refresh = false;
         let mut publication_storage_result = clirpc::PublicationStorageResult::Unknown;
-        while peer_has_our_content != desired_content_id {
+        while our_content.is_some() && peer_has_our_content != desired_content_id {
             let set_request = bbrpc::SetContentRevisionRequest {
                 previous_requester_content: revision.requester_latest_known_content.clone(),
                 requester_content: our_content.clone(),
@@ -4371,17 +4357,7 @@ impl Node {
                         bbrpc::SetContentRevisionStorageResult::try_from(response.storage_result)
                             .unwrap_or(bbrpc::SetContentRevisionStorageResult::Unknown),
                     );
-                    if our_content.is_none() {
-                        let previous_content_id = peer_has_our_content
-                            .as_ref()
-                            .map(|content_id| content_id_hex(content_id))
-                            .unwrap_or_default();
-                        info!(
-                            peer = %peer_onion,
-                            previous_content_id = %previous_content_id,
-                            "asked peer to clear our mirrored content because we currently have no local content"
-                        );
-                    } else if publication_storage_result
+                    if publication_storage_result
                         == clirpc::PublicationStorageResult::SidecarOnly
                     {
                         info!(
@@ -5722,9 +5698,6 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
                 }
                 SyncPeerContentResult::SidecarOnly => {
                     bbrpc::SetContentRevisionStorageResult::SidecarOnly as i32
-                }
-                SyncPeerContentResult::RequesterContentCleared => {
-                    bbrpc::SetContentRevisionStorageResult::RequesterContentCleared as i32
                 }
             },
         }))
@@ -8987,8 +8960,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn set_content_revision_none_clears_tracked_peer_blob_and_metadata() -> anyhow::Result<()>
-    {
+    async fn set_content_revision_none_preserves_tracked_peer_blob_and_metadata(
+    ) -> anyhow::Result<()> {
         let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let requester_node = Arc::new(Node::with_local_storage(
             "requester-clear",
@@ -9045,15 +9018,80 @@ mod tests {
 
         let peer = peer_entry(responder_node.as_ref(), requester_node.address())?
             .context("missing tracked requester peer")?;
-        assert!(peer_latest_known_content(&peer).is_none());
-        assert!(peer_latest_cached_content(&peer).is_none());
-        assert!(!cached_peer_blob(
+        assert_eq!(
+            peer_latest_known_content(&peer).map(|content| content.content_id),
+            Some(requester_content.content_id.clone())
+        );
+        assert_eq!(
+            peer_latest_cached_content(&peer).map(|content| content.content_id),
+            Some(requester_content.content_id.clone())
+        );
+        assert!(cached_peer_blob(
             responder_node.as_ref(),
             &requester_content.content_id
         )?);
 
         requester_server.abort();
         responder_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_to_peer_with_no_local_content_does_not_clear_remote_copy() -> anyhow::Result<()>
+    {
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner_node = Arc::new(Node::with_local_storage(
+            "owner-no-clear",
+            owner_filesystem,
+        )?);
+        let replacement_filesystem: Arc<dyn Filesystem> =
+            Arc::new(storage::MemoryFilesystem::new());
+        let replacement_node = Arc::new(Node::with_local_storage(
+            "owner-no-clear",
+            replacement_filesystem,
+        )?);
+        let peer_identity = Node::new("peer-no-clear")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        let service_state = Arc::new(TransientSetAckState::new());
+        let (endpoint, server) =
+            spawn_plain_peer_server(TransientSetAckPeerService::new(service_state.clone())).await?;
+        connector.register_peer(peer_identity.address(), &endpoint);
+        owner_node.set_peer_connector(connector.clone());
+        replacement_node.set_peer_connector(connector.clone());
+        owner_node.add_known_peer(peer_identity.address())?;
+        replacement_node.add_known_peer(peer_identity.address())?;
+
+        CliService::new(owner_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+
+        let published_content = owner_node.responder_content()?.unwrap();
+        let updates = owner_node.publish_to_peer_updates(peer_identity.address()).await?;
+        assert_eq!(updates.last().map(|update| update.success), Some(true));
+        assert_eq!(service_state.set_call_count(), 1);
+        assert_eq!(
+            service_state.requester_content().map(|content| content.content_id),
+            Some(published_content.content_id.clone())
+        );
+        assert!(replacement_node.responder_content()?.is_none());
+
+        let updates = replacement_node
+            .publish_to_peer_updates(peer_identity.address())
+            .await?;
+        assert_eq!(updates.last().map(|update| update.success), Some(true));
+        assert_eq!(
+            service_state.requester_content().map(|content| content.content_id),
+            Some(published_content.content_id.clone())
+        );
+        assert_eq!(service_state.set_call_count(), 1);
+
+        server.abort();
         Ok(())
     }
 
