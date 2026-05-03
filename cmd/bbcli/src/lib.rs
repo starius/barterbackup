@@ -669,7 +669,7 @@ fn format_state_response(response: &StateResponse) -> Vec<String> {
     let mut lines = vec![
         format!("storage_initialized: {}", response.storage_initialized),
         format!("server_onion: {}", response.server_onion),
-        format!("uptime_seconds: {}", response.uptime_seconds),
+        format!("uptime: {}", format_duration_human(response.uptime_seconds)),
         format!(
             "peer_runtime_state: {}",
             match peer_runtime_state {
@@ -831,6 +831,37 @@ fn format_state_response(response: &StateResponse) -> Vec<String> {
     }
 
     lines
+}
+
+/// Render one duration in seconds using compact human-readable units.
+fn format_duration_human(total_seconds: i64) -> String {
+    if total_seconds < 0 {
+        return format!("{total_seconds}s");
+    }
+
+    let mut remaining = total_seconds;
+    let days = remaining / 86_400;
+    remaining %= 86_400;
+    let hours = remaining / 3_600;
+    remaining %= 3_600;
+    let minutes = remaining / 60;
+    let seconds = remaining % 60;
+
+    let mut parts = Vec::new();
+    if days > 0 {
+        parts.push(format!("{days}d"));
+    }
+    if hours > 0 {
+        parts.push(format!("{hours}h"));
+    }
+    if minutes > 0 {
+        parts.push(format!("{minutes}m"));
+    }
+    if seconds > 0 || parts.is_empty() {
+        parts.push(format!("{seconds}s"));
+    }
+
+    parts.join("")
 }
 
 /// Render one `(seconds, nanos)` pair or `unknown` for operator-facing state output.
@@ -2649,6 +2680,7 @@ mod tests {
         let lines = format_state_response(&response);
 
         assert!(lines.iter().any(|line| line == "storage_initialized: true"));
+        assert!(lines.iter().any(|line| line == "uptime: 12s"));
         assert!(lines.iter().any(|line| line == "peer_runtime_state: ready"));
         assert!(lines
             .iter()
@@ -2708,6 +2740,15 @@ mod tests {
         assert!(lines.iter().any(|line| {
             line == "predicted_replica_horizon remaining_fresh_replicas=0 seconds_until_threshold=3600 never=false"
         }));
+    }
+
+    #[test]
+    fn format_duration_human_uses_compact_units() {
+        assert_eq!(format_duration_human(0), "0s");
+        assert_eq!(format_duration_human(12), "12s");
+        assert_eq!(format_duration_human(65), "1m5s");
+        assert_eq!(format_duration_human(3_661), "1h1m1s");
+        assert_eq!(format_duration_human(90_061), "1d1h1m1s");
     }
 
     #[test]
