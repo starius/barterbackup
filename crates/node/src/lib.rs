@@ -1909,6 +1909,14 @@ impl Node {
         Ok(content)
     }
 
+    /// Ensure one current local content revision exists and return its summary.
+    fn ensure_responder_content(&self) -> Result<bbrpc::ContentInfo, Status> {
+        self.with_store(|store| store.ensure_current_content())?;
+        self.responder_content()?.ok_or_else(|| {
+            Status::failed_precondition("local node has no current content to publish")
+        })
+    }
+
     /// Install the outbound peer connector used for peer synchronization.
     pub fn set_peer_connector(&self, peer_connector: Arc<dyn PeerConnector>) {
         *self.peer_connector.lock().unwrap() = Some(peer_connector);
@@ -4524,9 +4532,7 @@ impl Node {
 
         // Upload our current revision only when the peer does not already hold
         // the exact same content identifier.
-        let our_content = self.responder_content()?.ok_or_else(|| {
-            Status::failed_precondition("local node has no current content to publish")
-        })?;
+        let our_content = self.ensure_responder_content()?;
         let our_content_length = our_content.content_length;
         let mut uploaded_our_content = 0;
         let desired_content_id = our_content.content_id.clone();
@@ -9398,7 +9404,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn publish_to_peer_rejects_missing_local_content() -> anyhow::Result<()> {
+    async fn publish_to_peer_materializes_empty_local_content() -> anyhow::Result<()> {
         let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let owner_node = Arc::new(Node::with_local_storage(
             "owner-no-clear",
@@ -9445,22 +9451,19 @@ mod tests {
         );
         assert!(replacement_node.responder_content()?.is_none());
 
-        let error = replacement_node
+        let updates = replacement_node
             .publish_to_peer_updates(peer_identity.address())
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), Code::FailedPrecondition);
-        assert_eq!(
-            error.message(),
-            "local node has no current content to publish"
-        );
+            .await?;
+        assert_eq!(updates.last().map(|update| update.success), Some(true));
+        let replacement_content = replacement_node.responder_content()?.unwrap();
         assert_eq!(
             service_state
                 .requester_content()
                 .map(|content| content.content_id),
-            Some(published_content.content_id.clone())
+            Some(replacement_content.content_id.clone())
         );
-        assert_eq!(service_state.set_call_count(), 1);
+        assert_ne!(replacement_content.content_id, published_content.content_id);
+        assert_eq!(service_state.set_call_count(), 2);
 
         server.abort();
         Ok(())

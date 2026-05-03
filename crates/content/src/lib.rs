@@ -84,10 +84,6 @@ pub enum ContentError {
     #[error("invalid revision: {0}")]
     InvalidRevision(&'static str),
 
-    /// The caller attempted to encode an empty file set.
-    #[error("at least one file is required")]
-    EmptyFileSet,
-
     /// Duplicate file names are not allowed.
     #[error("duplicate file name {0:?}")]
     DuplicateFileName(String),
@@ -552,10 +548,6 @@ fn build_metadata(files: &[PlainFile], peers: &[storedpb::Peer]) -> storedpb::Me
 
 /// Normalize the plaintext file set into a deterministic order.
 fn normalize_files(files: &[PlainFile]) -> Result<Vec<PlainFile>, ContentError> {
-    if files.is_empty() {
-        return Err(ContentError::EmptyFileSet);
-    }
-
     let mut normalized = files.to_vec();
     normalized.sort_by(|left, right| left.name.cmp(&right.name));
 
@@ -570,10 +562,6 @@ fn normalize_files(files: &[PlainFile]) -> Result<Vec<PlainFile>, ContentError> 
 
 /// Validate that metadata file headers are strictly ordered and unique.
 fn validate_file_headers(file_headers: &[storedpb::FileHeader]) -> Result<(), ContentError> {
-    if file_headers.is_empty() {
-        return Err(ContentError::EmptyFileSet);
-    }
-
     for window in file_headers.windows(2) {
         if window[0].name >= window[1].name {
             return Err(ContentError::InvalidFileOrdering);
@@ -832,6 +820,26 @@ mod tests {
         let encoded = codec.encode(sample_seed(11), &files, &[]).unwrap();
 
         assert_eq!(codec.encoded_len(&files, &[]).unwrap(), encoded.bytes.len());
+    }
+
+    #[test]
+    fn encode_decode_round_trip_supports_metadata_only_revisions() {
+        let codec = codec();
+        let peers = vec![storedpb::Peer {
+            onion_pubkey: b"peer".to_vec(),
+            score_seconds: 9,
+            score_measured_at: 77,
+            origin: storedpb::PeerOrigin::Discovered as i32,
+            first_contact_direction: storedpb::FirstContactDirection::Unknown as i32,
+            reachability: storedpb::PeerReachability::Unknown as i32,
+            ..Default::default()
+        }];
+        let encoded = codec.encode(sample_seed(12), &[], &peers).unwrap();
+        let decoded = codec.decode(&encoded.bytes).unwrap();
+
+        assert!(decoded.files.is_empty());
+        assert_eq!(decoded.metadata.peers, peers);
+        assert_eq!(codec.encoded_len(&[], &peers).unwrap(), encoded.bytes.len());
     }
 
     #[test]

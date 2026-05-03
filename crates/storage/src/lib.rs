@@ -531,6 +531,15 @@ impl Store {
         self.current.as_ref()
     }
 
+    /// Ensure the local store has one current content revision.
+    pub fn ensure_current_content(&mut self) -> Result<(), StorageError> {
+        if self.current.is_some() {
+            return Ok(());
+        }
+
+        self.persist_files()
+    }
+
     /// Return the latest known content id.
     pub fn current_content_id(&self) -> Option<&[u8]> {
         self.current
@@ -1788,9 +1797,6 @@ impl Store {
         files: &[PlainFile],
         peers: &[storedpb::Peer],
     ) -> Result<(), StorageError> {
-        if files.is_empty() {
-            return Ok(());
-        }
         let projected_len = self.codec.encoded_len(files, peers)?;
         if projected_len <= MAX_SHARED_CONTENT_BLOB_BYTES {
             return Ok(());
@@ -1805,10 +1811,10 @@ impl Store {
 
     /// Return the current projected shared blob length from in-memory state.
     pub fn current_projected_blob_len(&self) -> Result<Option<usize>, StorageError> {
-        let files = self.current_plain_files();
-        if files.is_empty() {
+        if self.current.is_none() {
             return Ok(None);
         }
+        let files = self.current_plain_files();
         Ok(Some(self.codec.encoded_len(&files, &self.peers)?))
     }
 
@@ -2896,6 +2902,22 @@ mod tests {
 
         assert_eq!(store.metadata_rollup_due_at(), None);
         assert_eq!(store.metadata_rollup_base_content_id(), None);
+    }
+
+    #[test]
+    fn ensure_current_content_supports_metadata_only_revision() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let clock = Arc::new(clock::ManualClock::new(
+            clock::Timestamp::new(50, 1).unwrap(),
+        ));
+        let mut store = store_with_fixed_rollup_delay(fs, clock, Duration::from_secs(86_400));
+
+        store.ensure_current_content().unwrap();
+
+        let current = store.current_content().expect("current content");
+        assert!(store.list_files().is_empty());
+        assert!(current.blob_len > 0);
+        assert!(store.current_projected_blob_len().unwrap().is_some());
     }
 
     #[test]
