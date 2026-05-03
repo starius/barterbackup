@@ -606,6 +606,7 @@ message StorageConfig {
     int64 allocated_storage_for_peers = 1;
 
     // min_replicas is the minimum number of peers to store our content on.
+    // New nodes default to 100.
     int64 min_replicas = 2;
 }
 

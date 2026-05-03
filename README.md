@@ -390,9 +390,10 @@ Recovery workflow:
   storage information, including pinned/protected/disposable byte totals,
   tracked-only peer count, offline-blocking bytes, reclaimable bytes, and the
   current fresh-replica horizon for our own content
-- `bbd` maintains the configured `min_replicas` target in the background; when
-  fresh online replicas drop below that target, it actively searches for more
-  peers to store our current revision on
+- `bbd` maintains the configured `min_replicas` target in the background; new
+  nodes default that target to `100`, and when fresh online replicas drop below
+  the configured target the daemon actively searches for more peers to store
+  our current revision on
 - if we already store a peer's data, maintenance will still try to publish our
   side to that peer even when the fresh-replica target is already satisfied
 - candidate search is peer-centric and tiered first, then weighted:

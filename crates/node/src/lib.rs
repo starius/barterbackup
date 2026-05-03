@@ -179,6 +179,8 @@ fn max_peer_content_bytes_i64() -> i64 {
 
 /// DEFAULT_ALLOCATED_STORAGE_FOR_PEERS is the default peer-cache budget.
 const DEFAULT_ALLOCATED_STORAGE_FOR_PEERS: i64 = 1024 * 1024 * 1024;
+/// DEFAULT_MIN_REPLICAS is the default fresh-replica target for our content.
+const DEFAULT_MIN_REPLICAS: i64 = 100;
 
 /// MAX_TRACKED_PEERS is the maximum number of peers kept in metadata.
 const MAX_TRACKED_PEERS: usize = 1024;
@@ -426,7 +428,7 @@ struct LocalStoreSnapshot {
 fn default_storage_config() -> clirpc::StorageConfig {
     clirpc::StorageConfig {
         allocated_storage_for_peers: DEFAULT_ALLOCATED_STORAGE_FOR_PEERS,
-        min_replicas: 0,
+        min_replicas: DEFAULT_MIN_REPLICAS,
     }
 }
 
@@ -7555,6 +7557,14 @@ mod tests {
             i64::try_from(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES).unwrap_or(i64::MAX)
         );
         assert!(!storage_policy.chunking_supported);
+        let storage_config = storage_info
+            .config
+            .ok_or_else(|| anyhow::anyhow!("missing storage config"))?;
+        assert_eq!(
+            storage_config.allocated_storage_for_peers,
+            DEFAULT_ALLOCATED_STORAGE_FOR_PEERS
+        );
+        assert_eq!(storage_config.min_replicas, DEFAULT_MIN_REPLICAS);
         let storage_info = storage_info.info.unwrap();
         assert!(storage_info.our_content_bytes > 0);
 
@@ -10392,9 +10402,6 @@ mod tests {
             min_replicas: 0,
         };
 
-        local_node
-            .publish_to_peer_updates(pinned_node.address())
-            .await?;
         publish_current_content_to_peer(
             pinned_node.clone(),
             local_node.clone(),
