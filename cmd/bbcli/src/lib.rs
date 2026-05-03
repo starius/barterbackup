@@ -24,6 +24,7 @@ use protos::clirpc::{
     PinPeerRequest, PublishToPeerRequest, SetStorageConfigRequest, StateRequest, StateResponse,
     StopRequest, StorageConfig, UnlockRequest, UnpinPeerRequest, VerifyPeerStorageRequest,
 };
+use time::{Month, OffsetDateTime, UtcOffset};
 use tlsutil::{connect_pinned_channel, read_keys};
 use tokio::time::sleep;
 use tonic::transport::Channel;
@@ -665,6 +666,15 @@ fn format_state_response(response: &StateResponse) -> Vec<String> {
 
 /// Format one local daemon state response for CLI output at one Unix timestamp.
 fn format_state_response_at(response: &StateResponse, now_secs: i64) -> Vec<String> {
+    format_state_response_at_offset(response, now_secs, local_utc_offset())
+}
+
+/// Format one local daemon state response for CLI output at one Unix timestamp and offset.
+fn format_state_response_at_offset(
+    response: &StateResponse,
+    now_secs: i64,
+    local_offset: UtcOffset,
+) -> Vec<String> {
     let peer_runtime_state =
         protos::clirpc::PeerRuntimeState::try_from(response.peer_runtime_state)
             .unwrap_or(protos::clirpc::PeerRuntimeState::Unknown);
@@ -756,7 +766,11 @@ fn format_state_response_at(response: &StateResponse, now_secs: i64) -> Vec<Stri
             ));
         }
         if let Some(durability) = local_summary.durability.as_ref() {
-            lines.extend(format_offline_durability_lines(durability, now_secs));
+            lines.extend(format_offline_durability_lines(
+                durability,
+                now_secs,
+                local_offset,
+            ));
         }
         if let Some(recovery) = local_summary.recovery.as_ref() {
             lines.push(format!(
@@ -833,6 +847,11 @@ fn unix_now_seconds() -> i64 {
         .unwrap_or(0)
 }
 
+/// Return the current local UTC offset or fall back to UTC.
+fn local_utc_offset() -> UtcOffset {
+    UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC)
+}
+
 /// Render one duration in seconds using compact human-readable units.
 fn format_duration_human(total_seconds: i64) -> String {
     if total_seconds < 0 {
@@ -907,40 +926,55 @@ fn format_replica_count(count: i64) -> String {
     }
 }
 
-/// Render one Unix timestamp in compact UTC form.
-fn format_unix_datetime_utc(seconds: i64) -> String {
-    let days = seconds.div_euclid(86_400);
-    let seconds_of_day = seconds.rem_euclid(86_400);
-    let hour = seconds_of_day / 3_600;
-    let minute = (seconds_of_day % 3_600) / 60;
-    let (year, month, day) = civil_from_days(days);
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+/// Render one Unix timestamp in local time with an explicit offset.
+fn format_unix_datetime_local(seconds: i64, offset: UtcOffset) -> String {
+    let datetime = OffsetDateTime::from_unix_timestamp(seconds)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .to_offset(offset);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02} {}",
+        datetime.year(),
+        month_number(datetime.month()),
+        datetime.day(),
+        datetime.hour(),
+        datetime.minute(),
+        format_utc_offset(offset)
+    )
 }
 
-/// Convert Unix days since 1970-01-01 into one Gregorian calendar date.
-fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u8, u8) {
-    let z = days_since_unix_epoch + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let day_of_era = z - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    let year = year_of_era + era * 400 + if month <= 2 { 1 } else { 0 };
+/// Return the numeric month value for one `time::Month`.
+fn month_number(month: Month) -> u8 {
+    match month {
+        Month::January => 1,
+        Month::February => 2,
+        Month::March => 3,
+        Month::April => 4,
+        Month::May => 5,
+        Month::June => 6,
+        Month::July => 7,
+        Month::August => 8,
+        Month::September => 9,
+        Month::October => 10,
+        Month::November => 11,
+        Month::December => 12,
+    }
+}
 
-    (
-        i32::try_from(year).unwrap_or(i32::MAX),
-        u8::try_from(month).unwrap_or(u8::MAX),
-        u8::try_from(day).unwrap_or(u8::MAX),
-    )
+/// Render one UTC offset in `+HH:MM` or `-HH:MM` form.
+fn format_utc_offset(offset: UtcOffset) -> String {
+    let total_minutes = offset.whole_seconds() / 60;
+    let sign = if total_minutes < 0 { '-' } else { '+' };
+    let absolute_minutes = total_minutes.abs();
+    let hours = absolute_minutes / 60;
+    let minutes = absolute_minutes % 60;
+    format!("{sign}{hours:02}:{minutes:02}")
 }
 
 /// Render one offline durability section as human-readable sentences.
 fn format_offline_durability_lines(
     durability: &protos::clirpc::StateDurabilitySummary,
     now_secs: i64,
+    local_offset: UtcOffset,
 ) -> Vec<String> {
     let mut lines = vec![
         "offline_durability: if this node goes offline now,".to_string(),
@@ -970,7 +1004,7 @@ fn format_offline_durability_lines(
             let deadline = now_secs.saturating_add(best_effort_point.seconds_until_threshold);
             lines.push(format!(
                 "  the data will become best-effort on {} (in {}).",
-                format_unix_datetime_utc(deadline),
+                format_unix_datetime_local(deadline, local_offset),
                 format_duration_words(best_effort_point.seconds_until_threshold)
             ));
         }
@@ -989,7 +1023,7 @@ fn format_offline_durability_lines(
             let deadline = now_secs.saturating_add(point.seconds_until_threshold);
             lines.push(format!(
                 "  at least {replica_count} will remain under storage obligation until {} (in {}).",
-                format_unix_datetime_utc(deadline),
+                format_unix_datetime_local(deadline, local_offset),
                 format_duration_words(point.seconds_until_threshold)
             ));
         }
@@ -2813,7 +2847,11 @@ mod tests {
             }),
         };
 
-        let lines = format_state_response_at(&response, 1_700_000_000);
+        let lines = format_state_response_at_offset(
+            &response,
+            1_700_000_000,
+            UtcOffset::from_hms(-5, 0, 0).unwrap(),
+        );
 
         assert!(lines.iter().any(|line| line == "storage_initialized: true"));
         assert!(lines.iter().any(|line| line == "uptime: 12s"));
@@ -2874,7 +2912,7 @@ mod tests {
             .iter()
             .any(|line| line == "newer_known_at: 95.000000010"));
         assert!(lines.iter().any(|line| {
-            line == "  the data will become best-effort on 2023-11-14 23:13 UTC (in 1 hour)."
+            line == "  the data will become best-effort on 2023-11-14 18:13 -05:00 (in 1 hour)."
         }));
     }
 
@@ -2896,11 +2934,15 @@ mod tests {
     }
 
     #[test]
-    fn format_unix_datetime_utc_renders_expected_date() {
-        assert_eq!(format_unix_datetime_utc(0), "1970-01-01 00:00 UTC");
+    fn format_unix_datetime_local_renders_expected_date() {
+        let offset = UtcOffset::from_hms(-5, 0, 0).unwrap();
         assert_eq!(
-            format_unix_datetime_utc(1_700_003_600),
-            "2023-11-14 23:13 UTC"
+            format_unix_datetime_local(0, offset),
+            "1969-12-31 19:00 -05:00"
+        );
+        assert_eq!(
+            format_unix_datetime_local(1_700_003_600, offset),
+            "2023-11-14 18:13 -05:00"
         );
     }
 
@@ -2924,16 +2966,17 @@ mod tests {
                 ],
             },
             1_700_000_000,
+            UtcOffset::from_hms(-5, 0, 0).unwrap(),
         );
 
         assert!(lines.iter().any(|line| {
             line == "  2 fresh replicas are predicted immediately; the configured target is 3 replicas."
         }));
         assert!(lines.iter().any(|line| {
-            line == "  at least 1 replica will remain under storage obligation until 2023-11-15 23:13 UTC (in 1 day, 1 hour)."
+            line == "  at least 1 replica will remain under storage obligation until 2023-11-15 18:13 -05:00 (in 1 day, 1 hour)."
         }));
         assert!(lines.iter().any(|line| {
-            line == "  the data will become best-effort on 2023-11-17 00:13 UTC (in 2 days, 2 hours)."
+            line == "  the data will become best-effort on 2023-11-16 19:13 -05:00 (in 2 days, 2 hours)."
         }));
     }
 
