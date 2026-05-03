@@ -660,6 +660,11 @@ async fn state(target: &LocalCliTarget) -> Result<()> {
 
 /// Format one local daemon state response for CLI output.
 fn format_state_response(response: &StateResponse) -> Vec<String> {
+    format_state_response_at(response, unix_now_seconds())
+}
+
+/// Format one local daemon state response for CLI output at one Unix timestamp.
+fn format_state_response_at(response: &StateResponse, now_secs: i64) -> Vec<String> {
     let peer_runtime_state =
         protos::clirpc::PeerRuntimeState::try_from(response.peer_runtime_state)
             .unwrap_or(protos::clirpc::PeerRuntimeState::Unknown);
@@ -751,22 +756,7 @@ fn format_state_response(response: &StateResponse) -> Vec<String> {
             ));
         }
         if let Some(durability) = local_summary.durability.as_ref() {
-            lines.push(format!(
-                "predicted_fresh_replicas_now: {}",
-                durability.predicted_fresh_replicas_now
-            ));
-            lines.push(format!(
-                "predicted_min_replicas_target: {}",
-                durability.predicted_min_replicas_target
-            ));
-            for point in &durability.predicted_replica_horizon {
-                lines.push(format!(
-                    "predicted_replica_horizon remaining_fresh_replicas={} until_threshold={} never={}",
-                    point.remaining_fresh_replicas,
-                    format_duration_human(point.seconds_until_threshold),
-                    point.never
-                ));
-            }
+            lines.extend(format_offline_durability_lines(durability, now_secs));
         }
         if let Some(recovery) = local_summary.recovery.as_ref() {
             lines.push(format!(
@@ -835,6 +825,14 @@ fn format_state_response(response: &StateResponse) -> Vec<String> {
     lines
 }
 
+/// Return the current Unix timestamp in seconds.
+fn unix_now_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
 /// Render one duration in seconds using compact human-readable units.
 fn format_duration_human(total_seconds: i64) -> String {
     if total_seconds < 0 {
@@ -864,6 +862,140 @@ fn format_duration_human(total_seconds: i64) -> String {
     }
 
     parts.join("")
+}
+
+/// Render one duration in words with correct pluralization.
+fn format_duration_words(total_seconds: i64) -> String {
+    if total_seconds < 0 {
+        return format!("{total_seconds} seconds");
+    }
+
+    let mut remaining = total_seconds;
+    let units = [
+        ("day", 86_400),
+        ("hour", 3_600),
+        ("minute", 60),
+        ("second", 1),
+    ];
+    let mut parts = Vec::new();
+
+    for (name, unit_seconds) in units {
+        if remaining >= unit_seconds {
+            let count = remaining / unit_seconds;
+            remaining %= unit_seconds;
+            let suffix = if count == 1 { "" } else { "s" };
+            parts.push(format!("{count} {name}{suffix}"));
+        }
+        if parts.len() == 2 {
+            break;
+        }
+    }
+
+    if parts.is_empty() {
+        "0 seconds".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// Render one replica count with correct pluralization.
+fn format_replica_count(count: i64) -> String {
+    if count == 1 {
+        "1 replica".to_string()
+    } else {
+        format!("{count} replicas")
+    }
+}
+
+/// Render one Unix timestamp in compact UTC form.
+fn format_unix_datetime_utc(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    let seconds_of_day = seconds.rem_euclid(86_400);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+}
+
+/// Convert Unix days since 1970-01-01 into one Gregorian calendar date.
+fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u8, u8) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    let year = year_of_era + era * 400 + if month <= 2 { 1 } else { 0 };
+
+    (
+        i32::try_from(year).unwrap_or(i32::MAX),
+        u8::try_from(month).unwrap_or(u8::MAX),
+        u8::try_from(day).unwrap_or(u8::MAX),
+    )
+}
+
+/// Render one offline durability section as human-readable sentences.
+fn format_offline_durability_lines(
+    durability: &protos::clirpc::StateDurabilitySummary,
+    now_secs: i64,
+) -> Vec<String> {
+    let mut lines = vec![
+        "offline_durability: if this node goes offline now,".to_string(),
+        format!(
+            "  {} {} predicted immediately; the configured target is {}.",
+            durability.predicted_fresh_replicas_now,
+            if durability.predicted_fresh_replicas_now == 1 {
+                "fresh replica is"
+            } else {
+                "fresh replicas are"
+            },
+            format_replica_count(durability.predicted_min_replicas_target)
+        ),
+    ];
+
+    if let Some(best_effort_point) = durability
+        .predicted_replica_horizon
+        .iter()
+        .find(|point| point.remaining_fresh_replicas == 0)
+    {
+        if best_effort_point.never {
+            lines.push(
+                "  the data will never become best-effort (that is, completely outside storage guarantees)."
+                    .to_string(),
+            );
+        } else {
+            let deadline = now_secs.saturating_add(best_effort_point.seconds_until_threshold);
+            lines.push(format!(
+                "  the data will become best-effort on {} (in {}).",
+                format_unix_datetime_utc(deadline),
+                format_duration_words(best_effort_point.seconds_until_threshold)
+            ));
+        }
+    }
+
+    for point in &durability.predicted_replica_horizon {
+        if point.remaining_fresh_replicas == 0 {
+            continue;
+        }
+        let replica_count = format_replica_count(point.remaining_fresh_replicas);
+        if point.never {
+            lines.push(format!(
+                "  at least {replica_count} will remain under storage obligation indefinitely."
+            ));
+        } else {
+            let deadline = now_secs.saturating_add(point.seconds_until_threshold);
+            lines.push(format!(
+                "  at least {replica_count} will remain under storage obligation until {} (in {}).",
+                format_unix_datetime_utc(deadline),
+                format_duration_words(point.seconds_until_threshold)
+            ));
+        }
+    }
+
+    lines
 }
 
 /// Render one `(seconds, nanos)` pair or `unknown` for operator-facing state output.
@@ -2681,7 +2813,7 @@ mod tests {
             }),
         };
 
-        let lines = format_state_response(&response);
+        let lines = format_state_response_at(&response, 1_700_000_000);
 
         assert!(lines.iter().any(|line| line == "storage_initialized: true"));
         assert!(lines.iter().any(|line| line == "uptime: 12s"));
@@ -2721,7 +2853,10 @@ mod tests {
             .any(|line| line == "mirrored_total_size_bytes: 2048"));
         assert!(lines
             .iter()
-            .any(|line| line == "predicted_fresh_replicas_now: 1"));
+            .any(|line| { line == "offline_durability: if this node goes offline now," }));
+        assert!(lines.iter().any(|line| {
+            line == "  1 fresh replica is predicted immediately; the configured target is 2 replicas."
+        }));
         assert!(lines.iter().any(|line| {
             *line
                 == format!(
@@ -2738,11 +2873,8 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line == "newer_known_at: 95.000000010"));
-        assert!(lines
-            .iter()
-            .any(|line| line == "predicted_min_replicas_target: 2"));
         assert!(lines.iter().any(|line| {
-            line == "predicted_replica_horizon remaining_fresh_replicas=0 until_threshold=1h never=false"
+            line == "  the data will become best-effort on 2023-11-14 23:13 UTC (in 1 hour)."
         }));
     }
 
@@ -2753,6 +2885,56 @@ mod tests {
         assert_eq!(format_duration_human(65), "1m5s");
         assert_eq!(format_duration_human(3_661), "1h1m1s");
         assert_eq!(format_duration_human(90_061), "1d1h1m1s");
+    }
+
+    #[test]
+    fn format_duration_words_uses_pluralized_units() {
+        assert_eq!(format_duration_words(0), "0 seconds");
+        assert_eq!(format_duration_words(1), "1 second");
+        assert_eq!(format_duration_words(65), "1 minute, 5 seconds");
+        assert_eq!(format_duration_words(90_061), "1 day, 1 hour");
+    }
+
+    #[test]
+    fn format_unix_datetime_utc_renders_expected_date() {
+        assert_eq!(format_unix_datetime_utc(0), "1970-01-01 00:00 UTC");
+        assert_eq!(
+            format_unix_datetime_utc(1_700_003_600),
+            "2023-11-14 23:13 UTC"
+        );
+    }
+
+    #[test]
+    fn format_offline_durability_lines_renders_readable_sentences() {
+        let lines = format_offline_durability_lines(
+            &protos::clirpc::StateDurabilitySummary {
+                predicted_fresh_replicas_now: 2,
+                predicted_min_replicas_target: 3,
+                predicted_replica_horizon: vec![
+                    protos::clirpc::ReplicaHorizonPoint {
+                        remaining_fresh_replicas: 1,
+                        seconds_until_threshold: 90_000,
+                        never: false,
+                    },
+                    protos::clirpc::ReplicaHorizonPoint {
+                        remaining_fresh_replicas: 0,
+                        seconds_until_threshold: 180_000,
+                        never: false,
+                    },
+                ],
+            },
+            1_700_000_000,
+        );
+
+        assert!(lines.iter().any(|line| {
+            line == "  2 fresh replicas are predicted immediately; the configured target is 3 replicas."
+        }));
+        assert!(lines.iter().any(|line| {
+            line == "  at least 1 replica will remain under storage obligation until 2023-11-15 23:13 UTC (in 1 day, 1 hour)."
+        }));
+        assert!(lines.iter().any(|line| {
+            line == "  the data will become best-effort on 2023-11-17 00:13 UTC (in 2 days, 2 hours)."
+        }));
     }
 
     #[test]
