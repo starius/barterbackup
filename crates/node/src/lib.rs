@@ -4445,10 +4445,11 @@ impl Node {
             .map(|content_info| content_info.content_id.clone());
         let mut retried_after_refresh = false;
         let mut publication_storage_result = clirpc::PublicationStorageResult::Unknown;
-        let mut sent_sidecar_only_refresh = false;
+        let mut attempted_empty_publication = false;
         while (our_content.is_some() && peer_has_our_content != desired_content_id)
-            || (our_content.is_none() && !sent_sidecar_only_refresh)
+            || (our_content.is_none() && !attempted_empty_publication)
         {
+            attempted_empty_publication |= our_content.is_none();
             if let Some(content_info) = our_content.as_ref() {
                 let superseded_penalty =
                     self.record_requester_advertisement_attempt(&peer_public_key, content_info)?;
@@ -4481,7 +4482,6 @@ impl Node {
                         bbrpc::SetContentRevisionStorageResult::try_from(response.storage_result)
                             .unwrap_or(bbrpc::SetContentRevisionStorageResult::Unknown),
                     );
-                    sent_sidecar_only_refresh = our_content.is_none();
                     if publication_storage_result
                         == clirpc::PublicationStorageResult::SidecarOnly
                     {
@@ -5877,7 +5877,7 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
             return Err(Status::not_found("content not found"));
         }
 
-        if serves_requester_content {
+        if serves_current_content || serves_requester_content {
             if let Some(peer_identity) = peer_identity.as_ref() {
                 if let Some(latency_seconds) = self.node.record_requester_advertised_download(
                     &peer_identity.public_key,
@@ -6317,6 +6317,14 @@ mod tests {
         fn requester_content(&self) -> Option<bbrpc::ContentInfo> {
             self.requester_content.lock().unwrap().clone()
         }
+
+        /// Apply one requester-content update using the production no-op rule
+        /// for omitted content.
+        fn apply_requester_content(&self, requester_content: Option<bbrpc::ContentInfo>) {
+            if let Some(requester_content) = requester_content {
+                *self.requester_content.lock().unwrap() = Some(requester_content);
+            }
+        }
     }
 
     /// TransientSetAckPeerService applies the first set request but returns a
@@ -6369,7 +6377,8 @@ mod tests {
             request: Request<bbrpc::SetContentRevisionRequest>,
         ) -> std::result::Result<Response<bbrpc::SetContentRevisionResponse>, Status> {
             self.state.set_call_count.fetch_add(1, Ordering::SeqCst);
-            *self.state.requester_content.lock().unwrap() = request.into_inner().requester_content;
+            self.state
+                .apply_requester_content(request.into_inner().requester_content);
 
             if self.state.fail_first_set.swap(false, Ordering::SeqCst) {
                 return Err(Status::unavailable("transient after apply"));
@@ -13233,7 +13242,6 @@ mod tests {
             .into_inner()
             .try_collect::<Vec<_>>()
             .await?;
-
         requester_clock.advance(Duration::from_secs(3_600));
         requester_cli
             .verify_peer_storage(tonic::Request::new(clirpc::VerifyPeerStorageRequest {
@@ -13249,7 +13257,6 @@ mod tests {
             peer_score_seconds(&requester_node, responder_node.address())?,
             0
         );
-
         requester_cli
             .set_file(tonic::Request::new(clirpc::SetFileRequest {
                 file: Some(clirpc::File {
@@ -13278,7 +13285,6 @@ mod tests {
             peer_score_seconds(&requester_node, responder_node.address())?,
             -1_800
         );
-
         requester_cli
             .publish_to_peer(tonic::Request::new(clirpc::PublishToPeerRequest {
                 peer: Some(clirpc::Peer {
