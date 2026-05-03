@@ -1023,6 +1023,19 @@ fn choose_publication_candidates<R: Rng + ?Sized>(
         return selected;
     }
     let selected_set = selected.iter().cloned().collect::<BTreeSet<_>>();
+    let mut pinned = candidates
+        .iter()
+        .filter(|candidate| !selected_set.contains(&candidate.peer_onion))
+        .filter(|candidate| candidate.pinned_by_us || candidate.pins_us)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !pinned.is_empty() {
+        draw_from_pool(&mut pinned, &mut selected, &mut remaining, now_secs, rng);
+    }
+    if remaining == 0 {
+        return selected;
+    }
+    let selected_set = selected.iter().cloned().collect::<BTreeSet<_>>();
     let mut others = candidates
         .iter()
         .filter(|candidate| !selected_set.contains(&candidate.peer_onion))
@@ -2490,6 +2503,48 @@ impl Node {
         })
     }
 
+    /// Record that we started advertising one local revision to this peer.
+    ///
+    /// Returns the age in seconds of one older pending advertisement that was
+    /// superseded before the peer downloaded it.
+    fn record_requester_advertisement_attempt(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+        content_info: &bbrpc::ContentInfo,
+    ) -> Result<i64, Status> {
+        let now = self.clock.now();
+        self.with_store(|store| {
+            store.note_peer_requester_advertisement(
+                peer_public_key.as_bytes(),
+                &content_info.content_id,
+                content_info.content_length,
+                (
+                    i64::try_from(now.secs).unwrap_or(i64::MAX),
+                    i64::from(now.nanos),
+                ),
+            )
+        })
+    }
+
+    /// Record that this peer downloaded one revision we had advertised to it.
+    fn record_requester_advertised_download(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+        content_id: &[u8],
+    ) -> Result<Option<i64>, Status> {
+        let now = self.clock.now();
+        self.with_store(|store| {
+            store.note_peer_requester_downloaded_advertised_content(
+                peer_public_key.as_bytes(),
+                content_id,
+                (
+                    i64::try_from(now.secs).unwrap_or(i64::MAX),
+                    i64::from(now.nanos),
+                ),
+            )
+        })
+    }
+
     /// Connect to another peer using the configured outbound transport.
     async fn connect_peer_client(&self, peer_onion: &str) -> Result<transport::PeerClient, Status> {
         self.connect_peer_client_with_timeout(peer_onion, transport::PEER_CONNECT_TIMEOUT)
@@ -3273,6 +3328,28 @@ impl Node {
         };
         batcher.set_peer_score(peer_public_key.as_bytes(), new_score, now_secs)?;
         Ok(new_score)
+    }
+
+    /// Adjust the persisted score state for a peer by one direct delta.
+    fn adjust_peer_score_direct(
+        &self,
+        peer_public_key: &ed25519_dalek::PublicKey,
+        delta_seconds: i64,
+    ) -> Result<Option<i64>, Status> {
+        if delta_seconds == 0 || !self.is_tracked_peer(peer_public_key)? {
+            return Ok(None);
+        }
+        let (score_seconds, _) = self.peer_score_state(peer_public_key)?;
+        let now_secs = i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX);
+        let new_score = score_seconds.saturating_add(delta_seconds);
+        if let Some(batcher) = &self.peer_metadata_batcher {
+            batcher.set_peer_score(peer_public_key.as_bytes(), new_score, now_secs)?;
+        } else {
+            self.with_store(|store| {
+                store.set_peer_score(peer_public_key.as_bytes(), new_score, now_secs)
+            })?;
+        }
+        Ok(Some(new_score))
     }
 
     /// Choose a deterministic sample section inside a content blob.
@@ -4176,14 +4253,44 @@ impl Node {
             );
         }
 
-        if publication_allowed && current_content.is_some() && missing_fresh_replicas > 0 {
+        if publication_allowed {
+            for peer in &inventory {
+                let Some(peer_storage) = storage_by_onion.get(&peer.onion_service_id) else {
+                    continue;
+                };
+                if !peer_storage.online {
+                    continue;
+                }
+                if peer.stored_content_bytes <= 0 {
+                    continue;
+                }
+                if peer_storage.our_content_synced && current_content.is_some() {
+                    continue;
+                }
+
+                let action = action_by_onion
+                    .entry(peer.onion_service_id.clone())
+                    .or_insert_with(|| BackgroundMaintenancePeerAction {
+                        peer_onion: peer.onion_service_id.clone(),
+                        propose: false,
+                        check: false,
+                    });
+                action.propose = true;
+                action.check = true;
+            }
+        }
+
+        if publication_allowed && missing_fresh_replicas > 0 {
             let now_secs = i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX);
             let candidates = inventory
                 .iter()
                 .filter_map(|peer| {
                     let peer_storage = storage_by_onion.get(&peer.onion_service_id)?;
                     let tracked_peer = tracked_by_onion.get(&peer.onion_service_id)?;
-                    if !peer_storage.online || peer_storage.our_content_synced {
+                    if !peer_storage.online
+                        || peer_storage.our_content_synced
+                        || action_by_onion.contains_key(&peer.onion_service_id)
+                    {
                         return None;
                     }
                     Some(PublicationCandidate {
@@ -4338,7 +4445,24 @@ impl Node {
             .map(|content_info| content_info.content_id.clone());
         let mut retried_after_refresh = false;
         let mut publication_storage_result = clirpc::PublicationStorageResult::Unknown;
-        while our_content.is_some() && peer_has_our_content != desired_content_id {
+        let mut sent_sidecar_only_refresh = false;
+        while (our_content.is_some() && peer_has_our_content != desired_content_id)
+            || (our_content.is_none() && !sent_sidecar_only_refresh)
+        {
+            if let Some(content_info) = our_content.as_ref() {
+                let superseded_penalty =
+                    self.record_requester_advertisement_attempt(&peer_public_key, content_info)?;
+                if let Some(new_score) =
+                    self.adjust_peer_score_direct(&peer_public_key, -superseded_penalty)?
+                {
+                    info!(
+                        peer = %peer_onion,
+                        superseded_pending_advertisement_penalty_seconds = superseded_penalty,
+                        new_score_seconds = new_score,
+                        "deducted score for one superseded undownloaded advertisement"
+                    );
+                }
+            }
             let set_request = bbrpc::SetContentRevisionRequest {
                 previous_requester_content: revision.requester_latest_known_content.clone(),
                 requester_content: our_content.clone(),
@@ -4357,6 +4481,7 @@ impl Node {
                         bbrpc::SetContentRevisionStorageResult::try_from(response.storage_result)
                             .unwrap_or(bbrpc::SetContentRevisionStorageResult::Unknown),
                     );
+                    sent_sidecar_only_refresh = our_content.is_none();
                     if publication_storage_result
                         == clirpc::PublicationStorageResult::SidecarOnly
                     {
@@ -5738,23 +5863,43 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
                 .current_content_id()
                 .map(|content_id| content_id.to_vec()))
         })?;
-        let allowed = current_content_id
+        let serves_current_content = current_content_id
             .as_ref()
-            .is_some_and(|content_id| content_id.as_slice() == request.content_id.as_slice())
-            || peer_identity
-                .as_ref()
-                .map(|peer_identity| self.node.requester_content(&peer_identity.public_key))
-                .transpose()?
-                .flatten()
-                .is_some_and(|content_info| content_info.content_id == request.content_id);
+            .is_some_and(|content_id| content_id.as_slice() == request.content_id.as_slice());
+        let serves_requester_content = peer_identity
+            .as_ref()
+            .map(|peer_identity| self.node.requester_content(&peer_identity.public_key))
+            .transpose()?
+            .flatten()
+            .is_some_and(|content_info| content_info.content_id == request.content_id);
+        let allowed = serves_current_content || serves_requester_content;
         if !allowed {
             return Err(Status::not_found("content not found"));
         }
 
-        let blob = if current_content_id
-            .as_ref()
-            .is_some_and(|content_id| content_id.as_slice() == request.content_id.as_slice())
-        {
+        if serves_requester_content {
+            if let Some(peer_identity) = peer_identity.as_ref() {
+                if let Some(latency_seconds) = self.node.record_requester_advertised_download(
+                    &peer_identity.public_key,
+                    &request.content_id,
+                )? {
+                    if let Some(new_score) = self
+                        .node
+                        .adjust_peer_score_direct(&peer_identity.public_key, -latency_seconds)?
+                    {
+                        info!(
+                            peer = %peer_identity.onion_address,
+                            content_id = %content_id_hex(&request.content_id),
+                            download_delay_seconds = latency_seconds,
+                            new_score_seconds = new_score,
+                            "deducted score for delayed pickup of advertised content"
+                        );
+                    }
+                }
+            }
+        }
+
+        let blob = if serves_current_content {
             self.node.with_store(|store| store.current_blob())?
         } else {
             self.node
@@ -7531,6 +7676,13 @@ mod tests {
             failed_calls: 0,
             requester_latest_stored_content: None,
             requester_latest_known_content: None,
+            requester_last_advertised_content: None,
+            requester_last_advertised_at: 0,
+            requester_last_advertised_at_ns: 0,
+            requester_last_downloaded_advertised_content: None,
+            requester_last_downloaded_advertised_at: 0,
+            requester_last_downloaded_advertised_at_ns: 0,
+            requester_last_download_latency_seconds: 0,
         }
     }
 
@@ -9095,7 +9247,7 @@ mod tests {
                 .map(|content| content.content_id),
             Some(published_content.content_id.clone())
         );
-        assert_eq!(service_state.set_call_count(), 1);
+        assert_eq!(service_state.set_call_count(), 2);
 
         server.abort();
         Ok(())
@@ -10880,6 +11032,100 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_maintenance_plan_reciprocates_with_stored_peer_even_at_target(
+    ) -> anyhow::Result<()> {
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner = Arc::new(Node::with_local_storage(
+            "maintenance-reciprocal-owner",
+            owner_filesystem,
+        )?);
+        let fresh_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let fresh_peer = Arc::new(Node::with_local_storage(
+            "maintenance-reciprocal-fresh",
+            fresh_filesystem,
+        )?);
+        let reciprocal_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let reciprocal_peer = Arc::new(Node::with_local_storage(
+            "maintenance-reciprocal-peer",
+            reciprocal_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        owner.set_peer_connector(connector.clone());
+        fresh_peer.set_peer_connector(connector.clone());
+        reciprocal_peer.set_peer_connector(connector.clone());
+        owner.add_known_peer(fresh_peer.address())?;
+        owner.add_known_peer(reciprocal_peer.address())?;
+        fresh_peer.add_known_peer(owner.address())?;
+        reciprocal_peer.add_known_peer(owner.address())?;
+
+        CliService::new(owner.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "owner.txt".to_string(),
+                    data: b"owner-body".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+        CliService::new(reciprocal_peer.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: b"peer-body".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+        *owner.storage_config.lock().unwrap() = clirpc::StorageConfig {
+            allocated_storage_for_peers: DEFAULT_ALLOCATED_STORAGE_FOR_PEERS,
+            min_replicas: 1,
+        };
+
+        let owner_server = spawn_registered_p2p_server(owner.clone(), connector.as_ref()).await?;
+        let fresh_server =
+            spawn_registered_p2p_server(fresh_peer.clone(), connector.as_ref()).await?;
+        let reciprocal_server =
+            spawn_registered_p2p_server(reciprocal_peer.clone(), connector.as_ref()).await?;
+        owner.publish_to_peer_updates(fresh_peer.address()).await?;
+        owner
+            .verify_peer_storage_updates(fresh_peer.address())
+            .await?;
+        reciprocal_peer
+            .publish_to_peer_updates(owner.address())
+            .await?;
+
+        let plan = owner.background_maintenance_plan().await?;
+        let actions = plan
+            .peer_actions
+            .iter()
+            .map(|action| (action.peer_onion.clone(), action.clone()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(plan.fresh_replica_count, 1);
+        assert_eq!(plan.min_replicas_target, 1);
+        assert_eq!(
+            actions.get(fresh_peer.address()),
+            Some(&BackgroundMaintenancePeerAction {
+                peer_onion: fresh_peer.address().to_string(),
+                propose: false,
+                check: true,
+            })
+        );
+        assert_eq!(
+            actions.get(reciprocal_peer.address()),
+            Some(&BackgroundMaintenancePeerAction {
+                peer_onion: reciprocal_peer.address().to_string(),
+                propose: true,
+                check: true,
+            })
+        );
+
+        reciprocal_server.abort();
+        fresh_server.abort();
+        owner_server.abort();
+        Ok(())
+    }
+
     #[test]
     fn choose_publication_candidates_prioritizes_reciprocal_storage_first() {
         use rand::{rngs::StdRng, SeedableRng};
@@ -10950,6 +11196,95 @@ mod tests {
             strong_wins > 200,
             "strong peer won only {strong_wins} draws"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn advertisement_download_latency_deducts_from_peer_score_once() -> anyhow::Result<()> {
+        let clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage_and_clock(
+            "latency-score-owner",
+            filesystem,
+            clock.clone(),
+        )?);
+        let peer_identity = Node::new("latency-score-peer")?;
+        node.add_known_peer(peer_identity.address())?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_identity.address())?;
+        node.with_store(|store| store.set_peer_score(peer_public_key.as_bytes(), 100, 100))?;
+
+        CliService::new(node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+        let content = node.responder_content()?.unwrap();
+        assert_eq!(
+            node.record_requester_advertisement_attempt(&peer_public_key, &content)?,
+            0
+        );
+
+        clock.set(Timestamp::new(112, 0).unwrap());
+        let latency = node
+            .record_requester_advertised_download(&peer_public_key, &content.content_id)?
+            .context("missing completed download latency")?;
+        assert_eq!(latency, 12);
+        let new_score = node
+            .adjust_peer_score_direct(&peer_public_key, -latency)?
+            .context("missing updated score")?;
+        assert_eq!(new_score, 88);
+        assert_eq!(
+            node.record_requester_advertised_download(&peer_public_key, &content.content_id)?,
+            None
+        );
+        assert_eq!(
+            peer_score_seconds(node.as_ref(), peer_identity.address())?,
+            88
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn superseded_pending_advertisement_deducts_from_peer_score() -> anyhow::Result<()> {
+        let clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage_and_clock(
+            "superseded-score-owner",
+            filesystem,
+            clock.clone(),
+        )?);
+        let peer_identity = Node::new("superseded-score-peer")?;
+        node.add_known_peer(peer_identity.address())?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_identity.address())?;
+        node.with_store(|store| store.set_peer_score(peer_public_key.as_bytes(), 100, 100))?;
+
+        let content_a = bbrpc::ContentInfo {
+            content_id: vec![1; CONTENT_ID_LEN],
+            content_length: 111,
+        };
+        let content_b = bbrpc::ContentInfo {
+            content_id: vec![2; CONTENT_ID_LEN],
+            content_length: 222,
+        };
+        assert_eq!(
+            node.record_requester_advertisement_attempt(&peer_public_key, &content_a)?,
+            0
+        );
+        clock.set(Timestamp::new(109, 0).unwrap());
+        let penalty = node.record_requester_advertisement_attempt(&peer_public_key, &content_b)?;
+        assert_eq!(penalty, 9);
+        let new_score = node
+            .adjust_peer_score_direct(&peer_public_key, -penalty)?
+            .context("missing updated score")?;
+        assert_eq!(new_score, 91);
+        assert_eq!(
+            peer_score_seconds(node.as_ref(), peer_identity.address())?,
+            91
+        );
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]

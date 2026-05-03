@@ -317,6 +317,33 @@ fn optional_metadata_timestamp(secs: i64, nanos: i64) -> Option<(i64, i64)> {
     ((secs != 0) || (nanos != 0)).then_some((secs, nanos))
 }
 
+/// Return whether one peer still has a pending advertised requester revision.
+fn peer_has_pending_requester_advertisement(peer: &storedpb::Peer) -> bool {
+    let Some(advertised_content) = peer.requester_last_advertised_content.as_ref() else {
+        return false;
+    };
+    let Some(advertised_at) = optional_metadata_timestamp(
+        peer.requester_last_advertised_at,
+        peer.requester_last_advertised_at_ns,
+    ) else {
+        return false;
+    };
+    let downloaded_content = peer.requester_last_downloaded_advertised_content.as_ref();
+    let downloaded_at = optional_metadata_timestamp(
+        peer.requester_last_downloaded_advertised_at,
+        peer.requester_last_downloaded_advertised_at_ns,
+    );
+
+    match (downloaded_content, downloaded_at) {
+        (Some(downloaded_content), Some(downloaded_at))
+            if downloaded_content.content_id == advertised_content.content_id =>
+        {
+            downloaded_at < advertised_at
+        }
+        _ => true,
+    }
+}
+
 /// Migrate one older peer record into the richer current representation.
 fn migrate_peer(peer: &mut storedpb::Peer) {
     if peer.latest_known_content.is_none() && !peer.content_id.is_empty() {
@@ -370,6 +397,13 @@ fn ensure_peer_entry(
         failed_calls: 0,
         requester_latest_stored_content: None,
         requester_latest_known_content: None,
+        requester_last_advertised_content: None,
+        requester_last_advertised_at: 0,
+        requester_last_advertised_at_ns: 0,
+        requester_last_downloaded_advertised_content: None,
+        requester_last_downloaded_advertised_at: 0,
+        requester_last_downloaded_advertised_at_ns: 0,
+        requester_last_download_latency_seconds: 0,
     });
 }
 
@@ -715,6 +749,13 @@ impl Store {
                     failed_calls: 0,
                     requester_latest_stored_content: None,
                     requester_latest_known_content: None,
+                    requester_last_advertised_content: None,
+                    requester_last_advertised_at: 0,
+                    requester_last_advertised_at_ns: 0,
+                    requester_last_downloaded_advertised_content: None,
+                    requester_last_downloaded_advertised_at: 0,
+                    requester_last_downloaded_advertised_at_ns: 0,
+                    requester_last_download_latency_seconds: 0,
                 });
             }
             Ok(true)
@@ -1142,6 +1183,109 @@ impl Store {
             peer.requester_latest_known_content = next_latest_known;
             Ok(true)
         })
+    }
+
+    /// Record the latest requester revision we attempted to advertise to this peer.
+    ///
+    /// Returns the age in seconds of one older pending advertisement that was
+    /// superseded by this newer content before the peer downloaded it.
+    pub fn note_peer_requester_advertisement(
+        &mut self,
+        onion_pubkey: &[u8],
+        content_id: &[u8],
+        content_length: i64,
+        advertised_at: (i64, i64),
+    ) -> Result<i64, StorageError> {
+        if onion_pubkey.is_empty() || content_id.is_empty() {
+            return Err(StorageError::InvalidFileName);
+        }
+
+        let first_seen_at = advertised_at;
+        let mut superseded_pending_penalty = 0i64;
+        self.update_peers(|peers| {
+            ensure_peer_entry(peers, onion_pubkey, first_seen_at);
+            let peer = peers
+                .iter_mut()
+                .find(|peer| peer.onion_pubkey == onion_pubkey)
+                .expect("peer entry must exist after ensure");
+            let next_advertised = Some(peer_content_summary(content_id, content_length));
+            if peer.requester_last_advertised_content == next_advertised
+                && peer_has_pending_requester_advertisement(peer)
+            {
+                return Ok(false);
+            }
+
+            if let Some(previous_advertised) = peer.requester_last_advertised_content.as_ref() {
+                if previous_advertised.content_id != content_id
+                    && peer_has_pending_requester_advertisement(peer)
+                {
+                    if let Some(previous_advertised_at) = optional_metadata_timestamp(
+                        peer.requester_last_advertised_at,
+                        peer.requester_last_advertised_at_ns,
+                    ) {
+                        superseded_pending_penalty = advertised_at
+                            .0
+                            .saturating_sub(previous_advertised_at.0)
+                            .max(0);
+                    }
+                }
+            }
+
+            peer.requester_last_advertised_content = next_advertised;
+            peer.requester_last_advertised_at = advertised_at.0;
+            peer.requester_last_advertised_at_ns = advertised_at.1;
+            Ok(true)
+        })?;
+        Ok(superseded_pending_penalty)
+    }
+
+    /// Record that this peer downloaded the latest advertised requester revision.
+    ///
+    /// Returns the observed delay in seconds when the download completed a
+    /// previously pending advertisement for the same content id.
+    pub fn note_peer_requester_downloaded_advertised_content(
+        &mut self,
+        onion_pubkey: &[u8],
+        content_id: &[u8],
+        downloaded_at: (i64, i64),
+    ) -> Result<Option<i64>, StorageError> {
+        if onion_pubkey.is_empty() || content_id.is_empty() {
+            return Err(StorageError::InvalidFileName);
+        }
+
+        let first_seen_at = downloaded_at;
+        let mut completed_latency = None;
+        self.update_peers(|peers| {
+            ensure_peer_entry(peers, onion_pubkey, first_seen_at);
+            let peer = peers
+                .iter_mut()
+                .find(|peer| peer.onion_pubkey == onion_pubkey)
+                .expect("peer entry must exist after ensure");
+            let Some(advertised_content) = peer.requester_last_advertised_content.as_ref() else {
+                return Ok(false);
+            };
+            if advertised_content.content_id != content_id {
+                return Ok(false);
+            }
+            let Some(advertised_at) = optional_metadata_timestamp(
+                peer.requester_last_advertised_at,
+                peer.requester_last_advertised_at_ns,
+            ) else {
+                return Ok(false);
+            };
+            if !peer_has_pending_requester_advertisement(peer) {
+                return Ok(false);
+            }
+
+            let latency_seconds = downloaded_at.0.saturating_sub(advertised_at.0).max(0);
+            peer.requester_last_downloaded_advertised_content = Some(advertised_content.clone());
+            peer.requester_last_downloaded_advertised_at = downloaded_at.0;
+            peer.requester_last_downloaded_advertised_at_ns = downloaded_at.1;
+            peer.requester_last_download_latency_seconds = latency_seconds;
+            completed_latency = Some(latency_seconds);
+            Ok(true)
+        })?;
+        Ok(completed_latency)
     }
 
     /// Persist one outbound peer-call outcome for availability weighting.
@@ -2372,6 +2516,84 @@ mod tests {
     }
 
     #[test]
+    fn requester_advertisement_persists_and_superseding_pending_revision_returns_penalty() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let clock = Arc::new(clock::ManualClock::new(
+            clock::Timestamp::new(10, 1).unwrap(),
+        ));
+        let mut store = Store::new_with_time_source(fs.clone(), &master(), clock.clone()).unwrap();
+
+        let penalty = store
+            .note_peer_requester_advertisement(b"peer-a", b"revision-a", 111, (10, 1))
+            .unwrap();
+        assert_eq!(penalty, 0);
+
+        clock.set(clock::Timestamp::new(19, 1).unwrap());
+        let penalty = store
+            .note_peer_requester_advertisement(b"peer-a", b"revision-b", 222, (19, 1))
+            .unwrap();
+        assert_eq!(penalty, 9);
+
+        let reloaded = Store::new_with_time_source(fs, &master(), clock).unwrap();
+        let peer = &reloaded.peers()[0];
+        assert_eq!(
+            peer.requester_last_advertised_content
+                .as_ref()
+                .map(|content| (content.content_id.clone(), content.content_length)),
+            Some((b"revision-b".to_vec(), 222))
+        );
+        assert_eq!(peer.requester_last_advertised_at, 19);
+        assert_eq!(peer.requester_last_advertised_at_ns, 1);
+        assert_eq!(peer.requester_last_downloaded_advertised_content, None);
+    }
+
+    #[test]
+    fn requester_advertised_download_completes_only_once_per_pending_revision() {
+        let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let clock = Arc::new(clock::ManualClock::new(
+            clock::Timestamp::new(10, 1).unwrap(),
+        ));
+        let mut store = Store::new_with_time_source(fs.clone(), &master(), clock.clone()).unwrap();
+
+        store
+            .note_peer_requester_advertisement(b"peer-a", b"revision-a", 111, (10, 1))
+            .unwrap();
+        clock.set(clock::Timestamp::new(16, 1).unwrap());
+        assert_eq!(
+            store
+                .note_peer_requester_downloaded_advertised_content(
+                    b"peer-a",
+                    b"revision-a",
+                    (16, 1)
+                )
+                .unwrap(),
+            Some(6)
+        );
+        assert_eq!(
+            store
+                .note_peer_requester_downloaded_advertised_content(
+                    b"peer-a",
+                    b"revision-a",
+                    (17, 1)
+                )
+                .unwrap(),
+            None
+        );
+
+        let reloaded = Store::new_with_time_source(fs, &master(), clock).unwrap();
+        let peer = &reloaded.peers()[0];
+        assert_eq!(
+            peer.requester_last_downloaded_advertised_content
+                .as_ref()
+                .map(|content| (content.content_id.clone(), content.content_length)),
+            Some((b"revision-a".to_vec(), 111))
+        );
+        assert_eq!(peer.requester_last_downloaded_at, 16);
+        assert_eq!(peer.requester_last_downloaded_at_ns, 1);
+        assert_eq!(peer.requester_last_download_latency_seconds, 6);
+    }
+
+    #[test]
     fn peer_first_seen_time_is_not_reset_by_later_updates() {
         let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
         let mut store = Store::new_with_time_source(fs.clone(), &master(), time_source()).unwrap();
@@ -2433,6 +2655,13 @@ mod tests {
                 failed_calls: 0,
                 requester_latest_stored_content: None,
                 requester_latest_known_content: None,
+                requester_last_advertised_content: None,
+                requester_last_advertised_at: 0,
+                requester_last_advertised_at_ns: 0,
+                requester_last_downloaded_advertised_content: None,
+                requester_last_downloaded_advertised_at: 0,
+                requester_last_downloaded_advertised_at_ns: 0,
+                requester_last_download_latency_seconds: 0,
             }],
             node_initialized_at: 0,
             node_initialized_at_ns: 0,
@@ -2855,6 +3084,13 @@ mod tests {
                 failed_calls: 0,
                 requester_latest_stored_content: None,
                 requester_latest_known_content: None,
+                requester_last_advertised_content: None,
+                requester_last_advertised_at: 0,
+                requester_last_advertised_at_ns: 0,
+                requester_last_downloaded_advertised_content: None,
+                requester_last_downloaded_advertised_at: 0,
+                requester_last_downloaded_advertised_at_ns: 0,
+                requester_last_download_latency_seconds: 0,
             })
             .collect::<Vec<_>>();
 
@@ -2948,6 +3184,13 @@ mod tests {
                     failed_calls: 0,
                     requester_latest_stored_content: None,
                     requester_latest_known_content: None,
+                    requester_last_advertised_content: None,
+                    requester_last_advertised_at: 0,
+                    requester_last_advertised_at_ns: 0,
+                    requester_last_downloaded_advertised_content: None,
+                    requester_last_downloaded_advertised_at: 0,
+                    requester_last_downloaded_advertised_at_ns: 0,
+                    requester_last_download_latency_seconds: 0,
                 })
                 .collect::<Vec<_>>()
         };

@@ -163,6 +163,35 @@ message Peer {
     // requester_latest_known_content is the newest local-owner revision this
     // peer most recently reported knowing about, even if it cannot return it.
     PeerContent requester_latest_known_content = 20;
+
+    // requester_last_advertised_content is the newest local-owner revision we
+    // most recently attempted to advertise to this peer.
+    PeerContent requester_last_advertised_content = 21;
+
+    // requester_last_advertised_at is when we first attempted to advertise the
+    // currently pending requester_last_advertised_content to this peer.
+    int64 requester_last_advertised_at = 22;
+
+    // requester_last_advertised_at_ns is the nanosecond component of
+    // requester_last_advertised_at.
+    int64 requester_last_advertised_at_ns = 23;
+
+    // requester_last_downloaded_advertised_content is the newest advertised
+    // requester revision this peer later downloaded from us.
+    PeerContent requester_last_downloaded_advertised_content = 24;
+
+    // requester_last_downloaded_advertised_at is when this peer first
+    // downloaded requester_last_downloaded_advertised_content from us.
+    int64 requester_last_downloaded_advertised_at = 25;
+
+    // requester_last_downloaded_advertised_at_ns is the nanosecond component
+    // of requester_last_downloaded_advertised_at.
+    int64 requester_last_downloaded_advertised_at_ns = 26;
+
+    // requester_last_download_latency_seconds is how long this peer took to
+    // download requester_last_downloaded_advertised_content after we first
+    // advertised it.
+    int64 requester_last_download_latency_seconds = 27;
 }
 
 // RecoveredRevision records one authenticated older-lineage revision that was
