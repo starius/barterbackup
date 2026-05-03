@@ -41,6 +41,8 @@ const TIMER_LABEL_MAINTENANCE_INTERVAL: &str = "maintenance.interval";
 const TIMER_LABEL_SELF_CHECK_INTERVAL: &str = "self-check.interval";
 const TIMER_LABEL_PEER_RUNTIME_RESTART_BACKOFF: &str = "peer-runtime.restart-backoff";
 
+type MetadataRollupDelaySampler = Arc<dyn Fn() -> Duration + Send + Sync>;
+
 /// Config configures the BarterBackup daemon process.
 #[derive(Clone, Debug, Parser)]
 #[command(name = "bbd", about = "BarterBackup daemon")]
@@ -831,6 +833,8 @@ pub struct DaemonService {
     maintenance_wakeup: Arc<Notify>,
     /// peer_metadata_flush_delay delays low-value peer metadata rewrites.
     peer_metadata_flush_delay: Duration,
+    /// metadata_rollup_delay_sampler overrides metadata-only rollup timing in tests.
+    metadata_rollup_delay_sampler: Option<MetadataRollupDelaySampler>,
     /// node_state stores the current lock/unlock lifecycle state.
     node_state: Mutex<DaemonNodeState>,
     /// shutdown_request cancels the local RPC server for graceful daemon stop.
@@ -859,6 +863,7 @@ impl DaemonService {
             Arc::new(SystemClock),
             None,
             node::DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY,
+            None,
         )
     }
 
@@ -870,6 +875,7 @@ impl DaemonService {
         clock: Arc<dyn Clock>,
         test_clock: Option<Arc<ManualClock>>,
         peer_metadata_flush_delay: Duration,
+        metadata_rollup_delay_sampler: Option<MetadataRollupDelaySampler>,
     ) -> Self {
         let started_at = clock.now();
         Self {
@@ -881,6 +887,7 @@ impl DaemonService {
             maintenance_config,
             maintenance_wakeup: Arc::new(Notify::new()),
             peer_metadata_flush_delay,
+            metadata_rollup_delay_sampler,
             node_state: Mutex::new(DaemonNodeState::Locked),
             shutdown_request: CancellationToken::new(),
         }
@@ -903,6 +910,7 @@ impl DaemonService {
             clock,
             Some(test_clock),
             node::DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY,
+            None,
         )
     }
 
@@ -1052,12 +1060,23 @@ impl DaemonService {
         // runtime so RPCs can serve real content immediately after unlock.
         let store_dir = self.data_dir.join("local");
         let filesystem = Arc::new(OsFilesystem::new(&store_dir)?);
-        let node = Arc::new(Node::with_local_storage_and_clock_and_flush_delay(
-            password,
-            filesystem,
-            self.clock.clone(),
-            self.peer_metadata_flush_delay,
-        )?);
+        let node = Arc::new(match self.metadata_rollup_delay_sampler.clone() {
+            Some(metadata_rollup_delay_sampler) => {
+                Node::with_local_storage_and_clock_and_flush_delay_and_rollup_sampler(
+                    password,
+                    filesystem,
+                    self.clock.clone(),
+                    self.peer_metadata_flush_delay,
+                    metadata_rollup_delay_sampler,
+                )?
+            }
+            None => Node::with_local_storage_and_clock_and_flush_delay(
+                password,
+                filesystem,
+                self.clock.clone(),
+                self.peer_metadata_flush_delay,
+            )?,
+        });
         node.mark_started();
 
         // Start peer bootstrap in the background so unlock returns before
@@ -2028,6 +2047,15 @@ async fn run_maintenance_pass(
         warn!(%error, "background recovery pass failed");
     }
 
+    let Some(metadata_rollup_result) =
+        wait_for_maintenance_step(shutdown, async { node.run_metadata_rollup_pass() }).await
+    else {
+        return;
+    };
+    if let Err(error) = metadata_rollup_result {
+        warn!(%error, "background metadata rollup pass failed");
+    }
+
     // Then refresh and run contract maintenance for the peers currently
     // selected by the background plan with bounded fan-out so one flaky peer
     // cannot stall the whole pass.
@@ -2330,6 +2358,7 @@ where
         clock,
         test_clock,
         Duration::from_secs(config.peer_metadata_flush_delay_secs),
+        None,
     ));
     let shutdown = service.shutdown_request();
     let listener = tokio::net::TcpListener::bind(config.resolved_local_addr()).await?;
@@ -2646,6 +2675,31 @@ mod tests {
             clock,
             Some(test_clock),
             peer_metadata_flush_delay,
+            None,
+        )
+    }
+
+    /// Build a daemon service with a hidden manual test clock, custom runtime
+    /// wiring, custom low-value peer metadata flush delay, and custom
+    /// metadata-rollup sampling.
+    fn test_service_with_test_clock_and_flush_delay_and_rollup_sampler(
+        temp_dir: &TempDir,
+        peer_runtime_factory: Arc<dyn PeerRuntimeFactory>,
+        maintenance_config: MaintenanceConfig,
+        initial_time: Timestamp,
+        peer_metadata_flush_delay: Duration,
+        metadata_rollup_delay_sampler: MetadataRollupDelaySampler,
+    ) -> DaemonService {
+        let test_clock = Arc::new(ManualClock::new(initial_time));
+        let clock: Arc<dyn Clock> = test_clock.clone();
+        DaemonService::with_clock(
+            temp_dir.path().to_path_buf(),
+            peer_runtime_factory,
+            maintenance_config,
+            clock,
+            Some(test_clock),
+            peer_metadata_flush_delay,
+            Some(metadata_rollup_delay_sampler),
         )
     }
 
@@ -4854,6 +4908,111 @@ mod tests {
 
         local_service.shutdown().await?;
         remote_service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_maintenance_runs_due_metadata_rollup_before_publication() -> Result<()> {
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        let (maintenance_config, tick) = manual_maintenance();
+        let owner_dir = TempDir::new()?;
+        let peer_dir = TempDir::new()?;
+        let owner_service = test_service_with_test_clock_and_flush_delay_and_rollup_sampler(
+            &owner_dir,
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            maintenance_config,
+            Timestamp::new(5_000, 0).unwrap(),
+            Duration::from_secs(300),
+            Arc::new(|| Duration::from_secs(1)),
+        );
+        let peer_service = DaemonService::with_maintenance_config(
+            peer_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            MaintenanceConfig::with_interval(Duration::from_secs(60)),
+        );
+
+        init_and_unlock_service(&owner_service, "rollup-owner").await?;
+        init_and_unlock_service(&peer_service, "rollup-peer").await?;
+        wait_for_public_peer_runtime(&owner_service, Duration::from_secs(5)).await?;
+        wait_for_public_peer_runtime(&peer_service, Duration::from_secs(5)).await?;
+        set_storage_config(&owner_service, 4 * 1024 * 1024, 1).await?;
+
+        owner_service
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+        let original_content_id = unlocked_node(&owner_service)
+            .await
+            .current_content_info()?
+            .context("owner content should exist after set_file")?
+            .content_id;
+
+        let peer_onion = unlocked_node(&peer_service).await.address().to_string();
+        owner_service
+            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: peer_onion.clone(),
+                }),
+            }))
+            .await?;
+
+        tick.notify_waiters();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            unlocked_node(&owner_service)
+                .await
+                .current_content_info()?
+                .context("owner content should still exist")?
+                .content_id,
+            original_content_id
+        );
+
+        owner_service
+            .advance_test_time(tonic::Request::new(clirpc::AdvanceTestTimeRequest {
+                seconds: 1,
+                nanoseconds: 0,
+            }))
+            .await?;
+        tick.notify_waiters();
+
+        wait_for_async(Duration::from_secs(5), || {
+            let owner_service = &owner_service;
+            let peer_onion = peer_onion.clone();
+            let original_content_id = original_content_id.clone();
+            async move {
+                let current_content = unlocked_node(owner_service)
+                    .await
+                    .current_content_info()?
+                    .context("owner content should still exist")?;
+                let storage_peers = owner_service
+                    .get_peer_storage(tonic::Request::new(clirpc::GetPeerStorageRequest {}))
+                    .await?
+                    .into_inner()
+                    .storage_peers;
+                let synced = storage_peers.into_iter().any(|peer_storage| {
+                    peer_storage
+                        .peer
+                        .as_ref()
+                        .is_some_and(|peer| peer.onion_service_id == peer_onion)
+                        && peer_storage.online
+                        && peer_storage.our_content_synced
+                });
+                Ok(current_content.content_id != original_content_id && synced)
+            }
+        })
+        .await?;
+
+        owner_service.shutdown().await?;
+        peer_service.shutdown().await?;
         Ok(())
     }
 

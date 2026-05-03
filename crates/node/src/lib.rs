@@ -19,7 +19,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use storage::{CurrentContent, Filesystem, StorageError, Store};
+use storage::{CurrentContent, Filesystem, MetadataRollupOutcome, StorageError, Store};
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
@@ -1377,6 +1377,7 @@ impl Node {
             None,
             Arc::new(SystemClock),
             DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY,
+            None,
         )
     }
 
@@ -1388,6 +1389,7 @@ impl Node {
             Some(filesystem),
             Arc::new(SystemClock),
             DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY,
+            None,
         )
     }
 
@@ -1414,7 +1416,34 @@ impl Node {
         peer_metadata_flush_delay: Duration,
     ) -> Result<Self> {
         let master = keys::derive_master_priv(seed);
-        Self::build_from_master(&master, Some(filesystem), clock, peer_metadata_flush_delay)
+        Self::build_from_master(
+            &master,
+            Some(filesystem),
+            clock,
+            peer_metadata_flush_delay,
+            None,
+        )
+    }
+
+    /// Create a node identity with a local encrypted store, explicit clock,
+    /// delayed low-value peer metadata flush policy, and custom metadata-rollup
+    /// sampling. This is intended for deterministic tests of metadata-only
+    /// content rewrites.
+    pub fn with_local_storage_and_clock_and_flush_delay_and_rollup_sampler(
+        seed: &str,
+        filesystem: Arc<dyn Filesystem>,
+        clock: Arc<dyn Clock>,
+        peer_metadata_flush_delay: Duration,
+        metadata_rollup_delay_sampler: Arc<dyn Fn() -> Duration + Send + Sync>,
+    ) -> Result<Self> {
+        let master = keys::derive_master_priv(seed);
+        Self::build_from_master(
+            &master,
+            Some(filesystem),
+            clock,
+            peer_metadata_flush_delay,
+            Some(metadata_rollup_delay_sampler),
+        )
     }
 
     /// Return the node onion hostname.
@@ -1440,6 +1469,7 @@ impl Node {
             None,
             Arc::new(SystemClock),
             DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY,
+            None,
         )
     }
 
@@ -1449,11 +1479,20 @@ impl Node {
         filesystem: Option<Arc<dyn Filesystem>>,
         clock: Arc<dyn Clock>,
         peer_metadata_flush_delay: Duration,
+        metadata_rollup_delay_sampler: Option<Arc<dyn Fn() -> Duration + Send + Sync>>,
     ) -> Result<Self> {
         let (keypair, public_key) = keys::derive_ed25519_from_master(master_priv, "tor/onion/v3")?;
         let onion_address = keys::onion_hostname_from_public_key(&public_key);
         let store = filesystem
-            .map(|filesystem| Store::new_with_time_source(filesystem, master_priv, clock.clone()))
+            .map(|filesystem| match metadata_rollup_delay_sampler.clone() {
+                Some(sampler) => Store::new_with_time_source_and_rollup_sampler(
+                    filesystem,
+                    master_priv,
+                    clock.clone(),
+                    sampler,
+                ),
+                None => Store::new_with_time_source(filesystem, master_priv, clock.clone()),
+            })
             .transpose()?
             .map(|store| Arc::new(Mutex::new(store)));
         let peer_metadata_batcher = store.as_ref().map(|store| {
@@ -1523,6 +1562,37 @@ impl Node {
             return Ok(());
         };
         batcher.flush_now()
+    }
+
+    /// Rewrite the current local content with newer peer metadata when one
+    /// delayed metadata-only rollup is due.
+    pub fn run_metadata_rollup_pass(&self) -> Result<MetadataRollupOutcome, Status> {
+        let due_at = self.with_store(|store| Ok(store.metadata_rollup_due_at()))?;
+        let Some((due_secs, due_nanos)) = due_at else {
+            return Ok(MetadataRollupOutcome::NotPending);
+        };
+
+        let now = self.clock.now();
+        let now = (
+            i64::try_from(now.secs).unwrap_or(i64::MAX),
+            i64::from(now.nanos),
+        );
+        if now < (due_secs, due_nanos) {
+            return Ok(MetadataRollupOutcome::NotDue);
+        }
+
+        // Flush any coalesced low-value peer metadata first so the rewrite
+        // rolls the newest sidecar state into the shared content revision.
+        self.flush_pending_peer_metadata()?;
+        let outcome = self.with_store(|store| store.roll_up_peer_metadata_if_due())?;
+        if let MetadataRollupOutcome::Rewritten { content_id } = &outcome {
+            info!(
+                onion = %self.address(),
+                content_id = %content_id_hex(content_id),
+                "rewrote local content to roll up newer peer metadata"
+            );
+        }
+        Ok(outcome)
     }
 
     /// Convert one public key byte slice into an onion hostname.
@@ -8740,6 +8810,130 @@ mod tests {
         )?;
         let peer = peer_inventory_entry(&reloaded, peer.address())?
             .ok_or_else(|| anyhow::anyhow!("missing peer inventory entry"))?;
+        assert!(peer.pins_us);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn metadata_rollup_pass_rewrites_due_local_content() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let clock = Arc::new(ManualClock::new(Timestamp::new(10_000, 0).unwrap()));
+        let node = Arc::new(
+            Node::with_local_storage_and_clock_and_flush_delay_and_rollup_sampler(
+                "metadata-rollup-owner",
+                filesystem,
+                clock.clone(),
+                Duration::from_secs(60),
+                Arc::new(|| Duration::from_secs(10)),
+            )?,
+        );
+        let peer = Node::new("metadata-rollup-peer")?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer.address())?;
+
+        let cli = CliService::new(node.clone());
+        cli.set_file(tonic::Request::new(clirpc::SetFileRequest {
+            file: Some(clirpc::File {
+                name: "alpha.txt".to_string(),
+                data: b"alpha-body".to_vec(),
+                ..Default::default()
+            }),
+        }))
+        .await?;
+        let original_content_id = node
+            .current_content_info()?
+            .context("current content should exist after set_file")?
+            .content_id;
+
+        node.add_known_peer(peer.address())?;
+        node.with_store(|store| {
+            store.set_peer_score(peer_public_key.as_bytes(), 25, 9_999)?;
+            Ok(())
+        })?;
+
+        assert_eq!(
+            node.run_metadata_rollup_pass()?,
+            MetadataRollupOutcome::NotDue
+        );
+        assert_eq!(
+            node.current_content_info()?
+                .context("current content should still exist")?
+                .content_id,
+            original_content_id
+        );
+
+        clock.advance(Duration::from_secs(10));
+        let outcome = node.run_metadata_rollup_pass()?;
+        let MetadataRollupOutcome::Rewritten { content_id } = outcome else {
+            anyhow::bail!("expected a rewritten metadata rollup");
+        };
+        assert_ne!(content_id, original_content_id);
+        assert_eq!(
+            node.current_content_info()?
+                .context("current content should still exist")?
+                .content_id,
+            content_id
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn metadata_rollup_pass_flushes_pending_low_value_peer_metadata() -> anyhow::Result<()> {
+        let base: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let counting = Arc::new(CountingFilesystem {
+            inner: base.clone(),
+            peer_state_writes: AtomicUsize::new(0),
+        });
+        let filesystem: Arc<dyn Filesystem> = counting.clone();
+        let clock = Arc::new(ManualClock::new(Timestamp::new(20_000, 0).unwrap()));
+        let node = Arc::new(
+            Node::with_local_storage_and_clock_and_flush_delay_and_rollup_sampler(
+                "metadata-rollup-batched-owner",
+                filesystem,
+                clock.clone(),
+                Duration::from_secs(300),
+                Arc::new(|| Duration::from_secs(10)),
+            )?,
+        );
+        let peer = Node::new("metadata-rollup-batched-peer")?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer.address())?;
+
+        let cli = CliService::new(node.clone());
+        cli.set_file(tonic::Request::new(clirpc::SetFileRequest {
+            file: Some(clirpc::File {
+                name: "alpha.txt".to_string(),
+                data: b"alpha-body".to_vec(),
+                ..Default::default()
+            }),
+        }))
+        .await?;
+        node.add_known_peer(peer.address())?;
+        node.with_store(|store| {
+            store.set_peer_score(peer_public_key.as_bytes(), 10, 19_999)?;
+            Ok(())
+        })?;
+        let writes_before_pending_update = counting.peer_state_writes();
+
+        assert_eq!(node.update_peer_score(&peer_public_key, true)?, 11);
+        node.record_remote_pin_claim(&peer_public_key, true)?;
+        assert_eq!(counting.peer_state_writes(), writes_before_pending_update);
+
+        clock.advance(Duration::from_secs(10));
+        let outcome = node.run_metadata_rollup_pass()?;
+        assert!(matches!(outcome, MetadataRollupOutcome::Rewritten { .. }));
+        assert!(
+            counting.peer_state_writes() >= writes_before_pending_update + 2,
+            "expected the due rollup to flush pending metadata and then persist cleared rollup state"
+        );
+
+        let reloaded = Node::with_local_storage_and_clock_and_flush_delay(
+            "metadata-rollup-batched-owner",
+            base,
+            clock,
+            Duration::from_secs(300),
+        )?;
+        let peer = peer_inventory_entry(&reloaded, peer.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing peer inventory entry"))?;
+        assert_eq!(peer.score_seconds, 11);
         assert!(peer.pins_us);
         Ok(())
     }

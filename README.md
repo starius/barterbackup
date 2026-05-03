@@ -458,6 +458,10 @@ Recovery workflow:
 - user data is stored only in encrypted content blobs
 - peer metadata and mirrored-peer revision state are stored only in encrypted
   peer sidecars
+- when user files stay unchanged for long enough, newer peer-sidecar metadata
+  is eventually rolled into a fresh local content revision on a randomized
+  background delay with a one-day average, so that progress survives restarts
+  without making those metadata changes easy to correlate to one exact moment
 - daemon-private paths are tightened to owner-only permissions when the host
   OS provides that notion
 

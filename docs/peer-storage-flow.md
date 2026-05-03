@@ -280,6 +280,27 @@ If we advertise a newer revision before the peer ever downloads the older one,
 the pending delay of that superseded advertisement is also deducted from the
 score.
 
+### 4.5 Roll peer metadata into our own lineage later
+
+Peer sidecar updates are persisted locally right away, but they do not rewrite
+our shared content blob immediately.
+
+Instead, if our file set stays unchanged, the daemon schedules one metadata-only
+local content rewrite on an exponential delay with a one-day mean.
+
+Important properties:
+
+- repeated peer-metadata churn coalesces into one pending delayed rollup
+- a real file update clears that pending rollup because the new file-driven
+  content revision already carries the latest peer metadata
+- if the delayed rollup reaches its due time first, the daemon rewrites the
+  same file set into a new local content id with newer embedded peer metadata
+- low-value delayed sidecar updates are flushed first before that rewrite runs
+
+This keeps peer-sidecar progress crash-safe in the owner's shared lineage
+without making one exact metadata event map to one exact immediate publication
+event.
+
 ## Step 5: what makes storage mutual
 
 After the previous steps, the target peer stores our data only if outcome A
