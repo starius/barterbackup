@@ -127,11 +127,9 @@ publication.
 
 The local operation is `publish_to_peer_updates()`.
 
-If the local node currently has no content blob, publication still performs one
-safe sidecar refresh with `requester_content = nil`. Because nil no longer
-clears remote content, this preserves the publication relationship without
-forcing "first real content" to also be the first publication event the peer
-ever observes.
+If the local node currently has no content blob, publication is rejected.
+Owner-originated `SetContentRevision` calls must always carry a real current
+content description.
 
 ### 3.1 Connect and inspect current remote state
 
@@ -176,8 +174,7 @@ Fields:
 
 - `previous_requester_content = requester_latest_known_content` from the just-read
   `GetContentRevision`
-- `requester_content = our current content`, or `nil` if we currently have no
-  local content
+- `requester_content = our current content`
 
 This is compare-and-swap semantics.
 
@@ -263,10 +260,7 @@ This peer does not count as a fresh replica of our data.
 
 #### Outcome C: `requester_content = nil`
 
-If `requester_content` is `nil`, the responder leaves any previously recorded
-requester content unchanged.
-
-This is a safe sidecar refresh, not a destructive clear.
+If `requester_content` is `nil`, the responder rejects the call as invalid.
 
 ### 4.4 Score delayed peer uptake
 
@@ -419,13 +413,10 @@ This is expected behavior under storage pressure.
 
 ### No local content
 
-If we currently have no local content and publish to a peer:
+If we currently have no local content, owner publication is rejected.
 
-- `requester_content = nil`
-- the peer clears our mirrored content state
-
-This is intentionally powerful and therefore guarded by recovery mode and the
-compare-and-swap lineage rules.
+The node must first recover or create a current content blob before it can
+publish to peers.
 
 ### Recovery can block publication
 

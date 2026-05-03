@@ -90,8 +90,7 @@ message SetContentRevisionRequest {
     // Behavior:
     // - If requester_content is provided, both content_id and content_length
     //   must be set and content_length must be positive.
-    // - If requester_content is omitted (not set), the responder leaves any
-    //   previously recorded requester content unchanged.
+    // - If requester_content is omitted (not set), the call is rejected.
     ContentInfo requester_content = 2;
 }
 

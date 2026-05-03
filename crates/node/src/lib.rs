@@ -4522,43 +4522,34 @@ impl Node {
 
         // Upload our current revision only when the peer does not already hold
         // the exact same content identifier.
-        let our_content = self.responder_content()?;
-        let our_content_length = our_content
-            .as_ref()
-            .map(|content_info| content_info.content_length)
-            .unwrap_or(0);
+        let our_content = self.responder_content()?.ok_or_else(|| {
+            Status::failed_precondition("local node has no current content to publish")
+        })?;
+        let our_content_length = our_content.content_length;
         let mut uploaded_our_content = 0;
-        let desired_content_id = our_content
-            .as_ref()
-            .map(|content_info| content_info.content_id.clone());
+        let desired_content_id = our_content.content_id.clone();
         let mut peer_has_our_content = revision
             .requester_latest_stored_content
             .as_ref()
             .map(|content_info| content_info.content_id.clone());
         let mut retried_after_refresh = false;
         let mut publication_storage_result = clirpc::PublicationStorageResult::Unknown;
-        let mut attempted_empty_publication = false;
-        while (our_content.is_some() && peer_has_our_content != desired_content_id)
-            || (our_content.is_none() && !attempted_empty_publication)
-        {
-            attempted_empty_publication |= our_content.is_none();
-            if let Some(content_info) = our_content.as_ref() {
-                let superseded_penalty =
-                    self.record_requester_advertisement_attempt(&peer_public_key, content_info)?;
-                if let Some(new_score) =
-                    self.adjust_peer_score_direct(&peer_public_key, -superseded_penalty)?
-                {
-                    info!(
-                        peer = %peer_onion,
-                        superseded_pending_advertisement_penalty_seconds = superseded_penalty,
-                        new_score_seconds = new_score,
-                        "deducted score for one superseded undownloaded advertisement"
-                    );
-                }
+        while peer_has_our_content.as_ref() != Some(&desired_content_id) {
+            let superseded_penalty =
+                self.record_requester_advertisement_attempt(&peer_public_key, &our_content)?;
+            if let Some(new_score) =
+                self.adjust_peer_score_direct(&peer_public_key, -superseded_penalty)?
+            {
+                info!(
+                    peer = %peer_onion,
+                    superseded_pending_advertisement_penalty_seconds = superseded_penalty,
+                    new_score_seconds = new_score,
+                    "deducted score for one superseded undownloaded advertisement"
+                );
             }
             let set_request = bbrpc::SetContentRevisionRequest {
                 previous_requester_content: revision.requester_latest_known_content.clone(),
-                requester_content: our_content.clone(),
+                requester_content: Some(our_content.clone()),
             };
             match self
                 .peer_rpc_with_timeout(
@@ -5863,9 +5854,9 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
         if let Some(content_info) = previous_requester_content.as_ref() {
             validate_peer_content_info(content_info)?;
         }
-        if let Some(content_info) = requester_content.as_ref() {
-            validate_peer_content_info(content_info)?;
-        }
+        let requester_content = requester_content
+            .ok_or_else(|| Status::invalid_argument("requester_content must be set"))?;
+        validate_peer_content_info(&requester_content)?;
         let responder_latest_known = self
             .node
             .requester_latest_known_content(&peer_identity.public_key)?;
@@ -5881,7 +5872,7 @@ impl bbrpc::barter_backup_server_server::BarterBackupServer for P2pService {
             .sync_peer_content_info(
                 &peer_identity.onion_address,
                 &peer_identity.public_key,
-                requester_content.as_ref(),
+                Some(&requester_content),
             )
             .await?;
 
@@ -9318,8 +9309,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn set_content_revision_none_preserves_tracked_peer_blob_and_metadata(
-    ) -> anyhow::Result<()> {
+    async fn set_content_revision_rejects_missing_requester_content() -> anyhow::Result<()> {
         let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let requester_node = Arc::new(Node::with_local_storage(
             "requester-clear",
@@ -9367,12 +9357,15 @@ mod tests {
             &requester_content.content_id
         )?);
 
-        requester_to_responder
+        let error = requester_to_responder
             .set_content_revision(bbrpc::SetContentRevisionRequest {
                 previous_requester_content: Some(requester_content.clone()),
                 requester_content: None,
             })
-            .await?;
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::InvalidArgument);
+        assert_eq!(error.message(), "requester_content must be set");
 
         let peer = peer_entry(responder_node.as_ref(), requester_node.address())?
             .context("missing tracked requester peer")?;
@@ -9395,8 +9388,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn publish_to_peer_with_no_local_content_does_not_clear_remote_copy() -> anyhow::Result<()>
-    {
+    async fn publish_to_peer_rejects_missing_local_content() -> anyhow::Result<()> {
         let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let owner_node = Arc::new(Node::with_local_storage(
             "owner-no-clear",
@@ -9443,17 +9435,22 @@ mod tests {
         );
         assert!(replacement_node.responder_content()?.is_none());
 
-        let updates = replacement_node
+        let error = replacement_node
             .publish_to_peer_updates(peer_identity.address())
-            .await?;
-        assert_eq!(updates.last().map(|update| update.success), Some(true));
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::FailedPrecondition);
+        assert_eq!(
+            error.message(),
+            "local node has no current content to publish"
+        );
         assert_eq!(
             service_state
                 .requester_content()
                 .map(|content| content.content_id),
             Some(published_content.content_id.clone())
         );
-        assert_eq!(service_state.set_call_count(), 2);
+        assert_eq!(service_state.set_call_count(), 1);
 
         server.abort();
         Ok(())
@@ -9512,13 +9509,8 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert_eq!(error.code(), Code::FailedPrecondition);
-        let failure = Node::set_content_revision_failure(&error)
-            .context("missing machine-readable set-content failure")?;
-        assert_eq!(
-            failure.reason(),
-            bbrpc::SetContentRevisionFailureReason::PreviousRequesterContentMismatch
-        );
+        assert_eq!(error.code(), Code::InvalidArgument);
+        assert_eq!(error.message(), "requester_content must be set");
 
         let peer = peer_entry(responder_node.as_ref(), requester_node.address())?
             .context("missing tracked requester peer")?;
