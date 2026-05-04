@@ -349,6 +349,38 @@ struct PeerInventoryEntry {
     next_retry_at: i64,
 }
 
+/// LocalPeerInventorySnapshot stores one peer's local sidecar-derived fields
+/// for inventory rendering without re-entering the store mutex.
+#[derive(Clone, Debug)]
+struct LocalPeerInventorySnapshot {
+    /// reachability is the last persisted reachability state for this peer.
+    reachability: i32,
+    /// pinned_by_us reports whether the local operator pinned this peer.
+    pinned_by_us: bool,
+    /// pins_us reports whether the peer most recently told us it pins us.
+    pins_us: bool,
+    /// has_storage reports whether persisted state indicates any storage relationship.
+    has_storage: bool,
+    /// score_seconds is the peer's current persisted score.
+    score_seconds: i64,
+    /// score_measured_at is when `score_seconds` was last updated.
+    score_measured_at: i64,
+    /// stored_content_bytes is the mirrored content length recorded in sidecar metadata.
+    stored_content_bytes: i64,
+    /// latest_known_content_length is the newest peer revision length we know exists.
+    latest_known_content_length: i64,
+    /// latest_cached_content_length is the newest peer revision length we currently cache.
+    latest_cached_content_length: i64,
+    /// stale_cache reports whether latest known and latest cached revisions differ.
+    stale_cache: bool,
+    /// storage_protection reports how the currently cached bytes are classified.
+    storage_protection: PeerStorageProtectionClass,
+    /// tracked_only reports whether only metadata for the newest revision is kept.
+    tracked_only: bool,
+    /// last_live_at is when the peer last responded successfully over the transport.
+    last_live_at: i64,
+}
+
 /// PeerAdmissionPlan describes how peer-capacity enforcement handles a peer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum PeerAdmissionPlan {
@@ -1179,20 +1211,6 @@ fn mean_score_seconds(scores: &[i64]) -> i64 {
     });
     let mean = total / i128::try_from(scores.len()).unwrap_or(i128::MAX);
     mean.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
-}
-
-/// Convert persisted reachability plus cache presence into the reported status.
-fn peer_inventory_status(peer: Option<&storedpb::Peer>, connected: bool) -> PeerInventoryStatus {
-    if connected {
-        return PeerInventoryStatus::Connected;
-    }
-
-    match peer.map(|peer| peer.reachability) {
-        Some(reachability) if reachability == storedpb::PeerReachability::Online as i32 => {
-            PeerInventoryStatus::Online
-        }
-        _ => PeerInventoryStatus::Offline,
-    }
 }
 
 /// Return the group priority used when listing peers.
@@ -3805,21 +3823,63 @@ impl Node {
         })
     }
 
+    /// Snapshot per-peer local inventory fields from sidecar metadata in one store pass.
+    fn local_peer_inventory_snapshot(
+        &self,
+    ) -> Result<BTreeMap<String, LocalPeerInventorySnapshot>, Status> {
+        if self.store.is_none() {
+            return Ok(BTreeMap::new());
+        }
+
+        self.with_store(|store| {
+            let mut peers = BTreeMap::new();
+            for peer in store.peers() {
+                let peer_onion = match self.onion_from_public_key_bytes(&peer.onion_pubkey) {
+                    Ok(peer_onion) => peer_onion,
+                    Err(_) => continue,
+                };
+                let latest_known_content = peer_latest_known_content(&peer);
+                let latest_cached_content = peer_latest_cached_content(&peer);
+                peers.insert(
+                    peer_onion,
+                    LocalPeerInventorySnapshot {
+                        reachability: peer.reachability,
+                        pinned_by_us: peer.pinned_by_us,
+                        pins_us: peer.pins_us,
+                        has_storage: peer_has_storage(&peer),
+                        score_seconds: peer.score_seconds,
+                        score_measured_at: peer.score_measured_at,
+                        stored_content_bytes: latest_cached_content
+                            .as_ref()
+                            .map(|content| content.content_length)
+                            .unwrap_or(0),
+                        latest_known_content_length: latest_known_content
+                            .as_ref()
+                            .map(|content| content.content_length)
+                            .unwrap_or(0),
+                        latest_cached_content_length: latest_cached_content
+                            .as_ref()
+                            .map(|content| content.content_length)
+                            .unwrap_or(0),
+                        stale_cache: latest_known_content
+                            .as_ref()
+                            .map(|content| &content.content_id)
+                            != latest_cached_content
+                                .as_ref()
+                                .map(|content| &content.content_id),
+                        storage_protection: peer_storage_protection(&peer),
+                        tracked_only: peer_is_tracked_only(&peer),
+                        last_live_at: peer.last_live_at,
+                    },
+                );
+            }
+            Ok(peers)
+        })
+    }
+
     /// Build the current local peer inventory without dialing any peers.
     fn peer_inventory(&self) -> Result<Vec<PeerInventoryEntry>, Status> {
-        let tracked_peers = if self.store.is_some() {
-            self.tracked_peers()?
-        } else {
-            Vec::new()
-        };
-        let mut tracked_by_onion = BTreeMap::new();
-        for peer in tracked_peers {
-            let peer_onion = match self.onion_from_public_key_bytes(&peer.onion_pubkey) {
-                Ok(peer_onion) => peer_onion,
-                Err(_) => continue,
-            };
-            tracked_by_onion.insert(peer_onion, peer);
-        }
+        let local_peers = self.local_peer_inventory_snapshot()?;
         let recent_failures = self.recent_peer_failures.lock().unwrap().clone();
 
         let mut peers = Vec::new();
@@ -3828,52 +3888,45 @@ impl Node {
                 continue;
             }
 
-            let tracked_peer = tracked_by_onion.get(&peer_onion);
+            let tracked_peer = local_peers.get(&peer_onion);
             let connected = self.has_cached_peer_client(&peer_onion);
-            let status = peer_inventory_status(tracked_peer, connected);
-            let latest_known_content = tracked_peer.and_then(peer_latest_known_content);
-            let latest_cached_content = tracked_peer.and_then(peer_latest_cached_content);
-            let recent_failure = recent_failures.get(&peer_onion);
-            let stored_content_bytes = match tracked_peer {
-                Some(peer) => {
-                    let peer_public_key = ed25519_dalek::PublicKey::from_bytes(&peer.onion_pubkey)
-                        .map_err(|_| Status::invalid_argument("peer public key is invalid"))?;
-                    self.mirrored_peer_content_length(&peer_public_key)?
-                }
-                None => 0,
+            let status = if connected {
+                PeerInventoryStatus::Connected
+            } else if tracked_peer
+                .is_some_and(|peer| peer.reachability == storedpb::PeerReachability::Online as i32)
+            {
+                PeerInventoryStatus::Online
+            } else {
+                PeerInventoryStatus::Offline
             };
+            let recent_failure = recent_failures.get(&peer_onion);
 
             peers.push(PeerInventoryEntry {
                 onion_service_id: peer_onion,
                 status,
                 pinned_by_us: tracked_peer.map(|peer| peer.pinned_by_us).unwrap_or(false),
                 pins_us: tracked_peer.map(|peer| peer.pins_us).unwrap_or(false),
-                has_storage: tracked_peer.is_some_and(peer_has_storage),
+                has_storage: tracked_peer.map(|peer| peer.has_storage).unwrap_or(false),
                 score_seconds: tracked_peer
                     .map(|peer| peer.score_seconds)
                     .unwrap_or_default(),
                 score_measured_at: tracked_peer
                     .map(|peer| peer.score_measured_at)
                     .unwrap_or_default(),
-                stored_content_bytes,
-                latest_known_content_length: latest_known_content
-                    .as_ref()
-                    .map(|content| content.content_length)
+                stored_content_bytes: tracked_peer
+                    .map(|peer| peer.stored_content_bytes)
                     .unwrap_or_default(),
-                latest_cached_content_length: latest_cached_content
-                    .as_ref()
-                    .map(|content| content.content_length)
+                latest_known_content_length: tracked_peer
+                    .map(|peer| peer.latest_known_content_length)
                     .unwrap_or_default(),
-                stale_cache: latest_known_content
-                    .as_ref()
-                    .map(|content| &content.content_id)
-                    != latest_cached_content
-                        .as_ref()
-                        .map(|content| &content.content_id),
+                latest_cached_content_length: tracked_peer
+                    .map(|peer| peer.latest_cached_content_length)
+                    .unwrap_or_default(),
+                stale_cache: tracked_peer.map(|peer| peer.stale_cache).unwrap_or(false),
                 storage_protection: tracked_peer
-                    .map(peer_storage_protection)
+                    .map(|peer| peer.storage_protection)
                     .unwrap_or(PeerStorageProtectionClass::None),
-                tracked_only: tracked_peer.map(peer_is_tracked_only).unwrap_or(false),
+                tracked_only: tracked_peer.map(|peer| peer.tracked_only).unwrap_or(false),
                 last_live_at: tracked_peer
                     .map(|peer| peer.last_live_at)
                     .unwrap_or_default(),
@@ -6063,6 +6116,43 @@ mod tests {
         /// Return the number of peer-sidecar writes observed so far.
         fn peer_state_writes(&self) -> usize {
             self.peer_state_writes.load(Ordering::SeqCst)
+        }
+    }
+
+    /// ReadCountingFilesystem counts file reads while delegating storage.
+    struct ReadCountingFilesystem {
+        inner: Arc<dyn Filesystem>,
+        reads: AtomicUsize,
+    }
+
+    impl ReadCountingFilesystem {
+        /// Reset the counted read total to zero.
+        fn reset_reads(&self) {
+            self.reads.store(0, Ordering::SeqCst);
+        }
+
+        /// Return the number of reads observed so far.
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Filesystem for ReadCountingFilesystem {
+        fn read(&self, name: &str) -> Result<Vec<u8>, StorageError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.read(name)
+        }
+
+        fn write_atomic(&self, name: &str, data: &[u8]) -> Result<(), StorageError> {
+            self.inner.write_atomic(name, data)
+        }
+
+        fn remove(&self, name: &str) -> Result<(), StorageError> {
+            self.inner.remove(name)
+        }
+
+        fn list(&self) -> Result<Vec<String>, StorageError> {
+            self.inner.list()
         }
     }
 
@@ -8700,6 +8790,65 @@ mod tests {
             ]
         );
 
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_inventory_uses_sidecar_lengths_without_reading_mirrored_blobs(
+    ) -> anyhow::Result<()> {
+        let counting = Arc::new(ReadCountingFilesystem {
+            inner: Arc::new(storage::MemoryFilesystem::new()),
+            reads: AtomicUsize::new(0),
+        });
+        let local_filesystem: Arc<dyn Filesystem> = counting.clone();
+        let local_node = Arc::new(Node::with_local_storage(
+            "peer-inventory-sidecar-owner",
+            local_filesystem,
+        )?);
+        let remote_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let remote_node = Arc::new(Node::with_local_storage(
+            "peer-inventory-sidecar-remote",
+            remote_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        local_node.set_peer_connector(connector.clone());
+        remote_node.set_peer_connector(connector.clone());
+
+        CliService::new(remote_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "peer.txt".to_string(),
+                    data: b"cached blob".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+
+        let local_server =
+            spawn_registered_p2p_server(local_node.clone(), connector.as_ref()).await?;
+        let remote_server =
+            spawn_registered_p2p_server(remote_node.clone(), connector.as_ref()).await?;
+        let mut remote_to_local =
+            connect_p2p_client(remote_node.clone(), local_node.clone(), connector.as_ref()).await?;
+        let remote_content = remote_node.responder_content()?.unwrap();
+        remote_to_local
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
+                requester_content: Some(remote_content.clone()),
+            })
+            .await?;
+
+        counting.reset_reads();
+        let inventory = peer_inventory_entry(local_node.as_ref(), remote_node.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing inventory entry"))?;
+        assert_eq!(
+            inventory.stored_content_bytes,
+            remote_content.content_length
+        );
+        assert_eq!(counting.reads(), 0);
+
+        remote_server.abort();
+        local_server.abort();
         Ok(())
     }
 
