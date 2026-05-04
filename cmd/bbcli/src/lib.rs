@@ -86,6 +86,22 @@ struct CollectedStreamedFile {
     expected_size_bytes: usize,
 }
 
+/// TableAlignment controls how one table cell is padded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TableAlignment {
+    /// Left alignment keeps text flush to the leading edge.
+    Left,
+    /// Right alignment keeps numeric text flush to the trailing edge.
+    Right,
+}
+
+/// TableCell stores printable text for one aligned table column.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TableCell {
+    /// text is the printable cell content without padding.
+    text: String,
+}
+
 /// Args configures the top-level `bbcli` command-line interface.
 #[derive(Parser, Debug)]
 #[command(name = "bbcli", about = "BarterBackup CLI", version = VERSION_STRING)]
@@ -1064,6 +1080,64 @@ fn proto_timestamp_from_parts(seconds: i64, nanos: i64) -> Result<ProtoTimestamp
     })
 }
 
+/// Format one integer byte count for aligned operator-facing tables.
+fn format_byte_count(bytes: i64) -> String {
+    bytes.to_string()
+}
+
+/// Render one plain table cell without terminal color.
+fn plain_table_cell(text: impl Into<String>) -> TableCell {
+    TableCell { text: text.into() }
+}
+
+/// Render one aligned table for CLI output.
+fn render_table(headers: &[(&str, TableAlignment)], rows: &[Vec<TableCell>]) -> Vec<String> {
+    let column_count = headers.len();
+    let mut widths = headers
+        .iter()
+        .map(|(header, _)| header.len())
+        .collect::<Vec<_>>();
+
+    for row in rows {
+        for (index, cell) in row.iter().enumerate().take(column_count) {
+            widths[index] = widths[index].max(cell.text.len());
+        }
+    }
+
+    let mut lines = Vec::with_capacity(rows.len() + 1);
+    lines.push(render_table_line(
+        &headers
+            .iter()
+            .map(|(header, _)| plain_table_cell(*header))
+            .collect::<Vec<_>>(),
+        headers,
+        &widths,
+    ));
+
+    for row in rows {
+        lines.push(render_table_line(row, headers, &widths));
+    }
+
+    lines
+}
+
+/// Render one aligned table row.
+fn render_table_line(
+    cells: &[TableCell],
+    headers: &[(&str, TableAlignment)],
+    widths: &[usize],
+) -> String {
+    let mut parts = Vec::with_capacity(headers.len());
+    for (((_, alignment), width), cell) in headers.iter().zip(widths).zip(cells.iter()) {
+        let padding = width.saturating_sub(cell.text.len());
+        parts.push(match alignment {
+            TableAlignment::Left => format!("{}{}", cell.text, " ".repeat(padding)),
+            TableAlignment::Right => format!("{}{}", " ".repeat(padding), cell.text),
+        });
+    }
+    parts.join("  ").trim_end().to_string()
+}
+
 /// Run the init command, checking daemon state before asking for a password.
 async fn run_init_command<F>(
     target: &LocalCliTarget,
@@ -1908,17 +1982,29 @@ fn format_peer_storage_response(response: &protos::clirpc::GetPeerStorageRespons
 
 /// Format stored file metadata for CLI output.
 fn format_file_list(files: &[FileInfo], local_offset: UtcOffset) -> Vec<String> {
-    files
+    if files.is_empty() {
+        return vec!["no files".to_string()];
+    }
+
+    let headers = [
+        ("NAME", TableAlignment::Left),
+        ("SIZE", TableAlignment::Right),
+        ("MODIFIED", TableAlignment::Left),
+    ];
+    let rows = files
         .iter()
         .map(|file| {
-            format!(
-                "name={} size_bytes={} modified_at={}",
-                file.name,
-                file.size_bytes,
-                format_timestamp_local_or_unknown(file.modified_at.as_ref(), local_offset)
-            )
+            vec![
+                plain_table_cell(file.name.clone()),
+                plain_table_cell(format_byte_count(file.size_bytes)),
+                plain_table_cell(format_timestamp_local_or_unknown(
+                    file.modified_at.as_ref(),
+                    local_offset,
+                )),
+            ]
         })
-        .collect()
+        .collect::<Vec<_>>();
+    render_table(&headers, &rows)
 }
 
 /// Print one peer verification as an operator-facing summary.
@@ -3591,7 +3677,18 @@ mod tests {
 
         assert_eq!(
             lines,
-            vec!["name=alpha.txt size_bytes=5 modified_at=1969-12-31 19:02:03 -05:00".to_string()]
+            vec![
+                "NAME       SIZE  MODIFIED".to_string(),
+                "alpha.txt     5  1969-12-31 19:02:03 -05:00".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_file_list_renders_empty_state() {
+        assert_eq!(
+            format_file_list(&[], UtcOffset::from_hms(-5, 0, 0).unwrap()),
+            vec!["no files".to_string()]
         );
     }
 
