@@ -507,6 +507,14 @@ message PeerInfo {
     // tracked_only reports that we know this peer's newest revision but do not
     // cache any bytes for it locally.
     bool tracked_only = 19;
+
+    // our_stored_content_bytes is the number of bytes this peer most recently
+    // reported that it still stores for our latest stored requester revision.
+    int64 our_stored_content_bytes = 20;
+
+    // our_content_synced reports whether our_stored_content_bytes matches the
+    // current local content revision we would publish now.
+    bool our_content_synced = 21;
 }
 
 message PeersResponse {

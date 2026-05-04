@@ -1,5 +1,6 @@
 //! Command-line client for the local BarterBackup daemon RPC surface.
 
+use std::cmp::Reverse;
 use std::ffi::OsString;
 use std::fs;
 use std::io::ErrorKind;
@@ -100,6 +101,23 @@ enum TableAlignment {
 struct TableCell {
     /// text is the printable cell content without padding.
     text: String,
+    /// color decorates the printable text when color output is enabled.
+    color: Option<TableCellColor>,
+}
+
+/// TableCellColor is one compact style set for operator-facing tables.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TableCellColor {
+    /// Green highlights healthy or fresh states.
+    Green,
+    /// Yellow highlights stale or degraded states.
+    Yellow,
+    /// Red highlights unhealthy or missing states.
+    Red,
+    /// Cyan highlights operator-significant flags.
+    Cyan,
+    /// DarkGrey deemphasizes low-signal values.
+    DarkGrey,
 }
 
 /// Args configures the top-level `bbcli` command-line interface.
@@ -1087,11 +1105,26 @@ fn format_byte_count(bytes: i64) -> String {
 
 /// Render one plain table cell without terminal color.
 fn plain_table_cell(text: impl Into<String>) -> TableCell {
-    TableCell { text: text.into() }
+    TableCell {
+        text: text.into(),
+        color: None,
+    }
+}
+
+/// Render one colorized table cell when terminal colors are enabled.
+fn colored_table_cell(text: impl Into<String>, color: TableCellColor) -> TableCell {
+    TableCell {
+        text: text.into(),
+        color: Some(color),
+    }
 }
 
 /// Render one aligned table for CLI output.
-fn render_table(headers: &[(&str, TableAlignment)], rows: &[Vec<TableCell>]) -> Vec<String> {
+fn render_table(
+    headers: &[(&str, TableAlignment)],
+    rows: &[Vec<TableCell>],
+    use_color: bool,
+) -> Vec<String> {
     let column_count = headers.len();
     let mut widths = headers
         .iter()
@@ -1112,10 +1145,11 @@ fn render_table(headers: &[(&str, TableAlignment)], rows: &[Vec<TableCell>]) -> 
             .collect::<Vec<_>>(),
         headers,
         &widths,
+        false,
     ));
 
     for row in rows {
-        lines.push(render_table_line(row, headers, &widths));
+        lines.push(render_table_line(row, headers, &widths, use_color));
     }
 
     lines
@@ -1126,16 +1160,34 @@ fn render_table_line(
     cells: &[TableCell],
     headers: &[(&str, TableAlignment)],
     widths: &[usize],
+    use_color: bool,
 ) -> String {
     let mut parts = Vec::with_capacity(headers.len());
     for (((_, alignment), width), cell) in headers.iter().zip(widths).zip(cells.iter()) {
         let padding = width.saturating_sub(cell.text.len());
+        let text = colorize_table_text(&cell.text, cell.color, use_color);
         parts.push(match alignment {
-            TableAlignment::Left => format!("{}{}", cell.text, " ".repeat(padding)),
-            TableAlignment::Right => format!("{}{}", " ".repeat(padding), cell.text),
+            TableAlignment::Left => format!("{text}{}", " ".repeat(padding)),
+            TableAlignment::Right => format!("{}{text}", " ".repeat(padding)),
         });
     }
     parts.join("  ").trim_end().to_string()
+}
+
+/// Apply one optional table color to printable text.
+fn colorize_table_text(text: &str, color: Option<TableCellColor>, use_color: bool) -> String {
+    if !use_color {
+        return text.to_string();
+    }
+
+    match color {
+        Some(TableCellColor::Green) => format!("{}", text.green()),
+        Some(TableCellColor::Yellow) => format!("{}", text.yellow()),
+        Some(TableCellColor::Red) => format!("{}", text.red()),
+        Some(TableCellColor::Cyan) => format!("{}", text.cyan()),
+        Some(TableCellColor::DarkGrey) => format!("{}", text.dark_grey()),
+        None => text.to_string(),
+    }
 }
 
 /// Run the init command, checking daemon state before asking for a password.
@@ -1578,6 +1630,7 @@ async fn peers(target: &LocalCliTarget, filter: PeerListFilter) -> Result<()> {
         &peers_response_with_client(&mut client).await?,
         &filter,
         local_utc_offset(),
+        io::stdout().is_terminal(),
     ) {
         println!("{line}");
     }
@@ -1627,40 +1680,35 @@ fn format_peers_response(
     response: &PeersResponse,
     filter: &PeerListFilter,
     local_offset: UtcOffset,
+    use_color: bool,
 ) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut with_storage = Vec::new();
-    let mut online = Vec::new();
-    let mut offline = Vec::new();
-
-    for peer in response.peers.iter().filter(|peer| filter.matches(peer)) {
-        let line = format_peer_info_line(peer, local_offset);
-        if peer.has_storage {
-            with_storage.push(line);
-        } else if peer_info_status(peer) == PeerStatus::Offline {
-            offline.push(line);
-        } else {
-            online.push(line);
-        }
-    }
-
-    push_peer_inventory_group_lines(&mut lines, "with_storage", &with_storage);
-    push_peer_inventory_group_lines(&mut lines, "online", &online);
-    push_peer_inventory_group_lines(&mut lines, "offline", &offline);
-    lines
-}
-
-/// Append one labeled peer-inventory group to the CLI output.
-fn push_peer_inventory_group_lines(lines: &mut Vec<String>, label: &str, peers: &[String]) {
-    lines.push(format!("{label}: {}", peers.len()));
+    let mut peers = response
+        .peers
+        .iter()
+        .filter(|peer| filter.matches(peer))
+        .collect::<Vec<_>>();
     if peers.is_empty() {
-        lines.push("  (none)".to_string());
-        return;
+        return vec!["no peers".to_string()];
     }
 
-    for peer in peers {
-        lines.push(format!("  {peer}"));
-    }
+    peers.sort_by(|left, right| peer_sort_key(left).cmp(&peer_sort_key(right)));
+
+    let headers = [
+        ("PEER", TableAlignment::Left),
+        ("STATUS", TableAlignment::Left),
+        ("STORAGE", TableAlignment::Left),
+        ("OURS ON THEM", TableAlignment::Right),
+        ("THEIRS ON US", TableAlignment::Right),
+        ("SCORE", TableAlignment::Right),
+        ("LAST SEEN", TableAlignment::Left),
+        ("FAILURE", TableAlignment::Left),
+        ("FLAGS", TableAlignment::Left),
+    ];
+    let rows = peers
+        .into_iter()
+        .map(|peer| format_peer_info_row(peer, local_offset))
+        .collect::<Vec<_>>();
+    render_table(&headers, &rows, use_color)
 }
 
 /// Return the decoded peer status, defaulting unknown states to offline.
@@ -1713,51 +1761,171 @@ fn peer_storage_protection_label(
     }
 }
 
-/// Format one peer inventory entry for human CLI output.
-fn format_peer_info_line(peer: &PeerInfo, local_offset: UtcOffset) -> String {
+/// PeerStorageState classifies one peer row for display and sorting.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum PeerStorageState {
+    /// MutualFresh means both sides store bytes and both sides are current.
+    MutualFresh,
+    /// MutualOutdated means both sides store bytes but at least one side is stale.
+    MutualOutdated,
+    /// OurFresh means only the remote peer stores our current content.
+    OurFresh,
+    /// OurOutdated means only the remote peer stores our stale content.
+    OurOutdated,
+    /// TheirFresh means we store only the peer's current mirrored content.
+    TheirFresh,
+    /// TheirOutdated means we store only the peer's stale mirrored content.
+    TheirOutdated,
+    /// None means neither side currently stores peer bytes.
+    None,
+}
+
+/// Return the peer sort key for one operator-facing inventory row.
+fn peer_sort_key(peer: &PeerInfo) -> (i32, i32, Reverse<i64>, String) {
+    let pin_rank = if peer.pinned_by_us || peer.pins_us {
+        0
+    } else {
+        1
+    };
+    let storage_rank = match peer_storage_state(peer) {
+        PeerStorageState::MutualFresh => 0,
+        PeerStorageState::MutualOutdated => 1,
+        PeerStorageState::OurFresh => 2,
+        PeerStorageState::OurOutdated => 3,
+        PeerStorageState::TheirFresh => 4,
+        PeerStorageState::TheirOutdated => 5,
+        PeerStorageState::None => 6,
+    };
+    (
+        pin_rank,
+        storage_rank,
+        Reverse(peer.last_live_at),
+        peer.peer
+            .as_ref()
+            .map(|peer| peer.onion_service_id.clone())
+            .unwrap_or_default(),
+    )
+}
+
+/// Return the display/storage classification for one peer row.
+fn peer_storage_state(peer: &PeerInfo) -> PeerStorageState {
+    let our_has_bytes = peer.our_stored_content_bytes > 0;
+    let their_has_bytes = peer.stored_content_bytes > 0;
+    let their_side_stale = peer.stale_cache || peer.tracked_only;
+
+    match (our_has_bytes, their_has_bytes) {
+        (true, true) if peer.our_content_synced && !their_side_stale => {
+            PeerStorageState::MutualFresh
+        }
+        (true, true) => PeerStorageState::MutualOutdated,
+        (true, false) if peer.our_content_synced => PeerStorageState::OurFresh,
+        (true, false) => PeerStorageState::OurOutdated,
+        (false, true) if !their_side_stale => PeerStorageState::TheirFresh,
+        (false, true) => PeerStorageState::TheirOutdated,
+        (false, false) => PeerStorageState::None,
+    }
+}
+
+/// Return the operator-facing storage label and preferred color.
+fn peer_storage_state_display(state: PeerStorageState) -> (&'static str, TableCellColor) {
+    match state {
+        PeerStorageState::MutualFresh => ("mutual fresh", TableCellColor::Green),
+        PeerStorageState::MutualOutdated => ("mutual old", TableCellColor::Yellow),
+        PeerStorageState::OurFresh => ("us fresh", TableCellColor::Green),
+        PeerStorageState::OurOutdated => ("us old", TableCellColor::Yellow),
+        PeerStorageState::TheirFresh => ("them only", TableCellColor::Green),
+        PeerStorageState::TheirOutdated => ("them old", TableCellColor::Yellow),
+        PeerStorageState::None => ("none", TableCellColor::Red),
+    }
+}
+
+/// Return the operator-facing status label and preferred color.
+fn peer_status_display(status: PeerStatus) -> (&'static str, TableCellColor) {
+    match status {
+        PeerStatus::Connected => ("connected", TableCellColor::Green),
+        PeerStatus::Online => ("online", TableCellColor::Green),
+        PeerStatus::Offline | PeerStatus::Unknown => ("offline", TableCellColor::DarkGrey),
+    }
+}
+
+/// Render compact operator-facing peer flags.
+fn peer_flags(peer: &PeerInfo) -> Vec<TableCell> {
+    let mut flags = Vec::new();
+    if peer.pinned_by_us {
+        flags.push(colored_table_cell("pin", TableCellColor::Cyan));
+    }
+    if peer.pins_us {
+        flags.push(colored_table_cell("pins-us", TableCellColor::Cyan));
+    }
+    if peer.tracked_only {
+        flags.push(colored_table_cell("tracked", TableCellColor::Yellow));
+    }
+    if peer.stale_cache {
+        flags.push(colored_table_cell("stale", TableCellColor::Yellow));
+    }
+    let storage_protection =
+        protos::clirpc::PeerStorageProtection::try_from(peer.storage_protection)
+            .unwrap_or(protos::clirpc::PeerStorageProtection::None);
+    if !matches!(
+        storage_protection,
+        protos::clirpc::PeerStorageProtection::None
+    ) {
+        flags.push(plain_table_cell(peer_storage_protection_label(
+            storage_protection,
+        )));
+    }
+    flags
+}
+
+/// Render one compact failure summary for the peer table.
+fn peer_failure_summary(peer: &PeerInfo) -> TableCell {
+    let Some(failure_class) = peer_info_failure_class(peer) else {
+        return colored_table_cell("-", TableCellColor::DarkGrey);
+    };
+
+    let mut label = peer_failure_class_label(failure_class).to_string();
+    if peer.consecutive_failures > 0 {
+        label.push_str(&format!(" x{}", peer.consecutive_failures));
+    }
+    colored_table_cell(label, TableCellColor::Yellow)
+}
+
+/// Format one peer inventory entry as one aligned table row.
+fn format_peer_info_row(peer: &PeerInfo, local_offset: UtcOffset) -> Vec<TableCell> {
     let onion_service_id = peer
         .peer
         .as_ref()
         .map(|peer| peer.onion_service_id.as_str())
         .unwrap_or("");
-    let status = match peer_info_status(peer) {
-        PeerStatus::Connected => "connected",
-        PeerStatus::Online => "online",
-        PeerStatus::Offline | PeerStatus::Unknown => "offline",
-    };
-    let last_live_at = format_unix_timestamp_local_or(peer.last_live_at, local_offset, "never");
-    let score_measured_at =
-        format_unix_timestamp_local_or(peer.score_measured_at, local_offset, "unknown");
-    let storage_protection =
-        protos::clirpc::PeerStorageProtection::try_from(peer.storage_protection)
-            .unwrap_or(protos::clirpc::PeerStorageProtection::None);
-    let mut line = format!(
-        "peer={} status={} pinned_by_us={} pins_us={} score={} score_measured_at={} stored_content_bytes={} latest_known_content_length={} latest_cached_content_length={} stale_cache={} storage_protection={} tracked_only={} last_live_at={}",
-        onion_service_id,
-        status,
-        peer.pinned_by_us,
-        peer.pins_us,
-        format_duration_human(peer.score_seconds),
-        score_measured_at,
-        peer.stored_content_bytes,
-        peer.latest_known_content_length,
-        peer.latest_cached_content_length,
-        peer.stale_cache,
-        peer_storage_protection_label(storage_protection),
-        peer.tracked_only,
-        last_live_at
-    );
-    if let Some(failure_class) = peer_info_failure_class(peer) {
-        line.push_str(&format!(
-            " last_error_class={} consecutive_failures={} last_failure_at={} next_retry_at={} last_error_message={:?}",
-            peer_failure_class_label(failure_class),
-            peer.consecutive_failures,
-            format_unix_timestamp_local_or(peer.last_failure_at, local_offset, "never"),
-            format_unix_timestamp_local_or(peer.next_retry_at, local_offset, "immediate"),
-            peer.last_error_message,
-        ));
-    }
-    line
+    let status = peer_info_status(peer);
+    let (status_label, status_color) = peer_status_display(status);
+    let storage_state = peer_storage_state(peer);
+    let (storage_label, storage_color) = peer_storage_state_display(storage_state);
+    let flags = peer_flags(peer)
+        .into_iter()
+        .map(|flag| flag.text)
+        .collect::<Vec<_>>()
+        .join(",");
+
+    vec![
+        plain_table_cell(onion_service_id),
+        colored_table_cell(status_label, status_color),
+        colored_table_cell(storage_label, storage_color),
+        plain_table_cell(format_byte_count(peer.our_stored_content_bytes)),
+        plain_table_cell(format_byte_count(peer.stored_content_bytes)),
+        plain_table_cell(format_duration_human(peer.score_seconds)),
+        plain_table_cell(format_unix_timestamp_local_or(
+            peer.last_live_at,
+            local_offset,
+            "never",
+        )),
+        peer_failure_summary(peer),
+        if flags.is_empty() {
+            colored_table_cell("-", TableCellColor::DarkGrey)
+        } else {
+            plain_table_cell(flags)
+        },
+    ]
 }
 
 /// Merge one sparse config update into the current full config object.
@@ -2004,7 +2172,7 @@ fn format_file_list(files: &[FileInfo], local_offset: UtcOffset) -> Vec<String> 
             ]
         })
         .collect::<Vec<_>>();
-    render_table(&headers, &rows)
+    render_table(&headers, &rows, false)
 }
 
 /// Print one peer verification as an operator-facing summary.
@@ -3769,10 +3937,12 @@ mod tests {
                     score_measured_at: 11,
                     stored_content_bytes: 13,
                     latest_known_content_length: 17,
-                    latest_cached_content_length: 19,
-                    stale_cache: true,
+                    latest_cached_content_length: 17,
+                    stale_cache: false,
                     storage_protection: protos::clirpc::PeerStorageProtection::Pinned as i32,
                     tracked_only: false,
+                    our_stored_content_bytes: 23,
+                    our_content_synced: true,
                     last_live_at: 23,
                     last_failure_at: 0,
                     last_error_class: protos::clirpc::PeerFailureClass::Unknown as i32,
@@ -3796,6 +3966,8 @@ mod tests {
                     stale_cache: false,
                     storage_protection: protos::clirpc::PeerStorageProtection::None as i32,
                     tracked_only: false,
+                    our_stored_content_bytes: 0,
+                    our_content_synced: false,
                     last_live_at: 29,
                     last_failure_at: 0,
                     last_error_class: protos::clirpc::PeerFailureClass::Unknown as i32,
@@ -3810,29 +3982,25 @@ mod tests {
             &response,
             &PeerListFilter::default(),
             UtcOffset::from_hms(-5, 0, 0).unwrap(),
+            false,
         );
 
-        assert_eq!(lines[0], "with_storage: 1");
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("peer=contract.onion")));
-        assert!(lines.iter().any(|line| line.contains("pinned_by_us=true")));
-        assert!(lines.iter().any(|line| line.contains("pins_us=true")));
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("storage_protection=pinned")));
-        assert!(lines.iter().any(|line| line.contains("status=connected")));
-        assert!(lines.iter().any(|line| line.contains("score=7s")));
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("score_measured_at=1969-12-31 19:00:11 -05:00")));
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("last_live_at=1969-12-31 19:00:23 -05:00")));
-        assert!(lines.iter().any(|line| line == "online: 1"));
-        assert!(lines.iter().any(|line| line.contains("peer=online.onion")));
-        assert!(lines.iter().any(|line| line == "offline: 0"));
-        assert!(lines.iter().any(|line| line == "  (none)"));
+        assert!(lines[0].contains("PEER"));
+        assert!(lines[0].contains("STATUS"));
+        assert!(lines[0].contains("STORAGE"));
+        assert!(lines[0].contains("OURS ON THEM"));
+        assert!(lines[0].contains("THEIRS ON US"));
+        assert!(lines[1].contains("contract.onion"));
+        assert!(lines[1].contains("connected"));
+        assert!(lines[1].contains("mutual fresh"));
+        assert!(lines[1].contains("23"));
+        assert!(lines[1].contains("13"));
+        assert!(lines[1].contains("7s"));
+        assert!(lines[1].contains("1969-12-31 19:00:23 -05:00"));
+        assert!(lines[1].contains("pin,pins-us,pinned"));
+        assert!(lines[2].contains("online.onion"));
+        assert!(lines[2].contains("online"));
+        assert!(lines[2].contains("none"));
     }
 
     #[test]
@@ -3855,6 +4023,8 @@ mod tests {
                     stale_cache: true,
                     storage_protection: protos::clirpc::PeerStorageProtection::Protected as i32,
                     tracked_only: false,
+                    our_stored_content_bytes: 17,
+                    our_content_synced: true,
                     last_live_at: 23,
                     last_failure_at: 0,
                     last_error_class: protos::clirpc::PeerFailureClass::Unknown as i32,
@@ -3878,6 +4048,8 @@ mod tests {
                     stale_cache: false,
                     storage_protection: protos::clirpc::PeerStorageProtection::None as i32,
                     tracked_only: true,
+                    our_stored_content_bytes: 7,
+                    our_content_synced: false,
                     last_live_at: 0,
                     last_failure_at: 101,
                     last_error_class: protos::clirpc::PeerFailureClass::Timeout as i32,
@@ -3892,30 +4064,19 @@ mod tests {
             &response,
             &PeerListFilter::new(vec![PeerStatusFilter::Offline], false, true),
             UtcOffset::from_hms(-5, 0, 0).unwrap(),
+            false,
         );
 
-        assert_eq!(lines[0], "with_storage: 0");
-        assert!(lines.iter().any(|line| line == "offline: 1"));
-        assert!(lines.iter().any(|line| line.contains("peer=offline.onion")));
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("last_error_class=timeout")));
-        assert!(lines.iter().any(|line| line.contains("score=-5s")));
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("consecutive_failures=2")));
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("score_measured_at=1969-12-31 19:00:31 -05:00")));
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("last_failure_at=1969-12-31 19:01:41 -05:00")));
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("next_retry_at=1969-12-31 19:02:11 -05:00")));
-        assert!(!lines
-            .iter()
-            .any(|line| line.contains("peer=contract.onion")));
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("FAILURE"));
+        assert!(lines[1].contains("offline.onion"));
+        assert!(lines[1].contains("offline"));
+        assert!(lines[1].contains("us old"));
+        assert!(lines[1].contains("-5s"));
+        assert!(lines[1].contains("never"));
+        assert!(lines[1].contains("timeout x2"));
+        assert!(lines[1].contains("tracked"));
+        assert!(!lines[1].contains("contract.onion"));
     }
 
     #[test]

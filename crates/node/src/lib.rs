@@ -338,6 +338,12 @@ struct PeerInventoryEntry {
     storage_protection: PeerStorageProtectionClass,
     /// tracked_only reports whether only metadata for the newest revision is kept.
     tracked_only: bool,
+    /// our_stored_content_bytes is the newest local-owner revision length that
+    /// this peer most recently reported it still stores.
+    our_stored_content_bytes: i64,
+    /// our_content_synced reports whether the peer's stored local-owner
+    /// revision matches our current local revision.
+    our_content_synced: bool,
     /// last_live_at is when the peer last responded successfully over the transport.
     last_live_at: i64,
     /// last_failure_at is when background maintenance last failed for this peer.
@@ -380,6 +386,12 @@ struct LocalPeerInventorySnapshot {
     storage_protection: PeerStorageProtectionClass,
     /// tracked_only reports whether only metadata for the newest revision is kept.
     tracked_only: bool,
+    /// our_stored_content_bytes is the newest local-owner revision length that
+    /// this peer most recently reported it still stores.
+    our_stored_content_bytes: i64,
+    /// our_content_synced reports whether the peer's stored local-owner
+    /// revision matches our current local revision.
+    our_content_synced: bool,
     /// last_live_at is when the peer last responded successfully over the transport.
     last_live_at: i64,
 }
@@ -3882,6 +3894,12 @@ impl Node {
         }
 
         self.with_store(|store| {
+            let current_content = store
+                .current_content()
+                .map(|current| storedpb::PeerContent {
+                    content_id: current.content_id.clone(),
+                    content_length: i64::try_from(current.blob_len).unwrap_or(i64::MAX),
+                });
             let mut peers = BTreeMap::new();
             for peer in store.peers() {
                 let peer_onion = match self.onion_from_public_key_bytes(&peer.onion_pubkey) {
@@ -3890,6 +3908,7 @@ impl Node {
                 };
                 let latest_known_content = peer_latest_known_content(&peer);
                 let latest_cached_content = peer_latest_cached_content(&peer);
+                let requester_latest_stored = peer_requester_latest_stored_content(&peer);
                 peers.insert(
                     peer_onion,
                     LocalPeerInventorySnapshot {
@@ -3919,6 +3938,12 @@ impl Node {
                                 .map(|content| &content.content_id),
                         storage_protection: peer_storage_protection(&peer),
                         tracked_only: peer_is_tracked_only(&peer),
+                        our_stored_content_bytes: requester_latest_stored
+                            .as_ref()
+                            .map(|content| content.content_length)
+                            .unwrap_or(0),
+                        our_content_synced: requester_latest_stored.as_ref()
+                            == current_content.as_ref(),
                         last_live_at: peer.last_live_at,
                     },
                 );
@@ -3977,6 +4002,12 @@ impl Node {
                     .map(|peer| peer.storage_protection)
                     .unwrap_or(PeerStorageProtectionClass::None),
                 tracked_only: tracked_peer.map(|peer| peer.tracked_only).unwrap_or(false),
+                our_stored_content_bytes: tracked_peer
+                    .map(|peer| peer.our_stored_content_bytes)
+                    .unwrap_or_default(),
+                our_content_synced: tracked_peer
+                    .map(|peer| peer.our_content_synced)
+                    .unwrap_or(false),
                 last_live_at: tracked_peer
                     .map(|peer| peer.last_live_at)
                     .unwrap_or_default(),
@@ -4233,6 +4264,8 @@ impl Node {
                     stale_cache: peer.stale_cache,
                     storage_protection: proto_peer_storage_protection(peer.storage_protection),
                     tracked_only: peer.tracked_only,
+                    our_stored_content_bytes: peer.our_stored_content_bytes,
+                    our_content_synced: peer.our_content_synced,
                     last_live_at: peer.last_live_at,
                     last_failure_at: peer.last_failure_at,
                     last_error_class: peer.last_error_class,
@@ -8954,6 +8987,76 @@ mod tests {
             remote_content.content_length
         );
         assert_eq!(counting.reads(), 0);
+
+        remote_server.abort();
+        local_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_inventory_reports_our_stored_content_and_sync_state() -> anyhow::Result<()> {
+        let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let remote_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let local_node = Arc::new(Node::with_local_storage(
+            "peer-inventory-requester-owner",
+            local_filesystem,
+        )?);
+        let remote_node = Arc::new(Node::with_local_storage(
+            "peer-inventory-requester-remote",
+            remote_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        local_node.set_peer_connector(connector.clone());
+        remote_node.set_peer_connector(connector.clone());
+
+        let local_server =
+            spawn_registered_p2p_server(local_node.clone(), connector.as_ref()).await?;
+        let remote_server =
+            spawn_registered_p2p_server(remote_node.clone(), connector.as_ref()).await?;
+
+        local_node.connect_known_peer(remote_node.address()).await?;
+        CliService::new(local_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "ours.txt".to_string(),
+                    data: b"our current content".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+
+        let published = local_node
+            .current_content_info()?
+            .ok_or_else(|| anyhow::anyhow!("missing local content info"))?;
+        publish_current_content_to_peer(
+            local_node.clone(),
+            remote_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
+        let _ = local_node.get_peer_storage_response().await?;
+        let peer = peer_inventory_entry(local_node.as_ref(), remote_node.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing inventory entry"))?;
+        assert_eq!(peer.our_stored_content_bytes, published.content_length);
+        assert!(peer.our_content_synced);
+
+        CliService::new(local_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "ours.txt".to_string(),
+                    data: b"newer content".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+
+        let stale_peer = peer_inventory_entry(local_node.as_ref(), remote_node.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing stale inventory entry"))?;
+        assert_eq!(
+            stale_peer.our_stored_content_bytes,
+            published.content_length
+        );
+        assert!(!stale_peer.our_content_synced);
 
         remote_server.abort();
         local_server.abort();
