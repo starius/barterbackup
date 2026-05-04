@@ -85,7 +85,7 @@
             inherit version;
 
             src = self;
-            cargoLock.lockFile = ./Cargo.lock;
+            cargoHash = "sha256-dVe3d3y8a5frjGQklibDxgxBjhYvFZtQdFV2l4W+w3A=";
 
             cargoBuildTarget = staticTarget;
             doCheck = false;

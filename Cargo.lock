@@ -186,8 +186,7 @@ checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 [[package]]
 name = "arti-client"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e15d2051582670d5c003deda168da03f0d3475f6375bca57d6b9852a9d32eed"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "async-trait",
  "cfg-if",
@@ -204,7 +203,7 @@ dependencies = [
  "once_cell",
  "postage",
  "rand 0.9.4",
- "safelog",
+ "safelog 0.8.1 (git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared)",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
@@ -665,8 +664,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 [[package]]
 name = "caret"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "beae2cb9f60bc3f21effaaf9c64e51f6627edd54eedc9199ba07f519ef2a2101"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 
 [[package]]
 name = "cc"
@@ -1212,9 +1210,9 @@ dependencies = [
 
 [[package]]
 name = "derive-deftly"
-version = "1.6.0"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "284db66a66f03c3dafbe17360d959eb76b83f77cfe191677e2a7899c0da291f3"
+checksum = "79fc7a4d4fef137732d8d0d4e58a9e46e168e5b2a7f728c20f87e7cda69a14e9"
 dependencies = [
  "derive-deftly-macros",
  "heck",
@@ -1222,9 +1220,9 @@ dependencies = [
 
 [[package]]
 name = "derive-deftly-macros"
-version = "1.6.0"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caef6056a5788d05d173cdc3c562ac28ae093828f851f69378b74e4e3d578e41"
+checksum = "2a93511fd122bc7b22e361806e84f1c31a53894f0564a4ba7f28e799104318c7"
 dependencies = [
  "heck",
  "indexmap 2.14.0",
@@ -1233,8 +1231,9 @@ dependencies = [
  "proc-macro2",
  "quote",
  "sha3",
- "strum 0.27.2",
+ "strum",
  "syn 2.0.117",
+ "unicode-ident",
  "void",
 ]
 
@@ -1712,8 +1711,7 @@ dependencies = [
 [[package]]
 name = "fs-mistrust"
 version = "0.14.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f5ac9f88fd18733e0f9ce1f4a95c40eb1d4f83131bf1472e81d1f128fefb7c2"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "derive_builder_fork_arti",
  "dirs",
@@ -1763,8 +1761,7 @@ dependencies = [
 [[package]]
 name = "fslock-guard"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75f62cb7d296f7d1fabdce7291281d9f0147b06a6e79afae05e1230eab667d85"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "fslock-arti-fork",
  "thiserror 2.0.18",
@@ -2693,7 +2690,7 @@ dependencies = [
  "futures",
  "hyper-util",
  "keys",
- "safelog",
+ "safelog 0.8.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "tlsutil",
  "tokio",
  "tokio-rustls",
@@ -2938,8 +2935,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "oneshot-fused-workaround"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e17b52d0e4a06a4c7eb8d2943c0015fa628cf4ccc409429cebc0f5bed6d33a82"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "futures",
 ]
@@ -3754,8 +3750,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 [[package]]
 name = "retry-error"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf6aa271ee564cc5d1df57c5cf7c6ac7a21a4f9f40d2bf1d32bf0a1bb3ddaeb0"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "humantime",
  "web-time",
@@ -3955,6 +3950,18 @@ name = "safelog"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee9f10dd250956c65d58a19507dd06ff976f898560fe843580d05134541f0898"
+dependencies = [
+ "derive_more",
+ "educe",
+ "either",
+ "fluid-let",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "safelog"
+version = "0.8.1"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "derive_more",
  "educe",
@@ -4308,8 +4315,7 @@ dependencies = [
 [[package]]
 name = "slotmap-careful"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed92816c1fbb29891a525b92d5fa95757c9dee47044f76c8e06ceb1e052a8d64"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "paste",
  "serde",
@@ -4453,32 +4459,11 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "strum"
-version = "0.27.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af23d6f6c1a224baef9d3f61e287d2761385a5b88fdab4eb4c6f11aeb54c4bcf"
-dependencies = [
- "strum_macros 0.27.2",
-]
-
-[[package]]
-name = "strum"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
 dependencies = [
- "strum_macros 0.28.0",
-]
-
-[[package]]
-name = "strum_macros"
-version = "0.27.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
-dependencies = [
- "heck",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
+ "strum_macros",
 ]
 
 [[package]]
@@ -4917,8 +4902,7 @@ dependencies = [
 [[package]]
 name = "tor-async-utils"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4680d5ecdb052e950b31cd7c7852aa025968f648046e55251446d7d0e58138e"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "derive-deftly",
  "educe",
@@ -4933,11 +4917,10 @@ dependencies = [
 [[package]]
 name = "tor-basic-utils"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a2351dee62e4edabb624a7e7ba85f6f2b73073ec4590e76c9b6f90fc30b91e9"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "derive_more",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "hex",
  "itertools",
  "libc",
@@ -4955,15 +4938,14 @@ dependencies = [
 [[package]]
 name = "tor-bytes"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e86f91871fcd2e2fb16fcf55b7821b050b11d05d42b7e98104b662417bafda92"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "bytes",
  "derive-deftly",
  "digest 0.10.7",
  "educe",
  "getrandom 0.4.2",
- "safelog",
+ "safelog 0.8.1 (git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared)",
  "thiserror 2.0.18",
  "tor-error",
  "tor-llcrypto",
@@ -4973,8 +4955,7 @@ dependencies = [
 [[package]]
 name = "tor-cell"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ee932b1f0890a0ac689f6fdeec0fe4cc9e11bc1a18b2a09c2fb7adbd0761df4"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "amplify",
  "bitflags 2.11.1",
@@ -5004,8 +4985,7 @@ dependencies = [
 [[package]]
 name = "tor-cert"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f774e4097af30e759ddcfcdd50e594183b62c2e70e3dd55f4b61e254d527505"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "caret",
  "derive_builder_fork_arti",
@@ -5022,8 +5002,7 @@ dependencies = [
 [[package]]
 name = "tor-chanmgr"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31db74e069430a70f290820d7f60e2cd96364dcb4b8bbd92aee9bf94b9a2dfca"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -5038,7 +5017,7 @@ dependencies = [
  "percent-encoding",
  "postage",
  "rand 0.9.4",
- "safelog",
+ "safelog 0.8.1 (git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared)",
  "serde",
  "serde_with",
  "thiserror 2.0.18",
@@ -5065,8 +5044,7 @@ dependencies = [
 [[package]]
 name = "tor-checkable"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d65310bcfd125f65e4ac8ee290b352d20a80909ef7226741f57e9a049391d3d7"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "humantime",
  "signature 2.2.0",
@@ -5078,8 +5056,7 @@ dependencies = [
 [[package]]
 name = "tor-circmgr"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1310bb4288894f3bae03d0201ee397bed95fd08b24b18b5303a0bdbee012fba"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "amplify",
  "async-trait",
@@ -5098,7 +5075,7 @@ dependencies = [
  "pin-project",
  "rand 0.9.4",
  "retry-error",
- "safelog",
+ "safelog 0.8.1 (git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared)",
  "serde",
  "thiserror 2.0.18",
  "tor-async-utils",
@@ -5128,8 +5105,7 @@ dependencies = [
 [[package]]
 name = "tor-config"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24a1148697cfeeb8c35a3bd2ee3eb98a3510610635fca63e46bca33dfb3f450e"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "amplify",
  "cfg-if",
@@ -5149,7 +5125,7 @@ dependencies = [
  "serde",
  "serde-value",
  "serde_ignored",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.18",
  "toml 1.1.2+spec-1.1.0",
  "tor-basic-utils",
@@ -5162,8 +5138,7 @@ dependencies = [
 [[package]]
 name = "tor-config-path"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a3cc17b20f63fa231e3811005c3c39dd55b4c3bc44c73565be2a632cc53a442"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "directories",
  "serde",
@@ -5176,8 +5151,7 @@ dependencies = [
 [[package]]
 name = "tor-consdiff"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77b5da8bcea62b5f6695f9271f8367d6d00977a6bffd2da9a0795c29cb839790"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "derive_more",
  "digest 0.10.7",
@@ -5193,8 +5167,7 @@ dependencies = [
 [[package]]
 name = "tor-dirclient"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "139aec98a8579613a08b1283ca9da4ceda110e0627798bff22b1b692a7a03bf0"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "async-compression",
  "base64ct",
@@ -5222,8 +5195,7 @@ dependencies = [
 [[package]]
 name = "tor-dircommon"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c0e029a636b59ac25e4c2e261e306775dac5200c1632f99696cfc2c236b3b5d"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "base64ct",
  "derive-deftly",
@@ -5243,8 +5215,7 @@ dependencies = [
 [[package]]
 name = "tor-dirmgr"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a659fc3d3aa9f1c11d940cd5fcc37a641a8db3595ec2b8df6dc4595e7d71ef08"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -5266,13 +5237,13 @@ dependencies = [
  "postage",
  "rand 0.9.4",
  "rusqlite",
- "safelog",
+ "safelog 0.8.1 (git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared)",
  "scopeguard",
  "serde",
  "serde_json",
  "signature 2.2.0",
  "static_assertions",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.18",
  "time",
  "tor-async-utils",
@@ -5300,15 +5271,14 @@ dependencies = [
 [[package]]
 name = "tor-error"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f8163b225e07e00be618cbebdbbc8ff003795121971cdf54297e820cc177569"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "derive_more",
  "futures",
  "paste",
  "retry-error",
  "static_assertions",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.18",
  "tracing",
  "void",
@@ -5318,8 +5288,7 @@ dependencies = [
 [[package]]
 name = "tor-general-addr"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b53d8066194461d13603437331c24c7a722d3d4e375ed1552c434b3240880f17"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "derive_more",
  "thiserror 2.0.18",
@@ -5329,8 +5298,7 @@ dependencies = [
 [[package]]
 name = "tor-guardmgr"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "119df8b27549a1db143713b9afde6d0d5ef1736b9fd03264715bce9d83616d10"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "amplify",
  "base64ct",
@@ -5348,9 +5316,9 @@ dependencies = [
  "pin-project",
  "postage",
  "rand 0.9.4",
- "safelog",
+ "safelog 0.8.1 (git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared)",
  "serde",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.18",
  "tor-async-utils",
  "tor-basic-utils",
@@ -5374,8 +5342,7 @@ dependencies = [
 [[package]]
 name = "tor-hsclient"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9598bfa74aa4734be431d0538e4e6a39f34ab166a4f31ffb584a406b0c72d708"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "async-trait",
  "derive-deftly",
@@ -5388,9 +5355,9 @@ dependencies = [
  "postage",
  "rand 0.9.4",
  "retry-error",
- "safelog",
+ "safelog 0.8.1 (git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared)",
  "slotmap-careful",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.18",
  "tor-async-utils",
  "tor-basic-utils",
@@ -5419,8 +5386,7 @@ dependencies = [
 [[package]]
 name = "tor-hscrypto"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38f7f57feca263556c41c5d86129b6bd4b1f41dbfc566d070b112bd0bb1b6a21"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "cipher",
  "data-encoding",
@@ -5432,7 +5398,7 @@ dependencies = [
  "itertools",
  "paste",
  "rand 0.9.4",
- "safelog",
+ "safelog 0.8.1 (git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared)",
  "serde",
  "signature 2.2.0",
  "subtle",
@@ -5452,8 +5418,7 @@ dependencies = [
 [[package]]
 name = "tor-hsservice"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3cf88e0f0c67ccdd5de83e8e2011b7b39222197d6c98b500a11e8a2a85cf95f2"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "amplify",
  "async-trait",
@@ -5477,10 +5442,10 @@ dependencies = [
  "rand 0.9.4",
  "rand_core 0.9.5",
  "retry-error",
- "safelog",
+ "safelog 0.8.1 (git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared)",
  "serde",
  "serde_with",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.18",
  "tor-async-utils",
  "tor-basic-utils",
@@ -5511,8 +5476,7 @@ dependencies = [
 [[package]]
 name = "tor-key-forge"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cea1159867a98160a0629529fdb3615479d3f963b5ab92914dbcc6f0b68bf5c"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "derive-deftly",
  "derive_more",
@@ -5533,8 +5497,7 @@ dependencies = [
 [[package]]
 name = "tor-keymgr"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98e14dbf1a37b9efb1df0650cdf5cb0d6da83589f6d42cfc4d2f7762d72594a5"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "amplify",
  "arrayvec",
@@ -5550,7 +5513,7 @@ dependencies = [
  "inventory",
  "itertools",
  "rand 0.9.4",
- "safelog",
+ "safelog 0.8.1 (git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared)",
  "serde",
  "signature 2.2.0",
  "ssh-key-fork-arti",
@@ -5574,8 +5537,7 @@ dependencies = [
 [[package]]
 name = "tor-linkspec"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af62be67033640f5553797541720e34c12bf9ddb8569655d6241f32e7deed88f"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "base64ct",
  "by_address",
@@ -5585,10 +5547,10 @@ dependencies = [
  "derive_more",
  "hex",
  "itertools",
- "safelog",
+ "safelog 0.8.1 (git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared)",
  "serde",
  "serde_with",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.18",
  "tor-basic-utils",
  "tor-bytes",
@@ -5601,8 +5563,7 @@ dependencies = [
 [[package]]
 name = "tor-llcrypto"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc87d3def186b8edc21ec8f3645dd28cf3b13c6259f4e335e71b7ef52c6ea3f2"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "aes",
  "base64ct",
@@ -5625,7 +5586,7 @@ dependencies = [
  "rand_jitter",
  "rdrand",
  "rsa",
- "safelog",
+ "safelog 0.8.1 (git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared)",
  "serde",
  "sha1",
  "sha2 0.10.9",
@@ -5643,8 +5604,7 @@ dependencies = [
 [[package]]
 name = "tor-log-ratelim"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70066c9cf52f6c273243e97bc548c9be6e1d15e1bf5962da4f0be19686c85ade"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "futures",
  "humantime",
@@ -5659,8 +5619,7 @@ dependencies = [
 [[package]]
 name = "tor-memquota"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aeeba11704612b6fb277d708d0ff9b471266084d86a6e557f858cdadaa61ca49"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "cfg-if",
  "derive-deftly",
@@ -5690,8 +5649,7 @@ dependencies = [
 [[package]]
 name = "tor-memquota-cost"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0178ecdfe9a2856232aaa41805dfd75b8512a21e8e6d02a67427d00e221b192b"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "derive-deftly",
  "itertools",
@@ -5702,8 +5660,7 @@ dependencies = [
 [[package]]
 name = "tor-netdir"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "570b4d45feb00f9a04b429ba1a612b956b263ca01bb7b56a38e01d1223d581b7"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "async-trait",
  "bitflags 2.11.1",
@@ -5716,7 +5673,7 @@ dependencies = [
  "num_enum",
  "rand 0.9.4",
  "serde",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.18",
  "time",
  "tor-basic-utils",
@@ -5735,8 +5692,7 @@ dependencies = [
 [[package]]
 name = "tor-netdoc"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee1e809fc7d54cab30451fcb5f765ebb480ac8ad3e62454001ae875d36d1c27e"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "amplify",
  "base64ct",
@@ -5748,6 +5704,7 @@ dependencies = [
  "educe",
  "enumset",
  "hex",
+ "hostname-validator",
  "humantime",
  "itertools",
  "memchr",
@@ -5759,7 +5716,7 @@ dependencies = [
  "serde_with",
  "signature 2.2.0",
  "smallvec",
- "strum 0.28.0",
+ "strum",
  "subtle",
  "thiserror 2.0.18",
  "time",
@@ -5783,8 +5740,7 @@ dependencies = [
 [[package]]
 name = "tor-persist"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b6d2a9f700c0cbea6dd9b6b3614c47d26fbeffcb0ffdc10caf713a465fb913b"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "amplify",
  "derive-deftly",
@@ -5813,8 +5769,7 @@ dependencies = [
 [[package]]
 name = "tor-proto"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db8556b34a5a24a8ce20cd439ad2081b6097645e165d95387ba8eb8fa17f3520"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "amplify",
  "async-trait",
@@ -5842,10 +5797,11 @@ dependencies = [
  "postage",
  "rand 0.9.4",
  "rand_core 0.9.5",
- "safelog",
+ "safelog 0.8.1 (git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared)",
  "slotmap-careful",
  "smallvec",
  "static_assertions",
+ "strum",
  "subtle",
  "sync_wrapper",
  "thiserror 2.0.18",
@@ -5865,7 +5821,6 @@ dependencies = [
  "tor-log-ratelim",
  "tor-memquota",
  "tor-protover",
- "tor-relay-crypto",
  "tor-rtcompat",
  "tor-rtmock",
  "tor-units",
@@ -5880,8 +5835,7 @@ dependencies = [
 [[package]]
 name = "tor-protover"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fb1b457a24d4e6f4ab1981f33a55c7c525c2edcad855cbc4bdc544430914fc1"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "caret",
  "paste",
@@ -5894,8 +5848,7 @@ dependencies = [
 [[package]]
 name = "tor-ptmgr"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d1ee1b85d012edfc813c39da0a292c8b6e682b03e8ab8fbf4c07920c2efd67e"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "async-trait",
  "cfg-if",
@@ -5922,29 +5875,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "tor-relay-crypto"
-version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7675f5d412acbdf62f8771553d3ca0cfad8afdd78f9b1f7c2befc370ce030bda"
-dependencies = [
- "derive-deftly",
- "derive_more",
- "humantime",
- "tor-cert",
- "tor-checkable",
- "tor-error",
- "tor-key-forge",
- "tor-keymgr",
- "tor-llcrypto",
- "tor-persist",
- "web-time-compat",
-]
-
-[[package]]
 name = "tor-relay-selection"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3110742f2a9e071c7f6c9278cd37e0bae0995d7171516fe4efb2de675645667e"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "rand 0.9.4",
  "serde",
@@ -5957,8 +5890,7 @@ dependencies = [
 [[package]]
 name = "tor-rtcompat"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1714889530e08014a32123bcf947d9564dda61508bc4e7ec5203dcd726985850"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "async-trait",
  "async_executors",
@@ -5992,8 +5924,7 @@ dependencies = [
 [[package]]
 name = "tor-rtmock"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cc3bc02ab55161c3bb25b2ae64ea0e7a20b93cd3272f905dcbd8d5882d7a0be"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "amplify",
  "assert_matches",
@@ -6008,7 +5939,7 @@ dependencies = [
  "pin-project",
  "priority-queue",
  "slotmap-careful",
- "strum 0.28.0",
+ "strum",
  "thiserror 2.0.18",
  "tor-error",
  "tor-general-addr",
@@ -6022,14 +5953,13 @@ dependencies = [
 [[package]]
 name = "tor-socksproto"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36d84b4d4a8680dc865c7a7c44ea5701be049b88276b818f7cd6529af28c2115"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "amplify",
  "caret",
  "derive-deftly",
  "educe",
- "safelog",
+ "safelog 0.8.1 (git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared)",
  "subtle",
  "thiserror 2.0.18",
  "tor-bytes",
@@ -6039,8 +5969,7 @@ dependencies = [
 [[package]]
 name = "tor-units"
 version = "0.41.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ae5c12f3bba5c4707f3a0a9c508320d6a4827e01e5e7ca0824ae55cbd2a737a"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "derive-deftly",
  "derive_more",
@@ -6496,8 +6425,7 @@ dependencies = [
 [[package]]
 name = "web-time-compat"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39819265f219f60a92312f2755262dba9fff180a4ec281556863d69fa36adc59"
+source = "git+https://gitlab.torproject.org/starius/arti.git?tag=arti-v2.2.0-fix-channel-build-task-disappeared#bd631e1bbbf0ea7f099d02216966c1f077b4fb90"
 dependencies = [
  "web-time",
 ]

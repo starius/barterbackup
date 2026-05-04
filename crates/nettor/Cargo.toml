@@ -16,7 +16,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 keys = { path = "../keys" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "io-util"] }
 tracing = "0.1"
-arti-client = { version = "0.41.0", default-features = false, features = [
+arti-client = { git = "https://gitlab.torproject.org/starius/arti.git", tag = "arti-v2.2.0-fix-channel-build-task-disappeared", default-features = false, features = [
     "tokio",
     "onion-service-client",
     "onion-service-service",
@@ -28,14 +28,14 @@ arti-client = { version = "0.41.0", default-features = false, features = [
     "static-sqlite",
     "ephemeral-keystore",
 ] }
-tor-hsservice = "0.41.0"
-tor-hscrypto = "0.41.0"
-tor-llcrypto = "0.41.0"
-tor-cell = "0.41.0"
-tor-keymgr = "0.41.0"
-tor-config = "0.41.0"
-tor-proto = "0.41.0"
-tor-rtcompat = "0.41.0"
+tor-hsservice = { git = "https://gitlab.torproject.org/starius/arti.git", tag = "arti-v2.2.0-fix-channel-build-task-disappeared" }
+tor-hscrypto = { git = "https://gitlab.torproject.org/starius/arti.git", tag = "arti-v2.2.0-fix-channel-build-task-disappeared" }
+tor-llcrypto = { git = "https://gitlab.torproject.org/starius/arti.git", tag = "arti-v2.2.0-fix-channel-build-task-disappeared" }
+tor-cell = { git = "https://gitlab.torproject.org/starius/arti.git", tag = "arti-v2.2.0-fix-channel-build-task-disappeared" }
+tor-keymgr = { git = "https://gitlab.torproject.org/starius/arti.git", tag = "arti-v2.2.0-fix-channel-build-task-disappeared" }
+tor-config = { git = "https://gitlab.torproject.org/starius/arti.git", tag = "arti-v2.2.0-fix-channel-build-task-disappeared" }
+tor-proto = { git = "https://gitlab.torproject.org/starius/arti.git", tag = "arti-v2.2.0-fix-channel-build-task-disappeared" }
+tor-rtcompat = { git = "https://gitlab.torproject.org/starius/arti.git", tag = "arti-v2.2.0-fix-channel-build-task-disappeared" }
 futures = "0.3"
 safelog = "0.8.1"
 tokio-rustls = "0.26"
@@ -44,4 +44,4 @@ tonic = { version = "0.14.5", features = ["transport"] }
 tower = { version = "0.5", features = ["util"] }
 transport = { path = "../transport" }
 toml = "1"
-tor-config-path = "0.41.0"
+tor-config-path = { git = "https://gitlab.torproject.org/starius/arti.git", tag = "arti-v2.2.0-fix-channel-build-task-disappeared" }
