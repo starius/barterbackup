@@ -1749,18 +1749,6 @@ fn peer_failure_class_label(failure_class: protos::clirpc::PeerFailureClass) -> 
     }
 }
 
-/// Render one peer storage-protection class as a concise operator-facing label.
-fn peer_storage_protection_label(
-    protection: protos::clirpc::PeerStorageProtection,
-) -> &'static str {
-    match protection {
-        protos::clirpc::PeerStorageProtection::None => "none",
-        protos::clirpc::PeerStorageProtection::Pinned => "pinned",
-        protos::clirpc::PeerStorageProtection::Protected => "protected",
-        protos::clirpc::PeerStorageProtection::Disposable => "disposable",
-    }
-}
-
 /// PeerStorageState classifies one peer row for display and sorting.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum PeerStorageState {
@@ -1862,17 +1850,6 @@ fn peer_flags(peer: &PeerInfo) -> Vec<TableCell> {
     }
     if peer.stale_cache {
         flags.push(colored_table_cell("stale", TableCellColor::Yellow));
-    }
-    let storage_protection =
-        protos::clirpc::PeerStorageProtection::try_from(peer.storage_protection)
-            .unwrap_or(protos::clirpc::PeerStorageProtection::None);
-    if !matches!(
-        storage_protection,
-        protos::clirpc::PeerStorageProtection::None
-    ) {
-        flags.push(plain_table_cell(peer_storage_protection_label(
-            storage_protection,
-        )));
     }
     flags
 }
@@ -3997,7 +3974,7 @@ mod tests {
         assert!(lines[1].contains("13"));
         assert!(lines[1].contains("7s"));
         assert!(lines[1].contains("1969-12-31 19:00:23 -05:00"));
-        assert!(lines[1].contains("pin,pins-us,pinned"));
+        assert!(lines[1].contains("pin,pins-us"));
         assert!(lines[2].contains("online.onion"));
         assert!(lines[2].contains("online"));
         assert!(lines[2].contains("none"));
