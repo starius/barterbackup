@@ -23,6 +23,8 @@ set edit:completion:arg-completer[bbd] = {|@words|
             cand --arti-config 'arti_config is one optional Arti client TOML file passed directly to embedded Arti'
             cand -h 'Print help'
             cand --help 'Print help'
+            cand -V 'Print version'
+            cand --version 'Print version'
         }
     ]
     $completions[$command]

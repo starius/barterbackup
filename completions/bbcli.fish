@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_bbcli_global_optspecs
-	string join \n local-addr= data-dir= h/help
+	string join \n local-addr= data-dir= h/help V/version
 end
 
 function __fish_bbcli_needs_command
@@ -27,6 +27,7 @@ end
 complete -c bbcli -n "__fish_bbcli_needs_command" -l local-addr -d 'local_addr is the local daemon endpoint' -r
 complete -c bbcli -n "__fish_bbcli_needs_command" -l data-dir -d 'data_dir is the base directory for daemon state and local CLI keys' -r -F
 complete -c bbcli -n "__fish_bbcli_needs_command" -s h -l help -d 'Print help'
+complete -c bbcli -n "__fish_bbcli_needs_command" -s V -l version -d 'Print version'
 complete -c bbcli -n "__fish_bbcli_needs_command" -f -a "state" -d 'Print daemon state'
 complete -c bbcli -n "__fish_bbcli_needs_command" -f -a "init" -d 'Initialize daemon storage with the main password or complete one recovery-mode initialization'
 complete -c bbcli -n "__fish_bbcli_needs_command" -f -a "unlock" -d 'Send the main password to the daemon unlock path'

@@ -19,6 +19,8 @@ _bbcli() {
 '--data-dir=[data_dir is the base directory for daemon state and local CLI keys]:DATA_DIR:_files' \
 '-h[Print help]' \
 '--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
 ":: :_bbcli_commands" \
 "*::: :->bbcli" \
 && ret=0

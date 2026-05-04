@@ -22,6 +22,8 @@ set edit:completion:arg-completer[bbcli] = {|@words|
             cand --data-dir 'data_dir is the base directory for daemon state and local CLI keys'
             cand -h 'Print help'
             cand --help 'Print help'
+            cand -V 'Print version'
+            cand --version 'Print version'
             cand state 'Print daemon state'
             cand init 'Initialize daemon storage with the main password or complete one recovery-mode initialization'
             cand unlock 'Send the main password to the daemon unlock path'

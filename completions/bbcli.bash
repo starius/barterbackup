@@ -203,7 +203,7 @@ _bbcli() {
 
     case "${cmd}" in
         bbcli)
-            opts="-h --local-addr --data-dir --help state init unlock stop peer file config help"
+            opts="-h -V --local-addr --data-dir --help --version state init unlock stop peer file config help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

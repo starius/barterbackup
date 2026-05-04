@@ -25,6 +25,8 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             [CompletionResult]::new('--data-dir', '--data-dir', [CompletionResultType]::ParameterName, 'data_dir is the base directory for daemon state and local CLI keys')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('-V', '-V ', [CompletionResultType]::ParameterName, 'Print version')
+            [CompletionResult]::new('--version', '--version', [CompletionResultType]::ParameterName, 'Print version')
             [CompletionResult]::new('state', 'state', [CompletionResultType]::ParameterValue, 'Print daemon state')
             [CompletionResult]::new('init', 'init', [CompletionResultType]::ParameterValue, 'Initialize daemon storage with the main password or complete one recovery-mode initialization')
             [CompletionResult]::new('unlock', 'unlock', [CompletionResultType]::ParameterValue, 'Send the main password to the daemon unlock path')

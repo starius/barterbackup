@@ -9010,7 +9010,7 @@ mod tests {
             peer_state_writes: AtomicUsize::new(0),
         });
         let filesystem: Arc<dyn Filesystem> = counting.clone();
-        let clock = Arc::new(ManualClock::new(Timestamp::new(1_000, 0).unwrap()));
+        let clock = Arc::new(ManualClock::new(Timestamp::new(900, 0).unwrap()));
         let mut timer_intercepts =
             clock.subscribe_timer_intercepts(TIMER_LABEL_PEER_METADATA_FLUSH_DELAY);
         let node = Node::with_local_storage_and_clock_and_flush_delay(
@@ -9026,6 +9026,7 @@ mod tests {
         node.with_store(|store| store.set_peer_score(peer_public_key.as_bytes(), 10, 900))?;
         let writes_before_delayed_updates = counting.peer_state_writes();
 
+        clock.advance(Duration::from_secs(100));
         node.note_peer_live(peer.address())?;
         assert_eq!(node.update_peer_score(&peer_public_key, true)?, 110);
         node.record_remote_pin_claim(&peer_public_key, true)?;
@@ -9088,7 +9089,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn peer_score_update_clamps_to_resumed_observation_window() -> anyhow::Result<()> {
         let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
-        let clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let clock = Arc::new(ManualClock::new(Timestamp::new(10, 0).unwrap()));
         let node = Node::with_local_storage_and_clock(
             "resumed-observation-owner",
             filesystem,
@@ -9242,7 +9243,7 @@ mod tests {
             peer_state_writes: AtomicUsize::new(0),
         });
         let filesystem: Arc<dyn Filesystem> = counting.clone();
-        let clock = Arc::new(ManualClock::new(Timestamp::new(20_000, 0).unwrap()));
+        let clock = Arc::new(ManualClock::new(Timestamp::new(19_999, 0).unwrap()));
         let node = Arc::new(
             Node::with_local_storage_and_clock_and_flush_delay_and_rollup_sampler(
                 "metadata-rollup-batched-owner",
@@ -9271,6 +9272,7 @@ mod tests {
         })?;
         let writes_before_pending_update = counting.peer_state_writes();
 
+        clock.advance(Duration::from_secs(1));
         assert_eq!(node.update_peer_score(&peer_public_key, true)?, 11);
         node.record_remote_pin_claim(&peer_public_key, true)?;
         assert_eq!(counting.peer_state_writes(), writes_before_pending_update);
@@ -12637,6 +12639,7 @@ mod tests {
         let (endpoint, server) = spawn_plain_peer_server(static_service).await?;
         connector.register_peer(peer_identity.address(), &endpoint);
 
+        clock.advance(Duration::from_secs(90));
         let updates = node
             .verify_peer_storage_updates(peer_identity.address())
             .await?;

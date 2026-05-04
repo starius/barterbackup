@@ -20,6 +20,8 @@ _bbd() {
 '--arti-config=[arti_config is one optional Arti client TOML file passed directly to embedded Arti]:ARTI_CONFIG:_files' \
 '-h[Print help]' \
 '--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
 && ret=0
 }
 

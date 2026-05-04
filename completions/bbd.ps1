@@ -26,6 +26,8 @@ Register-ArgumentCompleter -Native -CommandName 'bbd' -ScriptBlock {
             [CompletionResult]::new('--arti-config', '--arti-config', [CompletionResultType]::ParameterName, 'arti_config is one optional Arti client TOML file passed directly to embedded Arti')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('-V', '-V ', [CompletionResultType]::ParameterName, 'Print version')
+            [CompletionResult]::new('--version', '--version', [CompletionResultType]::ParameterName, 'Print version')
             break
         }
     })
