@@ -33,6 +33,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::{Response, Status};
 use tracing::{error, info, warn};
 
+const SELF_CHECK_INITIAL_DELAY_MEAN: Duration = Duration::from_secs(15 * 60);
 const SELF_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const SELF_CHECK_RESTART_THRESHOLD: u32 = 3;
 const BACKGROUND_FAILURE_MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
@@ -42,10 +43,12 @@ const BACKGROUND_VERIFICATION_DELAY_CAP: Duration = Duration::from_secs(6 * 60 *
 const PEER_RUNTIME_RESTART_INITIAL_BACKOFF: Duration = Duration::from_secs(5);
 const PEER_RUNTIME_RESTART_MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 const TIMER_LABEL_MAINTENANCE_INTERVAL: &str = "maintenance.interval";
+const TIMER_LABEL_SELF_CHECK_INITIAL_DELAY: &str = "self-check.initial-delay";
 const TIMER_LABEL_SELF_CHECK_INTERVAL: &str = "self-check.interval";
 const TIMER_LABEL_PEER_RUNTIME_RESTART_BACKOFF: &str = "peer-runtime.restart-backoff";
 
 type MetadataRollupDelaySampler = Arc<dyn Fn() -> Duration + Send + Sync>;
+type SelfCheckDelaySampler = Arc<dyn Fn(Duration) -> Duration + Send + Sync>;
 type VerificationDelaySampler = Arc<dyn Fn(Duration) -> Duration + Send + Sync>;
 
 const VERSION_STRING: &str = concat!(
@@ -171,6 +174,9 @@ pub struct MaintenanceConfig {
 /// PeerRuntimeSupervisorTimings configures self-check and restart timing.
 #[derive(Clone, Copy)]
 struct PeerRuntimeSupervisorTimings {
+    /// self_check_initial_delay_mean is the mean startup delay before the
+    /// daemon attempts its first public self-check.
+    self_check_initial_delay_mean: Duration,
     /// self_check_interval is the cadence between peer self-check passes.
     self_check_interval: Duration,
     /// self_check_restart_threshold is the unhealthy streak that forces a restart.
@@ -184,6 +190,7 @@ struct PeerRuntimeSupervisorTimings {
 impl Default for PeerRuntimeSupervisorTimings {
     fn default() -> Self {
         Self {
+            self_check_initial_delay_mean: SELF_CHECK_INITIAL_DELAY_MEAN,
             self_check_interval: SELF_CHECK_INTERVAL,
             self_check_restart_threshold: SELF_CHECK_RESTART_THRESHOLD,
             restart_initial_backoff: PEER_RUNTIME_RESTART_INITIAL_BACKOFF,
@@ -495,6 +502,15 @@ fn default_verification_delay_sampler() -> VerificationDelaySampler {
     })
 }
 
+/// Build the default startup self-check delay sampler.
+fn default_self_check_delay_sampler() -> SelfCheckDelaySampler {
+    let rng = Arc::new(StdMutex::new(StdRng::from_entropy()));
+    Arc::new(move |mean: Duration| {
+        let mut rng = rng.lock().unwrap();
+        sample_exponential_delay(mean, &mut rng)
+    })
+}
+
 /// Classify one background peer-maintenance failure for operator-facing status.
 fn classify_peer_failure(status: &Status) -> clirpc::PeerFailureClass {
     match status.code() {
@@ -745,6 +761,7 @@ impl BackgroundPeerRuntime {
         peer_runtime_factory: Arc<dyn PeerRuntimeFactory>,
         maintenance_wakeup: Arc<Notify>,
         maintenance_config: MaintenanceConfig,
+        self_check_delay_sampler: SelfCheckDelaySampler,
         verification_delay_sampler: VerificationDelaySampler,
     ) -> Self {
         let status = Arc::new(StdMutex::new(PeerRuntimeHealth::Starting));
@@ -810,6 +827,7 @@ impl BackgroundPeerRuntime {
                     clock.clone(),
                     self_check_for_task.clone(),
                     maintenance_config.clone(),
+                    self_check_delay_sampler.clone(),
                     restart_requested.clone(),
                     observed_healthy_once.clone(),
                 );
@@ -966,6 +984,8 @@ pub struct DaemonService {
     peer_metadata_flush_delay: Duration,
     /// metadata_rollup_delay_sampler overrides metadata-only rollup timing in tests.
     metadata_rollup_delay_sampler: Option<MetadataRollupDelaySampler>,
+    /// self_check_delay_sampler overrides startup self-check timing in tests.
+    self_check_delay_sampler: Option<SelfCheckDelaySampler>,
     /// verification_delay_sampler overrides adaptive verification timing in tests.
     verification_delay_sampler: Option<VerificationDelaySampler>,
     /// node_state stores the current lock/unlock lifecycle state.
@@ -998,6 +1018,7 @@ impl DaemonService {
             node::DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY,
             None,
             None,
+            None,
         )
     }
 
@@ -1010,6 +1031,7 @@ impl DaemonService {
         test_clock: Option<Arc<ManualClock>>,
         peer_metadata_flush_delay: Duration,
         metadata_rollup_delay_sampler: Option<MetadataRollupDelaySampler>,
+        self_check_delay_sampler: Option<SelfCheckDelaySampler>,
         verification_delay_sampler: Option<VerificationDelaySampler>,
     ) -> Self {
         let started_at = clock.now();
@@ -1023,6 +1045,7 @@ impl DaemonService {
             maintenance_wakeup: Arc::new(Notify::new()),
             peer_metadata_flush_delay,
             metadata_rollup_delay_sampler,
+            self_check_delay_sampler,
             verification_delay_sampler,
             node_state: Mutex::new(DaemonNodeState::Locked),
             shutdown_request: CancellationToken::new(),
@@ -1046,6 +1069,7 @@ impl DaemonService {
             clock,
             Some(test_clock),
             node::DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY,
+            None,
             None,
             None,
         )
@@ -1228,6 +1252,9 @@ impl DaemonService {
             self.peer_runtime_factory.clone(),
             self.maintenance_wakeup.clone(),
             self.maintenance_config.clone(),
+            self.self_check_delay_sampler
+                .clone()
+                .unwrap_or_else(default_self_check_delay_sampler),
             self.verification_delay_sampler
                 .clone()
                 .unwrap_or_else(default_verification_delay_sampler),
@@ -2397,6 +2424,7 @@ fn spawn_self_check_runtime(
     clock: Arc<dyn Clock>,
     self_check: Arc<StdMutex<SelfCheckHealth>>,
     maintenance_config: MaintenanceConfig,
+    self_check_delay_sampler: SelfCheckDelaySampler,
     restart_requested: CancellationToken,
     observed_healthy_once: Arc<StdMutex<bool>>,
 ) -> StartedTask {
@@ -2452,6 +2480,12 @@ fn spawn_self_check_runtime(
             SelfCheckHealth::Unknown => false,
         };
 
+        let initial_delay =
+            self_check_delay_sampler(supervisor_timings.self_check_initial_delay_mean);
+        tokio::select! {
+            _ = shutdown_signal.cancelled() => return Ok(()),
+            _ = clock.wait_for(initial_delay, TIMER_LABEL_SELF_CHECK_INITIAL_DELAY) => {}
+        }
         let Some(initial_outcome) =
             run_self_check_pass(node.as_ref(), self_check.as_ref(), &shutdown_signal).await
         else {
@@ -2559,6 +2593,7 @@ where
         clock,
         test_clock,
         Duration::from_secs(config.peer_metadata_flush_delay_secs),
+        None,
         None,
         None,
     ));
@@ -2879,6 +2914,7 @@ mod tests {
             peer_metadata_flush_delay,
             None,
             None,
+            None,
         )
     }
 
@@ -2904,6 +2940,7 @@ mod tests {
             peer_metadata_flush_delay,
             Some(metadata_rollup_delay_sampler),
             None,
+            None,
         )
     }
 
@@ -2926,7 +2963,32 @@ mod tests {
             Some(test_clock),
             node::DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY,
             None,
+            None,
             Some(verification_delay_sampler),
+        )
+    }
+
+    /// Build a daemon service with a hidden manual test clock, custom runtime
+    /// wiring, and custom startup self-check delay sampling.
+    fn test_service_with_test_clock_and_self_check_delay_sampler(
+        temp_dir: &TempDir,
+        peer_runtime_factory: Arc<dyn PeerRuntimeFactory>,
+        maintenance_config: MaintenanceConfig,
+        initial_time: Timestamp,
+        self_check_delay_sampler: SelfCheckDelaySampler,
+    ) -> DaemonService {
+        let test_clock = Arc::new(ManualClock::new(initial_time));
+        let clock: Arc<dyn Clock> = test_clock.clone();
+        DaemonService::with_clock(
+            temp_dir.path().to_path_buf(),
+            peer_runtime_factory,
+            maintenance_config,
+            clock,
+            Some(test_clock),
+            node::DEFAULT_LOW_VALUE_PEER_METADATA_FLUSH_DELAY,
+            None,
+            Some(self_check_delay_sampler),
+            None,
         )
     }
 
@@ -2939,6 +3001,7 @@ mod tests {
     /// Build a fast supervisor timing profile for restart-focused daemon tests.
     fn fast_supervisor_timings() -> PeerRuntimeSupervisorTimings {
         PeerRuntimeSupervisorTimings {
+            self_check_initial_delay_mean: Duration::from_millis(25),
             self_check_interval: Duration::from_millis(25),
             self_check_restart_threshold: 2,
             restart_initial_backoff: Duration::from_millis(25),
@@ -3625,6 +3688,7 @@ mod tests {
     #[test]
     fn peer_runtime_restart_backoff_grows_and_caps() {
         let timings = PeerRuntimeSupervisorTimings {
+            self_check_initial_delay_mean: Duration::from_secs(1),
             self_check_interval: Duration::from_secs(1),
             self_check_restart_threshold: 3,
             restart_initial_backoff: Duration::from_secs(2),
@@ -3876,10 +3940,49 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn self_check_interval_uses_test_clock() -> Result<()> {
+    async fn self_check_initial_delay_and_interval_use_test_clock() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        let service = test_service_with_test_clock(&temp_dir, Timestamp::new(700, 0).unwrap());
+        let initial_delay = Duration::from_secs(11);
+        let interval = Duration::from_secs(17);
+        let service = test_service_with_test_clock_and_self_check_delay_sampler(
+            &temp_dir,
+            Arc::new(NoopPeerRuntimeFactory),
+            MaintenanceConfig::with_interval(Duration::from_secs(60)).with_supervisor_timings(
+                PeerRuntimeSupervisorTimings {
+                    self_check_initial_delay_mean: Duration::from_secs(30),
+                    self_check_interval: interval,
+                    ..PeerRuntimeSupervisorTimings::default()
+                },
+            ),
+            Timestamp::new(700, 0).unwrap(),
+            Arc::new(move |_| initial_delay),
+        );
         init_and_unlock_service(&service, "self-check-clock").await?;
+
+        let initial_state = service
+            .state(tonic::Request::new(clirpc::StateRequest {}))
+            .await?
+            .into_inner();
+        assert_eq!(
+            initial_state.self_peer_check_state,
+            clirpc::SelfPeerCheckState::Unknown as i32
+        );
+
+        let mut initial_stream = service
+            .timer_intercept(tonic::Request::new(clirpc::TimerInterceptRequest {
+                label: TIMER_LABEL_SELF_CHECK_INITIAL_DELAY.to_string(),
+            }))
+            .await?
+            .into_inner();
+
+        let first_initial = tokio::time::timeout(Duration::from_secs(1), initial_stream.next())
+            .await?
+            .transpose()?
+            .unwrap();
+        assert_eq!(first_initial.wait_seconds, initial_delay.as_secs());
+        assert_eq!(first_initial.wait_nanoseconds, initial_delay.subsec_nanos());
+        assert_eq!(first_initial.registered_unix_seconds, 700);
+        assert_eq!(first_initial.registered_nanoseconds, 0);
 
         let mut stream = service
             .timer_intercept(tonic::Request::new(clirpc::TimerInterceptRequest {
@@ -3888,19 +3991,26 @@ mod tests {
             .await?
             .into_inner();
 
+        service
+            .advance_test_time(tonic::Request::new(clirpc::AdvanceTestTimeRequest {
+                seconds: initial_delay.as_secs(),
+                nanoseconds: initial_delay.subsec_nanos(),
+            }))
+            .await?;
+
         let first = tokio::time::timeout(Duration::from_secs(1), stream.next())
             .await?
             .transpose()?
             .unwrap();
-        assert_eq!(first.wait_seconds, SELF_CHECK_INTERVAL.as_secs());
-        assert_eq!(first.wait_nanoseconds, SELF_CHECK_INTERVAL.subsec_nanos());
-        assert_eq!(first.registered_unix_seconds, 700);
-        assert_eq!(first.registered_nanoseconds, 0);
+        assert_eq!(first.wait_seconds, interval.as_secs());
+        assert_eq!(first.wait_nanoseconds, interval.subsec_nanos());
+        assert_eq!(first.registered_unix_seconds, 700 + initial_delay.as_secs());
+        assert_eq!(first.registered_nanoseconds, initial_delay.subsec_nanos());
 
         service
             .advance_test_time(tonic::Request::new(clirpc::AdvanceTestTimeRequest {
-                seconds: SELF_CHECK_INTERVAL.as_secs(),
-                nanoseconds: SELF_CHECK_INTERVAL.subsec_nanos(),
+                seconds: interval.as_secs(),
+                nanoseconds: interval.subsec_nanos(),
             }))
             .await?;
 
@@ -3908,16 +4018,13 @@ mod tests {
             .await?
             .transpose()?
             .unwrap();
-        assert_eq!(second.wait_seconds, SELF_CHECK_INTERVAL.as_secs());
-        assert_eq!(second.wait_nanoseconds, SELF_CHECK_INTERVAL.subsec_nanos());
+        assert_eq!(second.wait_seconds, interval.as_secs());
+        assert_eq!(second.wait_nanoseconds, interval.subsec_nanos());
         assert_eq!(
             second.registered_unix_seconds,
-            700 + SELF_CHECK_INTERVAL.as_secs()
+            700 + initial_delay.as_secs() + interval.as_secs()
         );
-        assert_eq!(
-            second.registered_nanoseconds,
-            SELF_CHECK_INTERVAL.subsec_nanos()
-        );
+        assert_eq!(second.registered_nanoseconds, initial_delay.subsec_nanos());
 
         service.shutdown().await?;
         Ok(())
