@@ -34,8 +34,8 @@ use tonic::{Response, Status};
 use tracing::{error, info, warn};
 
 const SELF_CHECK_INITIAL_DELAY_MEAN: Duration = Duration::from_secs(15 * 60);
-const SELF_CHECK_INTERVAL: Duration = Duration::from_secs(30);
-const SELF_CHECK_RESTART_THRESHOLD: u32 = 3;
+const SELF_CHECK_HEALTHY_DELAY_MEAN: Duration = Duration::from_secs(6 * 60 * 60);
+const SELF_CHECK_FAILURE_DELAY_CAP: Duration = Duration::from_secs(24 * 60 * 60);
 const BACKGROUND_FAILURE_MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
 const BACKGROUND_PEER_MAINTENANCE_CONCURRENCY: usize = 4;
 const BACKGROUND_VERIFICATION_DELAY_RESET: Duration = Duration::from_secs(5 * 60);
@@ -44,7 +44,7 @@ const PEER_RUNTIME_RESTART_INITIAL_BACKOFF: Duration = Duration::from_secs(5);
 const PEER_RUNTIME_RESTART_MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 const TIMER_LABEL_MAINTENANCE_INTERVAL: &str = "maintenance.interval";
 const TIMER_LABEL_SELF_CHECK_INITIAL_DELAY: &str = "self-check.initial-delay";
-const TIMER_LABEL_SELF_CHECK_INTERVAL: &str = "self-check.interval";
+const TIMER_LABEL_SELF_CHECK_DELAY: &str = "self-check.delay";
 const TIMER_LABEL_PEER_RUNTIME_RESTART_BACKOFF: &str = "peer-runtime.restart-backoff";
 
 type MetadataRollupDelaySampler = Arc<dyn Fn() -> Duration + Send + Sync>;
@@ -177,10 +177,12 @@ struct PeerRuntimeSupervisorTimings {
     /// self_check_initial_delay_mean is the mean startup delay before the
     /// daemon attempts its first public self-check.
     self_check_initial_delay_mean: Duration,
-    /// self_check_interval is the cadence between peer self-check passes.
-    self_check_interval: Duration,
-    /// self_check_restart_threshold is the unhealthy streak that forces a restart.
-    self_check_restart_threshold: u32,
+    /// self_check_healthy_delay_mean is the steady-state mean delay after one
+    /// successful self-check.
+    self_check_healthy_delay_mean: Duration,
+    /// self_check_failure_delay_cap bounds the mean retry delay after repeated
+    /// self-check failures.
+    self_check_failure_delay_cap: Duration,
     /// restart_initial_backoff is the first delay before restarting the runtime.
     restart_initial_backoff: Duration,
     /// restart_max_backoff bounds the restart delay after repeated failures.
@@ -191,8 +193,8 @@ impl Default for PeerRuntimeSupervisorTimings {
     fn default() -> Self {
         Self {
             self_check_initial_delay_mean: SELF_CHECK_INITIAL_DELAY_MEAN,
-            self_check_interval: SELF_CHECK_INTERVAL,
-            self_check_restart_threshold: SELF_CHECK_RESTART_THRESHOLD,
+            self_check_healthy_delay_mean: SELF_CHECK_HEALTHY_DELAY_MEAN,
+            self_check_failure_delay_cap: SELF_CHECK_FAILURE_DELAY_CAP,
             restart_initial_backoff: PEER_RUNTIME_RESTART_INITIAL_BACKOFF,
             restart_max_backoff: PEER_RUNTIME_RESTART_MAX_BACKOFF,
         }
@@ -511,6 +513,62 @@ fn default_self_check_delay_sampler() -> SelfCheckDelaySampler {
     })
 }
 
+/// Scale one self-check mean delay after a failure and cap it.
+fn scaled_self_check_failure_delay(delay: Duration, cap: Duration) -> Duration {
+    delay.mul_f64(2.0).min(cap)
+}
+
+/// SelfCheckCadenceState tracks the in-memory schedule for public self-checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SelfCheckCadenceState {
+    /// current_mean_delay is the current exponential mean used to sample the
+    /// next self-check delay.
+    current_mean_delay: Duration,
+    /// next_check_at is the next absolute due time for the self-check task.
+    next_check_at: Timestamp,
+    /// consecutive_failures counts the current unhealthy streak.
+    consecutive_failures: u32,
+}
+
+impl SelfCheckCadenceState {
+    /// Build the first delayed self-check schedule after runtime startup.
+    fn new(
+        now: Timestamp,
+        supervisor_timings: PeerRuntimeSupervisorTimings,
+        delay_sampler: &SelfCheckDelaySampler,
+    ) -> Self {
+        let initial_delay = delay_sampler(supervisor_timings.self_check_initial_delay_mean);
+        Self {
+            current_mean_delay: supervisor_timings.self_check_initial_delay_mean,
+            next_check_at: now.advance(initial_delay),
+            consecutive_failures: 0,
+        }
+    }
+
+    /// Record one completed self-check and schedule the next pass.
+    fn record_result(
+        &mut self,
+        healthy: bool,
+        now: Timestamp,
+        supervisor_timings: PeerRuntimeSupervisorTimings,
+        delay_sampler: &SelfCheckDelaySampler,
+    ) -> Duration {
+        self.current_mean_delay = if healthy {
+            self.consecutive_failures = 0;
+            supervisor_timings.self_check_healthy_delay_mean
+        } else {
+            self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+            scaled_self_check_failure_delay(
+                self.current_mean_delay,
+                supervisor_timings.self_check_failure_delay_cap,
+            )
+        };
+        let next_delay = delay_sampler(self.current_mean_delay);
+        self.next_check_at = now.advance(next_delay);
+        next_delay
+    }
+}
+
 /// Classify one background peer-maintenance failure for operator-facing status.
 fn classify_peer_failure(status: &Status) -> clirpc::PeerFailureClass {
     match status.code() {
@@ -727,18 +785,6 @@ impl SelfCheckHealth {
     }
 }
 
-/// Return whether one unhealthy self-check should count toward a runtime restart.
-fn self_check_failure_counts_for_restart(observed_healthy_once: bool, error: &str) -> bool {
-    if observed_healthy_once {
-        return true;
-    }
-
-    // Early Tor self-checks often fail before descriptor publication and
-    // rendezvous availability have converged. Treat those transport-style
-    // timeouts as startup noise until we have seen at least one healthy pass.
-    !(error.contains("timed out") || error.contains("transport error"))
-}
-
 /// BackgroundPeerRuntime bootstraps and owns the peer-facing runtime lifecycle.
 struct BackgroundPeerRuntime {
     /// status reports peer runtime readiness or failure to `state`.
@@ -820,20 +866,15 @@ impl BackgroundPeerRuntime {
                     maintenance_wakeup.clone(),
                     maintenance_config.clone(),
                 );
-                let restart_requested = CancellationToken::new();
-                let observed_healthy_once = Arc::new(StdMutex::new(false));
                 let self_check_runtime = spawn_self_check_runtime(
                     node.clone(),
                     clock.clone(),
                     self_check_for_task.clone(),
                     maintenance_config.clone(),
                     self_check_delay_sampler.clone(),
-                    restart_requested.clone(),
-                    observed_healthy_once.clone(),
                 );
 
                 enum RestartCause {
-                    Requested(String),
                     TaskExited(String),
                 }
 
@@ -850,19 +891,6 @@ impl BackgroundPeerRuntime {
                             warn!(onion = %node.address(), %error, "peer runtime shutdown failed");
                         }
                         return;
-                    }
-                    _ = restart_requested.cancelled() => {
-                        if let Err(error) = self_check_runtime.shutdown().await {
-                            warn!(onion = %node.address(), %error, "self-check shutdown failed during restart");
-                        }
-                        if let Err(error) = maintenance_runtime.shutdown().await {
-                            warn!(onion = %node.address(), %error, "maintenance shutdown failed during restart");
-                        }
-                        node.clear_peer_runtime_transport();
-                        if let Err(error) = peer_runtime.shutdown().await {
-                            warn!(onion = %node.address(), %error, "peer runtime shutdown failed during restart");
-                        }
-                        RestartCause::Requested("peer runtime self-check requested a restart".to_string())
                     }
                     result = &mut peer_runtime.task => {
                         if let Err(error) = self_check_runtime.shutdown().await {
@@ -887,16 +915,11 @@ impl BackgroundPeerRuntime {
                     }
                 };
 
-                if *observed_healthy_once.lock().unwrap() {
-                    consecutive_restarts = 0;
-                }
-
                 consecutive_restarts = consecutive_restarts.saturating_add(1);
                 let restart_delay =
                     peer_runtime_restart_backoff(supervisor_timings, consecutive_restarts);
                 let error_message = match restart_cause {
-                    RestartCause::Requested(error_message)
-                    | RestartCause::TaskExited(error_message) => error_message,
+                    RestartCause::TaskExited(error_message) => error_message,
                 };
                 *status_for_task.lock().unwrap() = PeerRuntimeHealth::Failed(error_message.clone());
                 warn!(
@@ -2425,104 +2448,95 @@ fn spawn_self_check_runtime(
     self_check: Arc<StdMutex<SelfCheckHealth>>,
     maintenance_config: MaintenanceConfig,
     self_check_delay_sampler: SelfCheckDelaySampler,
-    restart_requested: CancellationToken,
-    observed_healthy_once: Arc<StdMutex<bool>>,
 ) -> StartedTask {
     let supervisor_timings = maintenance_config.supervisor_timings;
     let shutdown = CancellationToken::new();
     let shutdown_signal = shutdown.clone();
     let task = tokio::spawn(async move {
-        let mut consecutive_unhealthy = 0u32;
         let mut observation_active = true;
+        let mut last_health = SelfCheckHealth::Unknown;
+        let mut cadence =
+            SelfCheckCadenceState::new(clock.now(), supervisor_timings, &self_check_delay_sampler);
 
-        let mut handle_outcome = |outcome: SelfCheckHealth| match outcome {
-            SelfCheckHealth::Healthy => {
-                consecutive_unhealthy = 0;
-                *observed_healthy_once.lock().unwrap() = true;
-                if !observation_active {
-                    node.start_peer_score_observation_window();
-                    observation_active = true;
-                    info!(
-                        onion = %node.address(),
-                        "peer score observation window resumed after self-check recovery"
-                    );
-                }
-                false
-            }
-            SelfCheckHealth::Unhealthy(error) => {
-                if observation_active {
-                    node.suspend_peer_score_observation_window();
-                    observation_active = false;
-                    info!(
-                        onion = %node.address(),
-                        self_check_error = %error,
-                        "peer score observation window suspended after unhealthy self-check"
-                    );
-                }
-                let observed_healthy_once = *observed_healthy_once.lock().unwrap();
-                if !self_check_failure_counts_for_restart(observed_healthy_once, &error) {
-                    return false;
-                }
-                consecutive_unhealthy = consecutive_unhealthy.saturating_add(1);
-                if consecutive_unhealthy >= supervisor_timings.self_check_restart_threshold {
-                    warn!(
-                        onion = %node.address(),
-                        consecutive_self_check_failures = consecutive_unhealthy,
-                        self_check_error = %error,
-                        "requesting peer runtime restart after repeated self-check failures"
-                    );
-                    restart_requested.cancel();
-                    true
-                } else {
-                    false
-                }
-            }
-            SelfCheckHealth::Unknown => false,
-        };
-
-        let initial_delay =
-            self_check_delay_sampler(supervisor_timings.self_check_initial_delay_mean);
         tokio::select! {
             _ = shutdown_signal.cancelled() => return Ok(()),
-            _ = clock.wait_for(initial_delay, TIMER_LABEL_SELF_CHECK_INITIAL_DELAY) => {}
-        }
-        let Some(initial_outcome) =
-            run_self_check_pass(node.as_ref(), self_check.as_ref(), &shutdown_signal).await
-        else {
-            return Ok(());
-        };
-        if handle_outcome(initial_outcome) {
-            return Ok(());
+            _ = clock.wait_until(cadence.next_check_at, TIMER_LABEL_SELF_CHECK_INITIAL_DELAY) => {}
         }
 
-        match maintenance_config.mode {
-            MaintenanceMode::Interval => {
-                // Health monitoring needs its own retry cadence. Tying it to
-                // the maintenance interval would leave the public runtime
-                // marked unhealthy for hours on deployments that run
-                // maintenance rarely.
-                loop {
-                    tokio::select! {
-                        _ = shutdown_signal.cancelled() => break,
-                        _ = clock.wait_for(supervisor_timings.self_check_interval, TIMER_LABEL_SELF_CHECK_INTERVAL) => {
-                            let Some(outcome) =
-                                run_self_check_pass(node.as_ref(), self_check.as_ref(), &shutdown_signal).await
-                            else {
-                                break;
-                            };
-                            if handle_outcome(outcome) {
-                                break;
-                            }
+        loop {
+            let Some(outcome) =
+                run_self_check_pass(node.as_ref(), self_check.as_ref(), &shutdown_signal).await
+            else {
+                return Ok(());
+            };
+            match &outcome {
+                SelfCheckHealth::Healthy => {
+                    if !matches!(last_health, SelfCheckHealth::Healthy) {
+                        info!(
+                            onion = %node.address(),
+                            "self-check became healthy"
+                        );
+                    }
+                    if !observation_active {
+                        node.start_peer_score_observation_window();
+                        observation_active = true;
+                        info!(
+                            onion = %node.address(),
+                            "peer score observation window resumed after self-check recovery"
+                        );
+                    }
+                    cadence.record_result(
+                        true,
+                        clock.now(),
+                        supervisor_timings,
+                        &self_check_delay_sampler,
+                    );
+                }
+                SelfCheckHealth::Unhealthy(error) => {
+                    if observation_active {
+                        node.suspend_peer_score_observation_window();
+                        observation_active = false;
+                        info!(
+                            onion = %node.address(),
+                            self_check_error = %error,
+                            "peer score observation window suspended after unhealthy self-check"
+                        );
+                    }
+                    cadence.record_result(
+                        false,
+                        clock.now(),
+                        supervisor_timings,
+                        &self_check_delay_sampler,
+                    );
+                    match last_health {
+                        SelfCheckHealth::Unknown | SelfCheckHealth::Healthy => {
+                            warn!(
+                                onion = %node.address(),
+                                self_check_error = %error,
+                                consecutive_self_check_failures = cadence.consecutive_failures,
+                                next_self_check_mean_delay_ms = cadence.current_mean_delay.as_millis(),
+                                "self-check became unhealthy"
+                            );
+                        }
+                        SelfCheckHealth::Unhealthy(_) => {
+                            info!(
+                                onion = %node.address(),
+                                self_check_error = %error,
+                                consecutive_self_check_failures = cadence.consecutive_failures,
+                                next_self_check_mean_delay_ms = cadence.current_mean_delay.as_millis(),
+                                "self-check remains unhealthy"
+                            );
                         }
                     }
                 }
+                SelfCheckHealth::Unknown => {}
             }
-            #[cfg(test)]
-            MaintenanceMode::Manual(_) => {
-                shutdown_signal.cancelled().await;
+            last_health = outcome;
+            tokio::select! {
+                _ = shutdown_signal.cancelled() => break,
+                _ = clock.wait_until(cadence.next_check_at, TIMER_LABEL_SELF_CHECK_DELAY) => {}
             }
         }
-
         Ok(())
     });
 
@@ -3002,8 +3016,8 @@ mod tests {
     fn fast_supervisor_timings() -> PeerRuntimeSupervisorTimings {
         PeerRuntimeSupervisorTimings {
             self_check_initial_delay_mean: Duration::from_millis(25),
-            self_check_interval: Duration::from_millis(25),
-            self_check_restart_threshold: 2,
+            self_check_healthy_delay_mean: Duration::from_millis(25),
+            self_check_failure_delay_cap: Duration::from_millis(100),
             restart_initial_backoff: Duration::from_millis(25),
             restart_max_backoff: Duration::from_millis(100),
         }
@@ -3083,30 +3097,6 @@ mod tests {
                 node.set_peer_connector(self.connector.clone());
                 let shutdown = CancellationToken::new();
                 let task = tokio::spawn(async move { Ok(()) });
-                return Ok(StartedTask::new(shutdown, task));
-            }
-
-            start_registered_mock_runtime(node, self.connector.clone()).await
-        }
-    }
-
-    /// SelfCheckRestartRuntimeFactory starts unhealthy once, then becomes healthy after restart.
-    struct SelfCheckRestartRuntimeFactory {
-        connector: Arc<netmock::MockPeerConnector>,
-        starts: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    #[async_trait]
-    impl PeerRuntimeFactory for SelfCheckRestartRuntimeFactory {
-        async fn start(&self, node: Arc<Node>) -> Result<StartedTask> {
-            let start_index = self.starts.fetch_add(1, Ordering::SeqCst);
-            if start_index == 0 {
-                let shutdown = CancellationToken::new();
-                let shutdown_signal = shutdown.clone();
-                let task = tokio::spawn(async move {
-                    shutdown_signal.cancelled().await;
-                    Ok(())
-                });
                 return Ok(StartedTask::new(shutdown, task));
             }
 
@@ -3689,8 +3679,8 @@ mod tests {
     fn peer_runtime_restart_backoff_grows_and_caps() {
         let timings = PeerRuntimeSupervisorTimings {
             self_check_initial_delay_mean: Duration::from_secs(1),
-            self_check_interval: Duration::from_secs(1),
-            self_check_restart_threshold: 3,
+            self_check_healthy_delay_mean: Duration::from_secs(1),
+            self_check_failure_delay_cap: Duration::from_secs(4),
             restart_initial_backoff: Duration::from_secs(2),
             restart_max_backoff: Duration::from_secs(10),
         };
@@ -3714,23 +3704,91 @@ mod tests {
     }
 
     #[test]
-    fn prehealthy_timeout_self_check_failures_do_not_count_for_restart() {
-        assert!(!self_check_failure_counts_for_restart(
-            false,
-            "status: 'Deadline expired before operation could complete', self: \"connect peer timed out\"",
-        ));
-        assert!(!self_check_failure_counts_for_restart(
-            false,
-            "status: 'The service is currently unavailable', self: \"connect peer: transport error\"",
-        ));
-        assert!(self_check_failure_counts_for_restart(
-            false,
-            "status: 'The system is not in a state required for the operation\\'s execution', self: \"peer connector is not configured\"",
-        ));
-        assert!(self_check_failure_counts_for_restart(
-            true,
-            "status: 'Deadline expired before operation could complete', self: \"connect peer timed out\"",
-        ));
+    fn self_check_failure_delay_doubles_and_caps() {
+        assert_eq!(
+            scaled_self_check_failure_delay(
+                Duration::from_secs(15 * 60),
+                Duration::from_secs(24 * 60 * 60)
+            ),
+            Duration::from_secs(30 * 60)
+        );
+        assert_eq!(
+            scaled_self_check_failure_delay(
+                Duration::from_secs(12 * 60 * 60),
+                Duration::from_secs(24 * 60 * 60)
+            ),
+            Duration::from_secs(24 * 60 * 60)
+        );
+        assert_eq!(
+            scaled_self_check_failure_delay(
+                Duration::from_secs(24 * 60 * 60),
+                Duration::from_secs(24 * 60 * 60)
+            ),
+            Duration::from_secs(24 * 60 * 60)
+        );
+    }
+
+    #[test]
+    fn self_check_cadence_failures_back_off_until_cap() {
+        let timings = PeerRuntimeSupervisorTimings {
+            self_check_initial_delay_mean: Duration::from_secs(10),
+            self_check_healthy_delay_mean: Duration::from_secs(12),
+            self_check_failure_delay_cap: Duration::from_secs(30),
+            ..PeerRuntimeSupervisorTimings::default()
+        };
+        let sampler: SelfCheckDelaySampler = Arc::new(|mean| mean);
+        let mut cadence =
+            SelfCheckCadenceState::new(Timestamp::new(900, 0).unwrap(), timings, &sampler);
+        assert_eq!(cadence.current_mean_delay, Duration::from_secs(10));
+        assert_eq!(cadence.next_check_at, Timestamp::new(910, 0).unwrap());
+        assert_eq!(cadence.consecutive_failures, 0);
+
+        let first_delay =
+            cadence.record_result(false, Timestamp::new(910, 0).unwrap(), timings, &sampler);
+        assert_eq!(first_delay, Duration::from_secs(20));
+        assert_eq!(cadence.current_mean_delay, Duration::from_secs(20));
+        assert_eq!(cadence.next_check_at, Timestamp::new(930, 0).unwrap());
+        assert_eq!(cadence.consecutive_failures, 1);
+
+        let second_delay =
+            cadence.record_result(false, Timestamp::new(930, 0).unwrap(), timings, &sampler);
+        assert_eq!(second_delay, Duration::from_secs(30));
+        assert_eq!(cadence.current_mean_delay, Duration::from_secs(30));
+        assert_eq!(cadence.next_check_at, Timestamp::new(960, 0).unwrap());
+        assert_eq!(cadence.consecutive_failures, 2);
+
+        let third_delay =
+            cadence.record_result(false, Timestamp::new(960, 0).unwrap(), timings, &sampler);
+        assert_eq!(third_delay, Duration::from_secs(30));
+        assert_eq!(cadence.current_mean_delay, Duration::from_secs(30));
+        assert_eq!(cadence.next_check_at, Timestamp::new(990, 0).unwrap());
+        assert_eq!(cadence.consecutive_failures, 3);
+    }
+
+    #[test]
+    fn self_check_cadence_success_resets_delay_mean() {
+        let timings = PeerRuntimeSupervisorTimings {
+            self_check_initial_delay_mean: Duration::from_secs(5),
+            self_check_healthy_delay_mean: Duration::from_secs(11),
+            self_check_failure_delay_cap: Duration::from_secs(30),
+            ..PeerRuntimeSupervisorTimings::default()
+        };
+        let sampler: SelfCheckDelaySampler = Arc::new(|mean| mean);
+        let mut cadence =
+            SelfCheckCadenceState::new(Timestamp::new(1_100, 0).unwrap(), timings, &sampler);
+
+        let failure_delay =
+            cadence.record_result(false, Timestamp::new(1_105, 0).unwrap(), timings, &sampler);
+        assert_eq!(failure_delay, Duration::from_secs(10));
+        assert_eq!(cadence.current_mean_delay, Duration::from_secs(10));
+        assert_eq!(cadence.consecutive_failures, 1);
+
+        let success_delay =
+            cadence.record_result(true, Timestamp::new(1_115, 0).unwrap(), timings, &sampler);
+        assert_eq!(success_delay, Duration::from_secs(11));
+        assert_eq!(cadence.current_mean_delay, Duration::from_secs(11));
+        assert_eq!(cadence.next_check_at, Timestamp::new(1_126, 0).unwrap());
+        assert_eq!(cadence.consecutive_failures, 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3942,20 +4000,30 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn self_check_initial_delay_and_interval_use_test_clock() -> Result<()> {
         let temp_dir = TempDir::new()?;
+        let initial_mean = Duration::from_secs(30);
         let initial_delay = Duration::from_secs(11);
         let interval = Duration::from_secs(17);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         let service = test_service_with_test_clock_and_self_check_delay_sampler(
             &temp_dir,
-            Arc::new(NoopPeerRuntimeFactory),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
             MaintenanceConfig::with_interval(Duration::from_secs(60)).with_supervisor_timings(
                 PeerRuntimeSupervisorTimings {
-                    self_check_initial_delay_mean: Duration::from_secs(30),
-                    self_check_interval: interval,
+                    self_check_initial_delay_mean: initial_mean,
+                    self_check_healthy_delay_mean: interval,
                     ..PeerRuntimeSupervisorTimings::default()
                 },
             ),
             Timestamp::new(700, 0).unwrap(),
-            Arc::new(move |_| initial_delay),
+            Arc::new(move |mean| {
+                if mean == initial_mean {
+                    initial_delay
+                } else {
+                    mean
+                }
+            }),
         );
         init_and_unlock_service(&service, "self-check-clock").await?;
 
@@ -3986,7 +4054,7 @@ mod tests {
 
         let mut stream = service
             .timer_intercept(tonic::Request::new(clirpc::TimerInterceptRequest {
-                label: TIMER_LABEL_SELF_CHECK_INTERVAL.to_string(),
+                label: TIMER_LABEL_SELF_CHECK_DELAY.to_string(),
             }))
             .await?
             .into_inner();
@@ -4629,7 +4697,8 @@ mod tests {
             Arc::new(MockPeerRuntimeFactory {
                 connector: connector.clone(),
             }),
-            MaintenanceConfig::with_interval(Duration::from_millis(50)),
+            MaintenanceConfig::with_interval(Duration::from_millis(50))
+                .with_supervisor_timings(fast_supervisor_timings()),
         );
         init_and_unlock_service(&service, "self-check-healthy").await?;
 
@@ -4659,7 +4728,8 @@ mod tests {
                 connector,
                 delay: Duration::from_secs(1),
             }),
-            MaintenanceConfig::with_interval(Duration::from_secs(3600)),
+            MaintenanceConfig::with_interval(Duration::from_secs(3600))
+                .with_supervisor_timings(fast_supervisor_timings()),
         );
 
         init_and_unlock_service(&service, "retry-self-check").await?;
@@ -4686,7 +4756,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn noop_runtime_self_check_becomes_unhealthy() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        let service = test_service(&temp_dir);
+        let service = DaemonService::with_maintenance_config(
+            temp_dir.path().to_path_buf(),
+            Arc::new(NoopPeerRuntimeFactory),
+            MaintenanceConfig::with_interval(Duration::from_secs(60))
+                .with_supervisor_timings(fast_supervisor_timings()),
+        );
         init_and_unlock_service(&service, "self-check-unhealthy").await?;
 
         wait_for_async(Duration::from_secs(2), || {
@@ -4731,12 +4806,46 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn unhealthy_self_check_suspends_peer_score_observation_window() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        let service = test_service_with_test_clock(&temp_dir, Timestamp::new(8_888, 0).unwrap());
+        let initial_delay = Duration::from_secs(5);
+        let service = test_service_with_test_clock_and_self_check_delay_sampler(
+            &temp_dir,
+            Arc::new(NoopPeerRuntimeFactory),
+            MaintenanceConfig::with_interval(Duration::from_secs(60)).with_supervisor_timings(
+                PeerRuntimeSupervisorTimings {
+                    self_check_initial_delay_mean: initial_delay,
+                    ..fast_supervisor_timings()
+                },
+            ),
+            Timestamp::new(8_888, 0).unwrap(),
+            Arc::new(move |_| initial_delay),
+        );
 
         init_and_unlock_service(&service, "observation-suspend").await?;
-        wait_for_async(Duration::from_secs(2), || {
-            let service = &service;
-            async move { Ok(peer_score_observation_started_at(service).await?.is_none()) }
+        wait_for_async(Duration::from_secs(2), || async {
+            let state = service
+                .state(tonic::Request::new(clirpc::StateRequest {}))
+                .await?
+                .into_inner();
+            Ok(state.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32)
+        })
+        .await?;
+        service
+            .advance_test_time(tonic::Request::new(clirpc::AdvanceTestTimeRequest {
+                seconds: initial_delay.as_secs(),
+                nanoseconds: initial_delay.subsec_nanos(),
+            }))
+            .await?;
+        tokio::task::yield_now().await;
+        wait_for_async(Duration::from_secs(2), || async {
+            let state = service
+                .state(tonic::Request::new(clirpc::StateRequest {}))
+                .await?
+                .into_inner();
+            Ok(state.self_peer_check_state == clirpc::SelfPeerCheckState::Unhealthy as i32)
+        })
+        .await?;
+        wait_for_async(Duration::from_secs(2), || async {
+            Ok(peer_score_observation_started_at(&service).await?.is_none())
         })
         .await?;
 
@@ -4964,29 +5073,69 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn peer_runtime_restarts_after_repeated_self_check_failures() -> Result<()> {
+    async fn repeated_self_check_failures_do_not_restart_peer_runtime() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        let connector = Arc::new(netmock::MockPeerConnector::new());
         let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let service = DaemonService::with_maintenance_config(
-            temp_dir.path().to_path_buf(),
-            Arc::new(SelfCheckRestartRuntimeFactory {
-                connector,
+        let service = test_service_with_test_clock_and_self_check_delay_sampler(
+            &temp_dir,
+            Arc::new(TimeoutingSelfCheckRuntimeFactory {
+                connector: Arc::new(TimeoutPeerConnector),
                 starts: starts.clone(),
             }),
-            MaintenanceConfig::with_interval(Duration::from_secs(3600))
-                .with_supervisor_timings(fast_supervisor_timings()),
+            MaintenanceConfig::with_interval(Duration::from_secs(3600)).with_supervisor_timings(
+                PeerRuntimeSupervisorTimings {
+                    self_check_initial_delay_mean: Duration::from_secs(5),
+                    self_check_healthy_delay_mean: Duration::from_secs(5),
+                    self_check_failure_delay_cap: Duration::from_secs(20),
+                    ..fast_supervisor_timings()
+                },
+            ),
+            Timestamp::new(9_900, 0).unwrap(),
+            Arc::new(|mean| mean),
         );
-        init_service(&service, "self-check-restart").await?;
+        init_and_unlock_service(&service, "self-check-no-restart").await?;
 
-        service
-            .unlock(tonic::Request::new(clirpc::UnlockRequest {
-                main_password: "self-check-restart".to_string(),
-            }))
-            .await?;
+        wait_for_async(Duration::from_secs(2), || async {
+            let state = service
+                .state(tonic::Request::new(clirpc::StateRequest {}))
+                .await?
+                .into_inner();
+            Ok(state.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32)
+        })
+        .await?;
 
-        wait_for_public_peer_runtime(&service, Duration::from_secs(5)).await?;
-        assert!(starts.load(Ordering::SeqCst) >= 2);
+        for seconds in [5_u64, 10_u64, 20_u64] {
+            service
+                .advance_test_time(tonic::Request::new(clirpc::AdvanceTestTimeRequest {
+                    seconds,
+                    nanoseconds: 0,
+                }))
+                .await?;
+            tokio::task::yield_now().await;
+        }
+
+        wait_for_async(Duration::from_secs(2), || async {
+            let state = service
+                .state(tonic::Request::new(clirpc::StateRequest {}))
+                .await?
+                .into_inner();
+            Ok(state.self_peer_check_state == clirpc::SelfPeerCheckState::Unhealthy as i32)
+        })
+        .await?;
+
+        let state = service
+            .state(tonic::Request::new(clirpc::StateRequest {}))
+            .await?
+            .into_inner();
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.peer_runtime_state,
+            clirpc::PeerRuntimeState::Ready as i32
+        );
+        assert_eq!(
+            state.self_peer_check_state,
+            clirpc::SelfPeerCheckState::Unhealthy as i32
+        );
 
         service.shutdown().await?;
         Ok(())
