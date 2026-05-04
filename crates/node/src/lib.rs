@@ -61,6 +61,9 @@ pub struct Node {
     clock: Arc<dyn Clock>,
     /// started_at tracks daemon uptime for local health checks.
     started_at: Mutex<Option<Timestamp>>,
+    /// peer_score_observation_started_at marks when local peer observation
+    /// most recently became valid for score accounting.
+    peer_score_observation_started_at: Mutex<Option<Timestamp>>,
     /// store holds the encrypted local content store when configured.
     store: Option<Arc<Mutex<Store>>>,
     /// peer_metadata_batcher coalesces low-value peer metadata writes.
@@ -1540,9 +1543,27 @@ impl Node {
         *self.started_at.lock().unwrap() = Some(self.clock.now());
     }
 
+    /// Start a new local observation window for peer score accounting.
+    pub fn start_peer_score_observation_window(&self) {
+        *self.peer_score_observation_started_at.lock().unwrap() = Some(self.clock.now());
+    }
+
+    /// Suspend local observation for peer score accounting.
+    pub fn suspend_peer_score_observation_window(&self) {
+        *self.peer_score_observation_started_at.lock().unwrap() = None;
+    }
+
     /// Return the deterministic Ed25519 keypair.
     pub fn ed25519_keypair(&self) -> &ed25519_dalek::Keypair {
         &self.ed25519_keypair
+    }
+
+    /// Return the current peer-score observation-window start in seconds.
+    pub fn peer_score_observation_started_at_secs(&self) -> Option<i64> {
+        self.peer_score_observation_started_at
+            .lock()
+            .unwrap()
+            .map(|timestamp| i64::try_from(timestamp.secs).unwrap_or(i64::MAX))
     }
 
     /// Create a node identity from already-derived master material in tests.
@@ -1586,8 +1607,9 @@ impl Node {
         let node = Self {
             ed25519_keypair: keypair,
             onion_address,
-            clock,
+            clock: clock.clone(),
             started_at: Mutex::new(None),
+            peer_score_observation_started_at: Mutex::new(Some(clock.now())),
             store,
             peer_metadata_batcher,
             known_peers: Mutex::new(BTreeSet::new()),

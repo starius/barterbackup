@@ -1214,6 +1214,11 @@ impl DaemonService {
             )?,
         });
         node.mark_started();
+        node.start_peer_score_observation_window();
+        info!(
+            onion = %node.address(),
+            "peer score observation window started at unlock"
+        );
 
         // Start peer bootstrap in the background so unlock returns before
         // Arti finishes bootstrapping and publishing the onion service.
@@ -2400,14 +2405,32 @@ fn spawn_self_check_runtime(
     let shutdown_signal = shutdown.clone();
     let task = tokio::spawn(async move {
         let mut consecutive_unhealthy = 0u32;
+        let mut observation_active = true;
 
         let mut handle_outcome = |outcome: SelfCheckHealth| match outcome {
             SelfCheckHealth::Healthy => {
                 consecutive_unhealthy = 0;
                 *observed_healthy_once.lock().unwrap() = true;
+                if !observation_active {
+                    node.start_peer_score_observation_window();
+                    observation_active = true;
+                    info!(
+                        onion = %node.address(),
+                        "peer score observation window resumed after self-check recovery"
+                    );
+                }
                 false
             }
             SelfCheckHealth::Unhealthy(error) => {
+                if observation_active {
+                    node.suspend_peer_score_observation_window();
+                    observation_active = false;
+                    info!(
+                        onion = %node.address(),
+                        self_check_error = %error,
+                        "peer score observation window suspended after unhealthy self-check"
+                    );
+                }
                 let observed_healthy_once = *observed_healthy_once.lock().unwrap();
                 if !self_check_failure_counts_for_restart(observed_healthy_once, &error) {
                     return false;
@@ -3163,6 +3186,13 @@ mod tests {
             })
             .map(|peer| peer.score_seconds)
             .with_context(|| format!("missing peer {onion}"))
+    }
+
+    /// Return the daemon node's current peer-score observation-window start.
+    async fn peer_score_observation_started_at(service: &DaemonService) -> Result<Option<i64>> {
+        Ok(unlocked_node(service)
+            .await
+            .peer_score_observation_started_at_secs())
     }
 
     /// Wait until the public peer runtime is both bootstrapped and reachable.
@@ -4570,6 +4600,75 @@ mod tests {
         assert!(health
             .self_peer_check_error
             .contains("peer connector is not configured"));
+
+        service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unlock_starts_peer_score_observation_window() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let service = test_service_with_test_clock(&temp_dir, Timestamp::new(7_777, 0).unwrap());
+
+        init_and_unlock_service(&service, "observation-start").await?;
+        assert_eq!(
+            peer_score_observation_started_at(&service).await?,
+            Some(7_777)
+        );
+
+        service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unhealthy_self_check_suspends_peer_score_observation_window() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let service = test_service_with_test_clock(&temp_dir, Timestamp::new(8_888, 0).unwrap());
+
+        init_and_unlock_service(&service, "observation-suspend").await?;
+        wait_for_async(Duration::from_secs(2), || {
+            let service = &service;
+            async move { Ok(peer_score_observation_started_at(service).await?.is_none()) }
+        })
+        .await?;
+
+        service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recovered_self_check_resumes_peer_score_observation_window() -> Result<()> {
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        let temp_dir = TempDir::new()?;
+        let service = DaemonService::with_maintenance_config(
+            temp_dir.path().to_path_buf(),
+            Arc::new(DelayedSelfCheckRuntimeFactory {
+                connector,
+                delay: Duration::from_millis(250),
+            }),
+            MaintenanceConfig::with_interval(Duration::from_millis(50))
+                .with_supervisor_timings(fast_supervisor_timings()),
+        );
+
+        init_and_unlock_service(&service, "observation-resume").await?;
+        wait_for_async(Duration::from_secs(2), || {
+            let service = &service;
+            async move {
+                let health = service
+                    .state(tonic::Request::new(clirpc::StateRequest {}))
+                    .await?
+                    .into_inner();
+                Ok(health.self_peer_check_state == clirpc::SelfPeerCheckState::Unhealthy as i32)
+            }
+        })
+        .await?;
+        assert_eq!(peer_score_observation_started_at(&service).await?, None);
+
+        wait_for_async(Duration::from_secs(5), || {
+            let service = &service;
+            async move { Ok(peer_score_observation_started_at(service).await?.is_some()) }
+        })
+        .await?;
 
         service.shutdown().await?;
         Ok(())
