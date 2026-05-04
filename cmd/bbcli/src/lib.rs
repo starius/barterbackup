@@ -852,7 +852,7 @@ fn local_utc_offset() -> UtcOffset {
 /// Render one duration in seconds using compact human-readable units.
 fn format_duration_human(total_seconds: i64) -> String {
     if total_seconds < 0 {
-        return format!("{total_seconds}s");
+        return format!("-{}", format_duration_human(total_seconds.saturating_abs()));
     }
 
     let mut remaining = total_seconds;
@@ -2942,6 +2942,8 @@ mod tests {
         assert_eq!(format_duration_human(65), "1m5s");
         assert_eq!(format_duration_human(3_661), "1h1m1s");
         assert_eq!(format_duration_human(90_061), "1d1h1m1s");
+        assert_eq!(format_duration_human(-65), "-1m5s");
+        assert_eq!(format_duration_human(-3_661), "-1h1m1s");
     }
 
     #[test]
@@ -3781,6 +3783,7 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line.contains("last_error_class=timeout")));
+        assert!(lines.iter().any(|line| line.contains("score=-5s")));
         assert!(lines
             .iter()
             .any(|line| line.contains("consecutive_failures=2")));
