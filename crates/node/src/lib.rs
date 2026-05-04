@@ -3522,11 +3522,7 @@ impl Node {
         }
         let (score_seconds, measured_at) = self.peer_score_state(peer_public_key)?;
         let now_secs = i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX);
-        let elapsed = if measured_at > 0 {
-            now_secs.saturating_sub(measured_at)
-        } else {
-            0
-        };
+        let elapsed = self.observed_peer_score_elapsed_secs(measured_at, now_secs);
         let new_score = if passed {
             score_seconds.saturating_add(elapsed)
         } else {
@@ -3559,6 +3555,18 @@ impl Node {
             })?;
         }
         Ok(Some(new_score))
+    }
+
+    /// Return the elapsed score-accounting interval visible to this node.
+    fn observed_peer_score_elapsed_secs(&self, measured_at: i64, now_secs: i64) -> i64 {
+        if measured_at <= 0 {
+            return 0;
+        }
+        let Some(observation_started_at) = self.peer_score_observation_started_at_secs() else {
+            return 0;
+        };
+        let effective_start = measured_at.max(observation_started_at);
+        now_secs.saturating_sub(effective_start)
     }
 
     /// Choose a deterministic sample section inside a content blob.
@@ -9054,6 +9062,76 @@ mod tests {
         assert_eq!(peer.last_live_at, 1_000);
         assert_eq!(peer.score_seconds, 110);
         assert!(peer.pins_us);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_score_update_clamps_to_startup_observation_window() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let clock = Arc::new(ManualClock::new(Timestamp::new(1_000, 0).unwrap()));
+        let node = Node::with_local_storage_and_clock(
+            "startup-observation-owner",
+            filesystem,
+            clock.clone(),
+        )?;
+        let peer = Node::new("startup-observation-peer")?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer.address())?;
+
+        node.add_known_peer(peer.address())?;
+        node.with_store(|store| store.set_peer_score(peer_public_key.as_bytes(), 10, 100))?;
+
+        clock.advance(Duration::from_secs(10));
+        assert_eq!(node.update_peer_score(&peer_public_key, true)?, 20);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_score_update_clamps_to_resumed_observation_window() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let node = Node::with_local_storage_and_clock(
+            "resumed-observation-owner",
+            filesystem,
+            clock.clone(),
+        )?;
+        let peer = Node::new("resumed-observation-peer")?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer.address())?;
+
+        node.add_known_peer(peer.address())?;
+        node.with_store(|store| store.set_peer_score(peer_public_key.as_bytes(), 10, 50))?;
+
+        clock.advance(Duration::from_secs(100));
+        node.suspend_peer_score_observation_window();
+        clock.advance(Duration::from_secs(800));
+        node.start_peer_score_observation_window();
+        clock.advance(Duration::from_secs(15));
+
+        assert_eq!(node.update_peer_score(&peer_public_key, true)?, 25);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_score_update_ignores_elapsed_time_while_observation_suspended(
+    ) -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let node = Node::with_local_storage_and_clock(
+            "suspended-observation-owner",
+            filesystem,
+            clock.clone(),
+        )?;
+        let peer = Node::new("suspended-observation-peer")?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer.address())?;
+
+        node.add_known_peer(peer.address())?;
+        node.with_store(|store| store.set_peer_score(peer_public_key.as_bytes(), 10, 50))?;
+
+        clock.advance(Duration::from_secs(100));
+        node.suspend_peer_score_observation_window();
+        clock.advance(Duration::from_secs(800));
+
+        assert_eq!(node.update_peer_score(&peer_public_key, false)?, 10);
+        assert_eq!(node.peer_score_state(&peer_public_key)?.0, 10);
         Ok(())
     }
 
