@@ -2078,8 +2078,10 @@ impl Node {
             Ok(()) => self.finish_live_recovery_probe(peer_onion, true),
             Err(error) => {
                 self.finish_live_recovery_probe(peer_onion, false);
+                let new_score = self.penalize_tracked_peer_probe_failure(peer_onion);
                 warn!(
                     peer = %peer_onion,
+                    new_score_seconds = new_score.unwrap_or_default(),
                     %error,
                     "live peer-contact recovery probe failed"
                 );
@@ -2124,8 +2126,10 @@ impl Node {
                 Ok(()) => node.finish_live_recovery_probe(&peer_onion, true),
                 Err(error) => {
                     node.finish_live_recovery_probe(&peer_onion, false);
+                    let new_score = node.penalize_tracked_peer_probe_failure(&peer_onion);
                     warn!(
                         peer = %peer_onion,
+                        new_score_seconds = new_score.unwrap_or_default(),
                         %error,
                         "background live peer-contact recovery probe failed"
                     );
@@ -2133,6 +2137,12 @@ impl Node {
             }
         });
         Ok(())
+    }
+
+    /// Decrease one tracked peer's score after a failed recovery probe.
+    fn penalize_tracked_peer_probe_failure(&self, peer_onion: &str) -> Option<i64> {
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_onion).ok()?;
+        self.update_peer_score(&peer_public_key, false).ok()
     }
 
     /// Return one cached outbound peer client when it is still inside the idle TTL.
@@ -2868,27 +2878,42 @@ impl Node {
     ) -> Result<bbrpc::GetContentRevisionResponse, Status> {
         let policy =
             transport::PeerRetryPolicy::for_operation(transport::PeerOperation::RecoveryProbe);
-        self.retry_peer_operation(peer_onion, policy, || async move {
-            let mut client = self
-                .probe_peer_client_with_timeout(peer_onion, policy.connect_timeout)
-                .await?;
-            let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
-                .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
-            let revision = self
-                .peer_rpc_with_timeout(
-                    peer_onion,
-                    "get content revision",
-                    policy.rpc_timeout,
-                    client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
-                )
-                .await?;
-            self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned)?;
-            self.record_requester_revision_observation(&peer_public_key, &revision)?;
-            self.maybe_exchange_peers_with_client(peer_onion, &mut client)
-                .await?;
-            Ok(revision)
-        })
-        .await
+        match self
+            .retry_peer_operation(peer_onion, policy, || async move {
+                let mut client = self
+                    .probe_peer_client_with_timeout(peer_onion, policy.connect_timeout)
+                    .await?;
+                let peer_public_key = keys::public_key_from_onion_hostname(peer_onion)
+                    .map_err(|_| Status::invalid_argument("peer onion is invalid"))?;
+                let revision = self
+                    .peer_rpc_with_timeout(
+                        peer_onion,
+                        "get content revision",
+                        policy.rpc_timeout,
+                        client.get_content_revision(bbrpc::GetContentRevisionRequest {}),
+                    )
+                    .await?;
+                self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned)?;
+                self.record_requester_revision_observation(&peer_public_key, &revision)?;
+                self.maybe_exchange_peers_with_client(peer_onion, &mut client)
+                    .await?;
+                Ok(revision)
+            })
+            .await
+        {
+            Ok(revision) => Ok(revision),
+            Err(error) if transport::is_retryable_peer_status(&error) => {
+                let new_score = self.penalize_tracked_peer_probe_failure(peer_onion);
+                warn!(
+                    peer = %peer_onion,
+                    new_score_seconds = new_score.unwrap_or_default(),
+                    %error,
+                    "background recovery probe exhausted retries"
+                );
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Download an encrypted blob from a peer and verify the advertised hash.
@@ -9199,6 +9224,86 @@ mod tests {
         let peer = peer_entry(node.as_ref(), peer_identity.address())?
             .context("peer was not tracked after connect")?;
         assert!(peer.last_live_at > 0);
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn live_recovery_probe_penalizes_tracked_peer_on_revision_failure() -> anyhow::Result<()>
+    {
+        let clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage_and_clock(
+            "live-probe-score-owner",
+            filesystem,
+            clock.clone(),
+        )?);
+        node.initialize_lineage((1, 0), false)?;
+        let peer_identity = Node::new("live-probe-score-peer")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        node.set_peer_connector(connector.clone());
+        node.add_known_peer(peer_identity.address())?;
+
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_identity.address())?;
+        node.with_store(|store| {
+            store.set_peer_score(
+                peer_public_key.as_bytes(),
+                0,
+                i64::try_from(clock.now().secs).unwrap_or(i64::MAX),
+            )
+        })?;
+
+        let (endpoint, server) =
+            spawn_plain_peer_server(RetryableRevisionFailurePeerService).await?;
+        connector.register_peer(peer_identity.address(), &endpoint);
+
+        clock.advance(Duration::from_secs(1_200));
+        let _client = node.connect_peer_client(peer_identity.address()).await?;
+        assert_eq!(
+            peer_score_seconds(node.as_ref(), peer_identity.address())?,
+            -1_200
+        );
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recovery_pass_penalizes_tracked_peer_on_revision_failure() -> anyhow::Result<()> {
+        let clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage_and_clock(
+            "recovery-pass-score-owner",
+            filesystem,
+            clock.clone(),
+        )?);
+        node.initialize_lineage((1, 0), false)?;
+        let peer_identity = Node::new("recovery-pass-score-peer")?;
+        let connector = Arc::new(PlainPeerConnector::new());
+        node.set_peer_connector(connector.clone());
+        node.add_known_peer(peer_identity.address())?;
+
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_identity.address())?;
+        node.with_store(|store| {
+            store.set_peer_score(
+                peer_public_key.as_bytes(),
+                0,
+                i64::try_from(clock.now().secs).unwrap_or(i64::MAX),
+            )
+        })?;
+
+        let (endpoint, server) =
+            spawn_plain_peer_server(RetryableRevisionFailurePeerService).await?;
+        connector.register_peer(peer_identity.address(), &endpoint);
+
+        clock.advance(Duration::from_secs(1_800));
+        let summary = node.run_recovery_pass().await?;
+        assert_eq!(summary.applied_versions, 0);
+        assert_eq!(
+            peer_score_seconds(node.as_ref(), peer_identity.address())?,
+            -1_800
+        );
 
         server.abort();
         Ok(())
