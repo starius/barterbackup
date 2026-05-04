@@ -3943,6 +3943,7 @@ mod tests {
         let remote_server =
             spawn_registered_mock_peer_server(remote_node.clone(), connector.clone()).await?;
         init_and_unlock_service(&service, "peer-metadata-delay").await?;
+        wait_for_public_peer_runtime(&service, Duration::from_secs(5)).await?;
 
         let mut stream = service
             .timer_intercept(tonic::Request::new(clirpc::TimerInterceptRequest {
