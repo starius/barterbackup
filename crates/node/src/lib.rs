@@ -6023,9 +6023,6 @@ fn map_storage_error(error: StorageError) -> Status {
     match error {
         StorageError::InvalidFileName => Status::invalid_argument("file name is required"),
         StorageError::FileNotFound => Status::not_found("file not found"),
-        StorageError::CannotDeleteLastFile => {
-            Status::failed_precondition("cannot delete the last file")
-        }
         StorageError::LocalContentTooLarge => {
             Status::resource_exhausted("current shared content exceeds the fixed 4 MiB limit")
         }
@@ -7540,13 +7537,17 @@ mod tests {
             .unwrap();
         assert_eq!(fetched.data, b"alpha-body".to_vec());
 
-        let delete_last = client
+        client
             .delete_file(clirpc::DeleteFileRequest {
                 name: "alpha.txt".to_string(),
             })
-            .await
-            .unwrap_err();
-        assert_eq!(delete_last.code(), tonic::Code::FailedPrecondition);
+            .await?;
+
+        let listed = client
+            .list_files(clirpc::ListFilesRequest {})
+            .await?
+            .into_inner();
+        assert!(listed.file.is_empty());
 
         client
             .set_file(clirpc::SetFileRequest {
@@ -7555,11 +7556,6 @@ mod tests {
                     data: b"beta-body".to_vec(),
                     ..Default::default()
                 }),
-            })
-            .await?;
-        client
-            .delete_file(clirpc::DeleteFileRequest {
-                name: "alpha.txt".to_string(),
             })
             .await?;
 

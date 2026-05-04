@@ -50,10 +50,6 @@ pub enum StorageError {
     #[error("file not found")]
     FileNotFound,
 
-    /// The last remaining file cannot be deleted.
-    #[error("cannot delete the last remaining file")]
-    CannotDeleteLastFile,
-
     /// The current on-disk state needs operator intervention.
     #[error("recovery required: {0}")]
     RecoveryRequired(String),
@@ -805,13 +801,10 @@ impl Store {
         }
     }
 
-    /// Delete a plaintext file while preserving at least one file.
+    /// Delete a plaintext file.
     pub fn delete_file(&mut self, name: &str) -> Result<(), StorageError> {
         if !self.files.contains_key(name) {
             return Err(StorageError::FileNotFound);
-        }
-        if self.files.len() == 1 {
-            return Err(StorageError::CannotDeleteLastFile);
         }
 
         let next_files = self
@@ -2358,15 +2351,16 @@ mod tests {
     }
 
     #[test]
-    fn deleting_last_file_is_rejected() {
+    fn deleting_last_file_creates_empty_current_revision() {
         let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
         let mut store = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
         store.set_file("alpha.txt", b"secret".to_vec()).unwrap();
 
-        assert!(matches!(
-            store.delete_file("alpha.txt"),
-            Err(StorageError::CannotDeleteLastFile)
-        ));
+        store.delete_file("alpha.txt").unwrap();
+
+        assert!(store.list_files().is_empty());
+        let current = store.current_content().expect("current content");
+        assert!(current.blob_len > 0);
     }
 
     #[test]
