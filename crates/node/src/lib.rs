@@ -1213,6 +1213,26 @@ fn mean_score_seconds(scores: &[i64]) -> i64 {
     mean.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
 }
 
+/// Sum deduplicated cached mirrored-peer bytes from persisted sidecar metadata.
+fn mirrored_total_size_bytes_from_tracked_peers(tracked_peers: &[storedpb::Peer]) -> i64 {
+    let mut lengths = BTreeMap::<Vec<u8>, i64>::new();
+    for peer in tracked_peers {
+        let Some(cached_content) = peer_latest_cached_content(peer) else {
+            continue;
+        };
+        if cached_content.content_length <= 0 {
+            continue;
+        }
+        lengths
+            .entry(cached_content.content_id.clone())
+            .or_insert(cached_content.content_length);
+    }
+
+    lengths
+        .into_values()
+        .fold(0i64, |total, length| total.saturating_add(length.max(0)))
+}
+
 /// Return the group priority used when listing peers.
 fn peer_inventory_group_rank(entry: &PeerInventoryEntry) -> u8 {
     if entry.has_storage {
@@ -3964,12 +3984,8 @@ impl Node {
             return Ok(None);
         };
         let inventory = self.peer_inventory()?;
-        let mirrored_total_size_bytes = self
-            .mirrored_blob_usage()?
-            .into_iter()
-            .fold(0i64, |total, usage| {
-                total.saturating_add(usage.blob_len.max(0))
-            });
+        let mirrored_total_size_bytes =
+            mirrored_total_size_bytes_from_tracked_peers(&snapshot.tracked_peers);
         let total_known = i64::try_from(inventory.len()).unwrap_or(i64::MAX);
         let connected = i64::try_from(
             inventory
@@ -7390,6 +7406,68 @@ mod tests {
                 never: false,
             }]
         );
+
+        owner_server.abort();
+        peer_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_state_uses_sidecar_lengths_without_reading_mirrored_blobs() -> anyhow::Result<()>
+    {
+        let counting = Arc::new(ReadCountingFilesystem {
+            inner: Arc::new(storage::MemoryFilesystem::new()),
+            reads: AtomicUsize::new(0),
+        });
+        let owner_filesystem: Arc<dyn Filesystem> = counting.clone();
+        let owner = Arc::new(Node::with_local_storage(
+            "state-sidecar-owner",
+            owner_filesystem,
+        )?);
+        let peer_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer = Arc::new(Node::with_local_storage(
+            "state-sidecar-peer",
+            peer_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        owner.set_peer_connector(connector.clone());
+        peer.set_peer_connector(connector.clone());
+        owner.add_known_peer(peer.address())?;
+        peer.add_known_peer(owner.address())?;
+
+        CliService::new(peer.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "beta.txt".to_string(),
+                    data: b"peer-data".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+
+        let owner_server = spawn_registered_p2p_server(owner.clone(), connector.as_ref()).await?;
+        let peer_server = spawn_registered_p2p_server(peer.clone(), connector.as_ref()).await?;
+        let mut peer_to_owner =
+            connect_p2p_client(peer.clone(), owner.clone(), connector.as_ref()).await?;
+        let peer_content = peer.responder_content()?.unwrap();
+        peer_to_owner
+            .set_content_revision(bbrpc::SetContentRevisionRequest {
+                previous_requester_content: None,
+                requester_content: Some(peer_content.clone()),
+            })
+            .await?;
+
+        counting.reset_reads();
+        let summary = owner
+            .local_state_summary()?
+            .ok_or_else(|| anyhow::anyhow!("missing local state summary"))?;
+        let peers = summary
+            .peers
+            .ok_or_else(|| anyhow::anyhow!("missing local peer summary"))?;
+
+        assert_eq!(peers.mirrored_peers, 1);
+        assert_eq!(peers.mirrored_total_size_bytes, peer_content.content_length);
+        assert_eq!(counting.reads(), 0);
 
         owner_server.abort();
         peer_server.abort();
