@@ -737,7 +737,10 @@ fn format_state_response_at_offset(
             lines.push(format!(
                 "files_last_updated_at: {}",
                 if content.file_count > 0 {
-                    format_timestamp_or_unknown(content.last_updated_at.as_ref())
+                    format_timestamp_local_or_unknown(
+                        content.last_updated_at.as_ref(),
+                        local_offset,
+                    )
                 } else {
                     "never".to_string()
                 }
@@ -1030,13 +1033,6 @@ fn format_offline_durability_lines(
     lines
 }
 
-/// Render one protobuf timestamp or `unknown` for operator-facing state output.
-fn format_timestamp_or_unknown(timestamp: Option<&ProtoTimestamp>) -> String {
-    timestamp
-        .map(|timestamp| format!("{}.{:09}", timestamp.seconds, timestamp.nanos.max(0)))
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
 /// Render one protobuf timestamp in local time without subseconds, or `unknown`.
 fn format_timestamp_local_or_unknown(
     timestamp: Option<&ProtoTimestamp>,
@@ -1045,6 +1041,15 @@ fn format_timestamp_local_or_unknown(
     timestamp
         .map(|timestamp| format_unix_datetime_local(timestamp.seconds, offset))
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Render one Unix timestamp in local time or one fallback label when unset.
+fn format_unix_timestamp_local_or(seconds: i64, offset: UtcOffset, fallback: &str) -> String {
+    if seconds > 0 {
+        format_unix_datetime_local(seconds, offset)
+    } else {
+        fallback.to_string()
+    }
 }
 
 /// Build one protobuf timestamp from file metadata.
@@ -1363,7 +1368,10 @@ async fn stop(target: &LocalCliTarget) -> Result<()> {
 /// Print the stored file metadata.
 async fn list_files(target: &LocalCliTarget) -> Result<()> {
     let mut client = connect_client(target).await?;
-    for line in format_file_list(&list_file_info_with_client(&mut client).await?) {
+    for line in format_file_list(
+        &list_file_info_with_client(&mut client).await?,
+        local_utc_offset(),
+    ) {
         println!("{line}");
     }
     Ok(())
@@ -1492,7 +1500,11 @@ async fn unpin_peer(target: &LocalCliTarget, onion_service_id: &str) -> Result<(
 /// Print the current configured peers.
 async fn peers(target: &LocalCliTarget, filter: PeerListFilter) -> Result<()> {
     let mut client = connect_client(target).await?;
-    for line in format_peers_response(&peers_response_with_client(&mut client).await?, &filter) {
+    for line in format_peers_response(
+        &peers_response_with_client(&mut client).await?,
+        &filter,
+        local_utc_offset(),
+    ) {
         println!("{line}");
     }
     Ok(())
@@ -1537,14 +1549,18 @@ async fn get_storage_config(target: &LocalCliTarget, filter: ConfigFieldFilter) 
 }
 
 /// Format one peer-inventory response for CLI output.
-fn format_peers_response(response: &PeersResponse, filter: &PeerListFilter) -> Vec<String> {
+fn format_peers_response(
+    response: &PeersResponse,
+    filter: &PeerListFilter,
+    local_offset: UtcOffset,
+) -> Vec<String> {
     let mut lines = Vec::new();
     let mut with_storage = Vec::new();
     let mut online = Vec::new();
     let mut offline = Vec::new();
 
     for peer in response.peers.iter().filter(|peer| filter.matches(peer)) {
-        let line = format_peer_info_line(peer);
+        let line = format_peer_info_line(peer, local_offset);
         if peer.has_storage {
             with_storage.push(line);
         } else if peer_info_status(peer) == PeerStatus::Offline {
@@ -1624,7 +1640,7 @@ fn peer_storage_protection_label(
 }
 
 /// Format one peer inventory entry for human CLI output.
-fn format_peer_info_line(peer: &PeerInfo) -> String {
+fn format_peer_info_line(peer: &PeerInfo, local_offset: UtcOffset) -> String {
     let onion_service_id = peer
         .peer
         .as_ref()
@@ -1635,11 +1651,9 @@ fn format_peer_info_line(peer: &PeerInfo) -> String {
         PeerStatus::Online => "online",
         PeerStatus::Offline | PeerStatus::Unknown => "offline",
     };
-    let last_live_at = if peer.last_live_at > 0 {
-        peer.last_live_at.to_string()
-    } else {
-        "never".to_string()
-    };
+    let last_live_at = format_unix_timestamp_local_or(peer.last_live_at, local_offset, "never");
+    let score_measured_at =
+        format_unix_timestamp_local_or(peer.score_measured_at, local_offset, "unknown");
     let storage_protection =
         protos::clirpc::PeerStorageProtection::try_from(peer.storage_protection)
             .unwrap_or(protos::clirpc::PeerStorageProtection::None);
@@ -1650,7 +1664,7 @@ fn format_peer_info_line(peer: &PeerInfo) -> String {
         peer.pinned_by_us,
         peer.pins_us,
         format_duration_human(peer.score_seconds),
-        peer.score_measured_at,
+        score_measured_at,
         peer.stored_content_bytes,
         peer.latest_known_content_length,
         peer.latest_cached_content_length,
@@ -1664,16 +1678,8 @@ fn format_peer_info_line(peer: &PeerInfo) -> String {
             " last_error_class={} consecutive_failures={} last_failure_at={} next_retry_at={} last_error_message={:?}",
             peer_failure_class_label(failure_class),
             peer.consecutive_failures,
-            if peer.last_failure_at > 0 {
-                peer.last_failure_at.to_string()
-            } else {
-                "never".to_string()
-            },
-            if peer.next_retry_at > 0 {
-                peer.next_retry_at.to_string()
-            } else {
-                "immediate".to_string()
-            },
+            format_unix_timestamp_local_or(peer.last_failure_at, local_offset, "never"),
+            format_unix_timestamp_local_or(peer.next_retry_at, local_offset, "immediate"),
             peer.last_error_message,
         ));
     }
@@ -1901,7 +1907,7 @@ fn format_peer_storage_response(response: &protos::clirpc::GetPeerStorageRespons
 }
 
 /// Format stored file metadata for CLI output.
-fn format_file_list(files: &[FileInfo]) -> Vec<String> {
+fn format_file_list(files: &[FileInfo], local_offset: UtcOffset) -> Vec<String> {
     files
         .iter()
         .map(|file| {
@@ -1909,7 +1915,7 @@ fn format_file_list(files: &[FileInfo]) -> Vec<String> {
                 "name={} size_bytes={} modified_at={}",
                 file.name,
                 file.size_bytes,
-                format_timestamp_or_unknown(file.modified_at.as_ref())
+                format_timestamp_local_or_unknown(file.modified_at.as_ref(), local_offset)
             )
         })
         .collect()
@@ -2890,7 +2896,7 @@ mod tests {
             .any(|line| line == "files_total_size_bytes: 99"));
         assert!(lines
             .iter()
-            .any(|line| line == "files_last_updated_at: 123.000000045"));
+            .any(|line| line == "files_last_updated_at: 1969-12-31 19:02:03 -05:00"));
         assert!(lines
             .iter()
             .any(|line| line == "has_pending_content_update: true"));
@@ -3574,15 +3580,18 @@ mod tests {
 
     #[test]
     fn format_file_list_includes_size_and_mtime() {
-        let lines = format_file_list(&[FileInfo {
-            name: "alpha.txt".to_string(),
-            size_bytes: 5,
-            modified_at: Some(proto_timestamp_from_parts(123, 45).unwrap()),
-        }]);
+        let lines = format_file_list(
+            &[FileInfo {
+                name: "alpha.txt".to_string(),
+                size_bytes: 5,
+                modified_at: Some(proto_timestamp_from_parts(123, 45).unwrap()),
+            }],
+            UtcOffset::from_hms(-5, 0, 0).unwrap(),
+        );
 
         assert_eq!(
             lines,
-            vec!["name=alpha.txt size_bytes=5 modified_at=123.000000045".to_string()]
+            vec!["name=alpha.txt size_bytes=5 modified_at=1969-12-31 19:02:03 -05:00".to_string()]
         );
     }
 
@@ -3700,7 +3709,11 @@ mod tests {
             ],
         };
 
-        let lines = format_peers_response(&response, &PeerListFilter::default());
+        let lines = format_peers_response(
+            &response,
+            &PeerListFilter::default(),
+            UtcOffset::from_hms(-5, 0, 0).unwrap(),
+        );
 
         assert_eq!(lines[0], "with_storage: 1");
         assert!(lines
@@ -3713,6 +3726,12 @@ mod tests {
             .any(|line| line.contains("storage_protection=pinned")));
         assert!(lines.iter().any(|line| line.contains("status=connected")));
         assert!(lines.iter().any(|line| line.contains("score=7s")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("score_measured_at=1969-12-31 19:00:11 -05:00")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("last_live_at=1969-12-31 19:00:23 -05:00")));
         assert!(lines.iter().any(|line| line == "online: 1"));
         assert!(lines.iter().any(|line| line.contains("peer=online.onion")));
         assert!(lines.iter().any(|line| line == "offline: 0"));
@@ -3775,6 +3794,7 @@ mod tests {
         let lines = format_peers_response(
             &response,
             &PeerListFilter::new(vec![PeerStatusFilter::Offline], false, true),
+            UtcOffset::from_hms(-5, 0, 0).unwrap(),
         );
 
         assert_eq!(lines[0], "with_storage: 0");
@@ -3787,7 +3807,15 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line.contains("consecutive_failures=2")));
-        assert!(lines.iter().any(|line| line.contains("score=-5s")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("score_measured_at=1969-12-31 19:00:31 -05:00")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("last_failure_at=1969-12-31 19:01:41 -05:00")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("next_retry_at=1969-12-31 19:02:11 -05:00")));
         assert!(!lines
             .iter()
             .any(|line| line.contains("peer=contract.onion")));
