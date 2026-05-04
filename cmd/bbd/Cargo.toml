@@ -26,6 +26,7 @@ fs2 = "0.4"
 hex = "0.4"
 keys = { path = "../../crates/keys" }
 nettor = { path = "../../crates/nettor" }
+rand = "0.8"
 transport = { path = "../../crates/transport" }
 
 [dev-dependencies]

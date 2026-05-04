@@ -9,6 +9,8 @@ use node::{CliService, Node, P2pService};
 use protos::bbrpc::barter_backup_server_server::BarterBackupServerServer;
 use protos::clirpc;
 use protos::clirpc::barter_backup_client_server::{BarterBackupClient, BarterBackupClientServer};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 #[cfg(unix)]
@@ -35,6 +37,8 @@ const SELF_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const SELF_CHECK_RESTART_THRESHOLD: u32 = 3;
 const BACKGROUND_FAILURE_MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
 const BACKGROUND_PEER_MAINTENANCE_CONCURRENCY: usize = 4;
+const BACKGROUND_VERIFICATION_DELAY_RESET: Duration = Duration::from_secs(5 * 60);
+const BACKGROUND_VERIFICATION_DELAY_CAP: Duration = Duration::from_secs(6 * 60 * 60);
 const PEER_RUNTIME_RESTART_INITIAL_BACKOFF: Duration = Duration::from_secs(5);
 const PEER_RUNTIME_RESTART_MAX_BACKOFF: Duration = Duration::from_secs(5 * 60);
 const TIMER_LABEL_MAINTENANCE_INTERVAL: &str = "maintenance.interval";
@@ -42,6 +46,7 @@ const TIMER_LABEL_SELF_CHECK_INTERVAL: &str = "self-check.interval";
 const TIMER_LABEL_PEER_RUNTIME_RESTART_BACKOFF: &str = "peer-runtime.restart-backoff";
 
 type MetadataRollupDelaySampler = Arc<dyn Fn() -> Duration + Send + Sync>;
+type VerificationDelaySampler = Arc<dyn Fn(Duration) -> Duration + Send + Sync>;
 
 const VERSION_STRING: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -362,6 +367,100 @@ impl BackgroundPeerFailures {
     }
 }
 
+/// BackgroundPeerVerificationCadenceState stores one peer's adaptive
+/// verification timing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BackgroundPeerVerificationCadenceState {
+    /// last_result is the previous background verification outcome, if any.
+    last_result: Option<bool>,
+    /// expected_delay is the current mean delay used for sampling.
+    expected_delay: Duration,
+    /// next_check_at is when background verification is next eligible.
+    next_check_at: Timestamp,
+}
+
+/// RecordedBackgroundPeerVerificationCadence summarizes one cadence update.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordedBackgroundPeerVerificationCadence {
+    /// result_changed reports whether the observed verification outcome flipped.
+    result_changed: bool,
+    /// expected_delay is the updated mean delay after this observation.
+    expected_delay: Duration,
+    /// next_delay is the sampled delay until the next check.
+    next_delay: Duration,
+    /// next_check_at is the resulting next eligible verification time.
+    next_check_at: Timestamp,
+}
+
+/// BackgroundPeerVerificationCadence tracks per-peer in-memory verification spacing.
+#[derive(Clone)]
+struct BackgroundPeerVerificationCadence {
+    /// peers stores one cadence record per peer onion.
+    peers: Arc<StdMutex<BTreeMap<String, BackgroundPeerVerificationCadenceState>>>,
+    /// delay_sampler draws one delay from the provided mean.
+    delay_sampler: VerificationDelaySampler,
+}
+
+impl BackgroundPeerVerificationCadence {
+    /// Create one cadence tracker from the provided delay sampler.
+    fn new(delay_sampler: VerificationDelaySampler) -> Self {
+        Self {
+            peers: Arc::new(StdMutex::new(BTreeMap::new())),
+            delay_sampler,
+        }
+    }
+
+    /// Return whether background verification is currently due for one peer.
+    fn should_attempt(&self, peer_onion: &str, now: Timestamp) -> bool {
+        self.peers
+            .lock()
+            .unwrap()
+            .get(peer_onion)
+            .is_none_or(|state| now >= state.next_check_at)
+    }
+
+    /// Record one verification result and schedule the next due time.
+    fn record_result(
+        &self,
+        peer_onion: &str,
+        result: bool,
+        now: Timestamp,
+    ) -> RecordedBackgroundPeerVerificationCadence {
+        let mut peers = self.peers.lock().unwrap();
+        let state =
+            peers
+                .entry(peer_onion.to_string())
+                .or_insert(BackgroundPeerVerificationCadenceState {
+                    last_result: None,
+                    expected_delay: BACKGROUND_VERIFICATION_DELAY_RESET,
+                    next_check_at: now,
+                });
+        let result_changed = state.last_result != Some(result);
+        let expected_delay = if result_changed {
+            BACKGROUND_VERIFICATION_DELAY_RESET
+        } else {
+            scaled_verification_delay(state.expected_delay)
+        };
+        let next_delay = (self.delay_sampler)(expected_delay);
+        let next_check_at = now.advance(next_delay);
+        state.last_result = Some(result);
+        state.expected_delay = expected_delay;
+        state.next_check_at = next_check_at;
+        RecordedBackgroundPeerVerificationCadence {
+            result_changed,
+            expected_delay,
+            next_delay,
+            next_check_at,
+        }
+    }
+
+    /// Return the current cadence state for one peer in tests.
+    #[cfg(test)]
+    fn state_for_test(&self, peer_onion: &str) -> Option<BackgroundPeerVerificationCadenceState> {
+        self.peers.lock().unwrap().get(peer_onion).cloned()
+    }
+}
+
 /// Compute one exponential background retry delay from the maintenance interval.
 fn background_failure_backoff(
     maintenance_interval: Duration,
@@ -374,6 +473,26 @@ fn background_failure_backoff(
     base.checked_mul(multiplier)
         .unwrap_or(BACKGROUND_FAILURE_MAX_BACKOFF)
         .min(BACKGROUND_FAILURE_MAX_BACKOFF)
+}
+
+/// Scale one verification mean delay by the adaptive growth factor and cap it.
+fn scaled_verification_delay(delay: Duration) -> Duration {
+    delay.mul_f64(1.5).min(BACKGROUND_VERIFICATION_DELAY_CAP)
+}
+
+/// Sample one exponential verification delay with the provided mean.
+fn sample_exponential_delay(mean: Duration, rng: &mut StdRng) -> Duration {
+    let uniform = 1.0 - rng.gen::<f64>();
+    Duration::from_secs_f64(mean.as_secs_f64() * -uniform.ln())
+}
+
+/// Build the default adaptive verification delay sampler.
+fn default_verification_delay_sampler() -> VerificationDelaySampler {
+    let rng = Arc::new(StdMutex::new(StdRng::from_entropy()));
+    Arc::new(move |mean: Duration| {
+        let mut rng = rng.lock().unwrap();
+        sample_exponential_delay(mean, &mut rng)
+    })
 }
 
 /// Classify one background peer-maintenance failure for operator-facing status.
@@ -3242,6 +3361,86 @@ mod tests {
             classify_peer_failure(&Status::internal("peer returned invalid content")),
             clirpc::PeerFailureClass::Protocol
         );
+    }
+
+    #[test]
+    fn verification_cadence_first_result_uses_reset_delay() {
+        let cadence = BackgroundPeerVerificationCadence::new(Arc::new(|mean| mean));
+        let now = Timestamp::new(1_000, 0).unwrap();
+
+        let recorded = cadence.record_result("peer.onion", true, now);
+
+        assert!(recorded.result_changed);
+        assert_eq!(recorded.expected_delay, BACKGROUND_VERIFICATION_DELAY_RESET);
+        assert_eq!(recorded.next_delay, BACKGROUND_VERIFICATION_DELAY_RESET);
+        assert_eq!(
+            recorded.next_check_at,
+            now.advance(BACKGROUND_VERIFICATION_DELAY_RESET)
+        );
+        assert!(!cadence.should_attempt("peer.onion", now));
+    }
+
+    #[test]
+    fn verification_cadence_unchanged_result_grows_mean_delay() {
+        let cadence = BackgroundPeerVerificationCadence::new(Arc::new(|mean| mean));
+        let first_now = Timestamp::new(1_000, 0).unwrap();
+        let second_now = first_now.advance(BACKGROUND_VERIFICATION_DELAY_RESET);
+
+        cadence.record_result("peer.onion", true, first_now);
+        let recorded = cadence.record_result("peer.onion", true, second_now);
+
+        assert!(!recorded.result_changed);
+        assert_eq!(
+            recorded.expected_delay,
+            scaled_verification_delay(BACKGROUND_VERIFICATION_DELAY_RESET)
+        );
+        assert_eq!(recorded.next_delay, recorded.expected_delay);
+    }
+
+    #[test]
+    fn verification_cadence_result_change_resets_delay() {
+        let cadence = BackgroundPeerVerificationCadence::new(Arc::new(|mean| mean));
+        let first_now = Timestamp::new(1_000, 0).unwrap();
+        let second_now = first_now.advance(BACKGROUND_VERIFICATION_DELAY_RESET);
+        let third_now = second_now.advance(scaled_verification_delay(
+            BACKGROUND_VERIFICATION_DELAY_RESET,
+        ));
+
+        cadence.record_result("peer.onion", true, first_now);
+        cadence.record_result("peer.onion", true, second_now);
+        let recorded = cadence.record_result("peer.onion", false, third_now);
+
+        assert!(recorded.result_changed);
+        assert_eq!(recorded.expected_delay, BACKGROUND_VERIFICATION_DELAY_RESET);
+        assert_eq!(recorded.next_delay, BACKGROUND_VERIFICATION_DELAY_RESET);
+    }
+
+    #[test]
+    fn verification_cadence_growth_caps_at_six_hours() {
+        let cadence = BackgroundPeerVerificationCadence::new(Arc::new(|mean| mean));
+        let mut now = Timestamp::new(1_000, 0).unwrap();
+
+        let mut last_expected = BACKGROUND_VERIFICATION_DELAY_RESET;
+        for _ in 0..20 {
+            let recorded = cadence.record_result("peer.onion", true, now);
+            last_expected = recorded.expected_delay;
+            now = recorded.next_check_at;
+        }
+
+        assert_eq!(last_expected, BACKGROUND_VERIFICATION_DELAY_CAP);
+        let state = cadence.state_for_test("peer.onion").expect("cadence state");
+        assert_eq!(state.expected_delay, BACKGROUND_VERIFICATION_DELAY_CAP);
+    }
+
+    #[test]
+    fn verification_cadence_due_gate_opens_after_next_check_time() {
+        let cadence = BackgroundPeerVerificationCadence::new(Arc::new(|mean| mean));
+        let now = Timestamp::new(1_000, 0).unwrap();
+        let recorded = cadence.record_result("peer.onion", true, now);
+
+        assert!(!cadence.should_attempt("peer.onion", now));
+        assert!(!cadence.should_attempt("peer.onion", now.advance(Duration::from_secs(299))));
+        assert!(cadence.should_attempt("peer.onion", recorded.next_check_at));
     }
 
     #[test]
