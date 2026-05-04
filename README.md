@@ -475,6 +475,9 @@ Recovery workflow:
 - `bbcli unlock` returns once the local encrypted store is open; the public
   Tor-facing peer runtime may still be starting in the background, and
   `bbcli state` reports that readiness explicitly
+- after unlock, `bbcli state` may keep `self_peer_check_state` at `unknown`
+  for some time; that deferred self-check period is expected and does not by
+  itself mean the public runtime is unhealthy
 - `bbcli` waits briefly for `bbd` to create the session `cli-keys` instead of
   creating that directory on its own
 - protobufs are compiled at build time; there are no checked-in generated Rust
