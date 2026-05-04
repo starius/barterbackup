@@ -99,7 +99,8 @@
 
             buildPhase = ''
               runHook preBuild
-              cargo build --offline --release --target ${staticTarget} -p bbd -p bbcli
+              cargo build --offline --release --target ${staticTarget} -p bbd
+              cargo build --offline --profile release-bbcli --target ${staticTarget} -p bbcli
               runHook postBuild
             '';
 
@@ -116,7 +117,7 @@
                 $out/share/zsh/site-functions
 
               install -Dm755 target/${staticTarget}/release/bbd $out/bin/bbd
-              install -Dm755 target/${staticTarget}/release/bbcli $out/bin/bbcli
+              install -Dm755 target/${staticTarget}/release-bbcli/bbcli $out/bin/bbcli
 
               install -Dm644 docs/man/bbd.1 $out/share/man/man1/bbd.1
               install -Dm644 docs/man/bbcli.1 $out/share/man/man1/bbcli.1

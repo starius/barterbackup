@@ -20,3 +20,8 @@ resolver = "2"
 
 [profile.release]
 lto = "fat"
+
+[profile.release-bbcli]
+inherits = "release"
+panic = "abort"
+strip = "symbols"

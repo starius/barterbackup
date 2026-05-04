@@ -81,7 +81,7 @@ docker-dev-env:
 
 install:
 	$(CARGO) install --path cmd/bbd --locked
-	$(CARGO) install --path cmd/bbcli --locked
+	$(CARGO) install --path cmd/bbcli --locked --profile release-bbcli
 
 build-static:
 ifndef STATIC_TARGET
@@ -122,7 +122,12 @@ build-static-linux-amd64:
 		$(STATIC_LINUX_AMD64_ENV) \
 		CARGO_BUILD_PIPELINING=false \
 		CARGO_TARGET_DIR=$(STATIC_TARGET_DIR)/$(STATIC_LINUX_AMD64_TARGET) \
-		$(CARGO) build --release --target $(STATIC_LINUX_AMD64_TARGET) -p bbd -p bbcli
+		$(CARGO) build --release --target $(STATIC_LINUX_AMD64_TARGET) -p bbd
+	env -u CC -u CXX -u AR \
+		$(STATIC_LINUX_AMD64_ENV) \
+		CARGO_BUILD_PIPELINING=false \
+		CARGO_TARGET_DIR=$(STATIC_TARGET_DIR)/$(STATIC_LINUX_AMD64_TARGET) \
+		$(CARGO) build --profile release-bbcli --target $(STATIC_LINUX_AMD64_TARGET) -p bbcli
 
 build-static-linux-arm64:
 	# Keep static builds in a per-target cargo dir and disable pipelining to
@@ -131,11 +136,18 @@ build-static-linux-arm64:
 		$(STATIC_LINUX_ARM64_ENV) \
 		CARGO_BUILD_PIPELINING=false \
 		CARGO_TARGET_DIR=$(STATIC_TARGET_DIR)/$(STATIC_LINUX_ARM64_TARGET) \
-		$(CARGO) build --release --target $(STATIC_LINUX_ARM64_TARGET) -p bbd -p bbcli
+		$(CARGO) build --release --target $(STATIC_LINUX_ARM64_TARGET) -p bbd
+	env -u CC -u CXX -u AR \
+		$(STATIC_LINUX_ARM64_ENV) \
+		CARGO_BUILD_PIPELINING=false \
+		CARGO_TARGET_DIR=$(STATIC_TARGET_DIR)/$(STATIC_LINUX_ARM64_TARGET) \
+		$(CARGO) build --profile release-bbcli --target $(STATIC_LINUX_ARM64_TARGET) -p bbcli
 
 build-windows:
 	CARGO_TARGET_DIR=$(WINDOWS_TARGET_DIR) \
-		cargo xwin build --release --target $(WINDOWS_TARGET) -p bbd -p bbcli
+		cargo xwin build --release --target $(WINDOWS_TARGET) -p bbd
+	CARGO_TARGET_DIR=$(WINDOWS_TARGET_DIR) \
+		cargo xwin build --profile release-bbcli --target $(WINDOWS_TARGET) -p bbcli
 
 sanitize-address:
 ifeq ($(findstring -linux-gnu,$(HOST_TRIPLE)),)
