@@ -1686,11 +1686,9 @@ impl BarterBackupClient for DaemonService {
         &self,
         request: tonic::Request<clirpc::DeleteFileRequest>,
     ) -> Result<Response<clirpc::DeleteFileResponse>, Status> {
-        let response = CliService::new(self.unlocked_node().await?)
+        CliService::new(self.unlocked_node().await?)
             .delete_file(request)
-            .await?;
-        self.wake_maintenance();
-        Ok(response)
+            .await
     }
 
     async fn get_file_stream(
@@ -5595,6 +5593,142 @@ mod tests {
             score > 0,
             "expected background verification to increase score"
         );
+
+        owner_service.shutdown().await?;
+        peer_service.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn file_deletion_waits_for_an_explicit_maintenance_pass() -> Result<()> {
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        let (maintenance_config, tick) = manual_maintenance();
+        let owner_dir = TempDir::new()?;
+        let peer_dir = TempDir::new()?;
+        let owner_service = test_service_with_test_clock_and_verification_delay_sampler(
+            &owner_dir,
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            maintenance_config,
+            Timestamp::new(7_500, 0).unwrap(),
+            Arc::new(|mean| mean),
+        );
+        let peer_service = DaemonService::with_maintenance_config(
+            peer_dir.path().to_path_buf(),
+            Arc::new(MockPeerRuntimeFactory {
+                connector: connector.clone(),
+            }),
+            MaintenanceConfig::default().disabled(),
+        );
+
+        init_and_unlock_service(&owner_service, "deletion-owner").await?;
+        init_and_unlock_service(&peer_service, "deletion-peer").await?;
+        wait_for_async(Duration::from_secs(5), || {
+            let owner_service = &owner_service;
+            async move {
+                let state = owner_service
+                    .state(tonic::Request::new(clirpc::StateRequest {}))
+                    .await?
+                    .into_inner();
+                Ok(state.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32)
+            }
+        })
+        .await?;
+        wait_for_async(Duration::from_secs(5), || {
+            let peer_service = &peer_service;
+            async move {
+                let state = peer_service
+                    .state(tonic::Request::new(clirpc::StateRequest {}))
+                    .await?
+                    .into_inner();
+                Ok(state.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32)
+            }
+        })
+        .await?;
+        set_storage_config(&owner_service, 4 * 1024 * 1024, 1).await?;
+
+        let peer_onion = unlocked_node(&peer_service).await.address().to_string();
+        owner_service
+            .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: peer_onion.clone(),
+                }),
+            }))
+            .await?;
+        owner_service
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+
+        wait_for_async(Duration::from_secs(5), || {
+            let owner_service = &owner_service;
+            let peer_onion = peer_onion.clone();
+            async move {
+                let storage_peers = owner_service
+                    .get_peer_storage(tonic::Request::new(clirpc::GetPeerStorageRequest {}))
+                    .await?
+                    .into_inner()
+                    .storage_peers;
+                Ok(storage_peers.into_iter().any(|peer_storage| {
+                    peer_storage
+                        .peer
+                        .as_ref()
+                        .is_some_and(|peer| peer.onion_service_id == peer_onion)
+                        && peer_storage.online
+                        && peer_storage.our_content_synced
+                }))
+            }
+        })
+        .await?;
+
+        owner_service
+            .delete_file(tonic::Request::new(clirpc::DeleteFileRequest {
+                name: "alpha.txt".to_string(),
+            }))
+            .await?;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let storage_peers = owner_service
+            .get_peer_storage(tonic::Request::new(clirpc::GetPeerStorageRequest {}))
+            .await?
+            .into_inner()
+            .storage_peers;
+        assert!(storage_peers.iter().any(|peer_storage| {
+            peer_storage
+                .peer
+                .as_ref()
+                .is_some_and(|peer| peer.onion_service_id == peer_onion)
+                && peer_storage.online
+                && !peer_storage.our_content_synced
+        }));
+
+        tick.notify_waiters();
+        wait_for_async(Duration::from_secs(5), || {
+            let owner_service = &owner_service;
+            let peer_onion = peer_onion.clone();
+            async move {
+                let storage_peers = owner_service
+                    .get_peer_storage(tonic::Request::new(clirpc::GetPeerStorageRequest {}))
+                    .await?
+                    .into_inner()
+                    .storage_peers;
+                Ok(storage_peers.into_iter().any(|peer_storage| {
+                    peer_storage
+                        .peer
+                        .as_ref()
+                        .is_some_and(|peer| peer.onion_service_id == peer_onion)
+                        && peer_storage.online
+                        && peer_storage.our_content_synced
+                }))
+            }
+        })
+        .await?;
 
         owner_service.shutdown().await?;
         peer_service.shutdown().await?;
