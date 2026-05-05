@@ -973,6 +973,34 @@ fn peer_requester_latest_known_content(peer: &storedpb::Peer) -> Option<storedpb
     peer.requester_latest_known_content.clone()
 }
 
+/// Return the latest observed remote-view score for our data on this peer.
+fn peer_requester_remaining_seconds(peer: &storedpb::Peer) -> Option<i64> {
+    optional_timestamp_parts(peer.requester_remaining_observed_at.as_ref())
+        .map(|_| peer.requester_remaining_seconds)
+}
+
+/// Return the current durability-horizon entry for our data on one tracked peer.
+fn peer_current_owner_replica_expiry_seconds(
+    peer: &storedpb::Peer,
+    current_content_id: &[u8],
+) -> Option<Option<i64>> {
+    if peer.reachability != storedpb::PeerReachability::Online as i32 {
+        return None;
+    }
+    if !peer_requester_latest_stored_content(peer)
+        .is_some_and(|content| content.content_id == current_content_id)
+    {
+        return None;
+    }
+    if peer.pins_us {
+        return Some(None);
+    }
+
+    peer_requester_remaining_seconds(peer)
+        .filter(|remaining_seconds| *remaining_seconds >= 0)
+        .map(Some)
+}
+
 /// Compute one weighted-random selection score for a publication candidate.
 fn publication_candidate_weight(candidate: &PublicationCandidate, now_secs: i64) -> u64 {
     let mut weight = PEER_SELECTION_BASE_WEIGHT;
@@ -1188,11 +1216,17 @@ fn replica_horizon_points(expiry_seconds: &[Option<i64>]) -> Vec<clirpc::Replica
         .iter()
         .flatten()
         .copied()
-        .map(|seconds| seconds.max(0))
+        .filter(|seconds| *seconds >= 0)
         .collect::<Vec<_>>();
     finite.sort_unstable();
 
-    let mut remaining = i64::try_from(expiry_seconds.len()).unwrap_or(i64::MAX);
+    let mut remaining = i64::try_from(
+        expiry_seconds
+            .iter()
+            .filter(|expiry| expiry.is_none_or(|seconds| seconds >= 0))
+            .count(),
+    )
+    .unwrap_or(i64::MAX);
     let pinned_floor = i64::try_from(
         expiry_seconds
             .iter()
@@ -4131,46 +4165,21 @@ impl Node {
             })
             .unwrap_or(0);
         let min_replicas_target = self.storage_config.lock().unwrap().min_replicas.max(0);
-        let predicted_fresh_replicas_now = current_content_id
-            .as_ref()
-            .map(|current_content_id| {
-                i64::try_from(
-                    snapshot
-                        .tracked_peers
-                        .iter()
-                        .filter(|peer| {
-                            peer.reachability == storedpb::PeerReachability::Online as i32
-                                && peer_requester_latest_stored_content(peer).is_some_and(
-                                    |content| content.content_id == *current_content_id,
-                                )
-                        })
-                        .count(),
-                )
-                .unwrap_or(i64::MAX)
-            })
-            .unwrap_or(0);
-        let publish_blocked_reason = self.publish_blocked_reason()?.unwrap_or_default();
         let predicted_replica_horizon = current_content_id
             .as_ref()
             .map(|current_content_id| {
                 snapshot
                     .tracked_peers
                     .iter()
-                    .filter(|peer| {
-                        peer.reachability == storedpb::PeerReachability::Online as i32
-                            && peer_requester_latest_stored_content(peer)
-                                .is_some_and(|content| content.content_id == *current_content_id)
-                    })
-                    .map(|peer| {
-                        if peer.pins_us {
-                            None
-                        } else {
-                            Some(peer.score_seconds.max(0))
-                        }
+                    .filter_map(|peer| {
+                        peer_current_owner_replica_expiry_seconds(peer, current_content_id)
                     })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let predicted_fresh_replicas_now =
+            i64::try_from(predicted_replica_horizon.len()).unwrap_or(i64::MAX);
+        let publish_blocked_reason = self.publish_blocked_reason()?.unwrap_or_default();
         let latest_recovered_revision = snapshot
             .recovery_mode_enabled
             .then(|| snapshot.latest_recovered_revision.clone())
@@ -4408,10 +4417,15 @@ impl Node {
                 let peer_onion = contract.peer.as_ref()?.onion_service_id.clone();
                 let tracked_peer = tracked_by_onion.get(&peer_onion)?;
                 (tracked_peer.our_content_last_verified_content_id == current_content.content_id)
-                    .then_some(if tracked_peer.pins_us {
-                        None
-                    } else {
-                        Some(contract.our_remaining_seconds.max(0))
+                    .then_some(())
+                    .and_then(|()| {
+                        if tracked_peer.pins_us {
+                            Some(None)
+                        } else if contract.our_remaining_seconds >= 0 {
+                            Some(Some(contract.our_remaining_seconds))
+                        } else {
+                            None
+                        }
                     })
             })
             .collect::<Vec<_>>();
@@ -7454,6 +7468,7 @@ mod tests {
         peer.set_peer_connector(connector.clone());
         owner.add_known_peer(peer.address())?;
         peer.add_known_peer(owner.address())?;
+        let owner_public_key = keys::public_key_from_onion_hostname(owner.address())?;
         *owner.storage_config.lock().unwrap() = clirpc::StorageConfig {
             allocated_storage_for_peers: DEFAULT_ALLOCATED_STORAGE_FOR_PEERS,
             min_replicas: 1,
@@ -7482,6 +7497,10 @@ mod tests {
         let peer_server = spawn_registered_p2p_server(peer.clone(), connector.as_ref()).await?;
         owner.publish_to_peer_updates(peer.address()).await?;
         owner.verify_peer_storage_updates(peer.address()).await?;
+        peer.with_store(|store| {
+            store.set_peer_score(owner_public_key.as_bytes(), 900, 100)?;
+            Ok(())
+        })?;
         owner_clock.advance(Duration::from_secs(3_600));
         owner.verify_peer_storage_updates(peer.address()).await?;
 
@@ -7521,10 +7540,85 @@ mod tests {
             durability.predicted_replica_horizon,
             vec![clirpc::ReplicaHorizonPoint {
                 remaining_fresh_replicas: 0,
-                seconds_until_threshold: 3_600,
+                seconds_until_threshold: 900,
                 never: false,
             }]
         );
+
+        owner_server.abort();
+        peer_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_state_treats_negative_remote_score_as_already_best_effort() -> anyhow::Result<()>
+    {
+        let owner_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let peer_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner = Arc::new(Node::with_local_storage_and_clock(
+            "state-negative-remote-score-owner",
+            owner_filesystem,
+            owner_clock,
+        )?);
+        let peer = Arc::new(Node::with_local_storage_and_clock(
+            "state-negative-remote-score-peer",
+            peer_filesystem,
+            peer_clock,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        owner.set_peer_connector(connector.clone());
+        peer.set_peer_connector(connector.clone());
+        owner.add_known_peer(peer.address())?;
+        peer.add_known_peer(owner.address())?;
+        let owner_public_key = keys::public_key_from_onion_hostname(owner.address())?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer.address())?;
+        *owner.storage_config.lock().unwrap() = clirpc::StorageConfig {
+            allocated_storage_for_peers: DEFAULT_ALLOCATED_STORAGE_FOR_PEERS,
+            min_replicas: 1,
+        };
+
+        CliService::new(owner.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"owner-data".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+
+        let owner_server = spawn_registered_p2p_server(owner.clone(), connector.as_ref()).await?;
+        let peer_server = spawn_registered_p2p_server(peer.clone(), connector.as_ref()).await?;
+        owner.publish_to_peer_updates(peer.address()).await?;
+        owner.with_store(|store| {
+            store.set_peer_score(peer_public_key.as_bytes(), 3_600, 100)?;
+            Ok(())
+        })?;
+        peer.with_store(|store| {
+            store.set_peer_score(owner_public_key.as_bytes(), -30, 100)?;
+            Ok(())
+        })?;
+        owner.verify_peer_storage_updates(peer.address()).await?;
+
+        let summary = owner
+            .local_state_summary()?
+            .ok_or_else(|| anyhow::anyhow!("missing local state summary"))?;
+        let content = summary
+            .content
+            .ok_or_else(|| anyhow::anyhow!("missing local content summary"))?;
+        let peers = summary
+            .peers
+            .ok_or_else(|| anyhow::anyhow!("missing local peer summary"))?;
+        let durability = summary
+            .durability
+            .ok_or_else(|| anyhow::anyhow!("missing local durability summary"))?;
+
+        assert_eq!(peers.storing_latest_our_data, 1);
+        assert_eq!(durability.predicted_fresh_replicas_now, 0);
+        assert!(durability.predicted_replica_horizon.is_empty());
+        assert!(content.has_pending_update);
 
         owner_server.abort();
         peer_server.abort();
@@ -8374,6 +8468,27 @@ mod tests {
                 clirpc::ReplicaHorizonPoint {
                     remaining_fresh_replicas: 1,
                     seconds_until_threshold: 25,
+                    never: false,
+                },
+                clirpc::ReplicaHorizonPoint {
+                    remaining_fresh_replicas: 0,
+                    seconds_until_threshold: 0,
+                    never: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn replica_horizon_points_ignore_negative_expiries_as_already_expired() {
+        let points = replica_horizon_points(&[Some(-5), Some(10), None]);
+
+        assert_eq!(
+            points,
+            vec![
+                clirpc::ReplicaHorizonPoint {
+                    remaining_fresh_replicas: 1,
+                    seconds_until_threshold: 10,
                     never: false,
                 },
                 clirpc::ReplicaHorizonPoint {
@@ -11724,6 +11839,66 @@ mod tests {
         peer_a_server.abort();
         peer_b_server.abort();
         peer_c_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn storage_info_ignores_negative_remote_scores_for_replica_horizon() -> anyhow::Result<()>
+    {
+        let owner_clock = Arc::new(ManualClock::new(Timestamp::new(1_000, 0).unwrap()));
+        let peer_clock = Arc::new(ManualClock::new(Timestamp::new(1_000, 0).unwrap()));
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner_node = Arc::new(Node::with_local_storage_and_clock(
+            "owner-negative-horizon",
+            owner_filesystem,
+            owner_clock,
+        )?);
+        let peer_node = Arc::new(Node::with_local_storage_and_clock(
+            "peer-negative-horizon",
+            peer_filesystem,
+            peer_clock,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        owner_node.set_peer_connector(connector.clone());
+        peer_node.set_peer_connector(connector.clone());
+
+        owner_node.add_known_peer(peer_node.address())?;
+        peer_node.add_known_peer(owner_node.address())?;
+        let owner_public_key = keys::public_key_from_onion_hostname(owner_node.address())?;
+
+        CliService::new(owner_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "owner.txt".to_string(),
+                    data: b"owner-data".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+
+        let owner_server =
+            spawn_registered_p2p_server(owner_node.clone(), connector.as_ref()).await?;
+        let peer_server =
+            spawn_registered_p2p_server(peer_node.clone(), connector.as_ref()).await?;
+        owner_node
+            .publish_to_peer_updates(peer_node.address())
+            .await?;
+        let check = owner_node
+            .verify_peer_storage_updates(peer_node.address())
+            .await?;
+        assert!(check.last().is_some_and(|update| update.success));
+
+        peer_node.with_store(|store| {
+            store.set_peer_score(owner_public_key.as_bytes(), -30, 1_000)?;
+            Ok(())
+        })?;
+
+        let storage_info = owner_node.storage_info().await?;
+        assert!(storage_info.replica_horizon.is_empty());
+
+        owner_server.abort();
+        peer_server.abort();
         Ok(())
     }
 
