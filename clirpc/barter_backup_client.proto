@@ -515,6 +515,14 @@ message PeerInfo {
     // our_content_synced reports whether our_stored_content_bytes matches the
     // current local content revision we would publish now.
     bool our_content_synced = 21;
+
+    // our_score_there_seconds is the latest observed score for our data from
+    // this peer's perspective.
+    int64 our_score_there_seconds = 22;
+
+    // our_score_there_measured_at is when we last observed
+    // our_score_there_seconds from this peer.
+    google.protobuf.Timestamp our_score_there_measured_at = 23;
 }
 
 message PeersResponse {

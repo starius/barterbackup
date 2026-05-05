@@ -344,6 +344,12 @@ struct PeerInventoryEntry {
     /// our_content_synced reports whether the peer's stored local-owner
     /// revision matches our current local revision.
     our_content_synced: bool,
+    /// our_score_there_seconds is the latest observed score for our data from
+    /// this peer's perspective.
+    our_score_there_seconds: i64,
+    /// our_score_there_measured_at is when we last observed
+    /// `our_score_there_seconds`.
+    our_score_there_measured_at: Option<(i64, i64)>,
     /// last_live_at is when the peer last responded successfully over the transport.
     last_live_at: i64,
     /// last_failure_at is when background maintenance last failed for this peer.
@@ -392,6 +398,12 @@ struct LocalPeerInventorySnapshot {
     /// our_content_synced reports whether the peer's stored local-owner
     /// revision matches our current local revision.
     our_content_synced: bool,
+    /// our_score_there_seconds is the latest observed score for our data from
+    /// this peer's perspective.
+    our_score_there_seconds: i64,
+    /// our_score_there_measured_at is when we last observed
+    /// `our_score_there_seconds`.
+    our_score_there_measured_at: Option<(i64, i64)>,
     /// last_live_at is when the peer last responded successfully over the transport.
     last_live_at: i64,
 }
@@ -2686,6 +2698,7 @@ impl Node {
         if !self.is_tracked_peer(peer_public_key)? {
             return Ok(());
         }
+        let observed_at = self.clock.now();
         self.with_store(|store| {
             store.set_peer_requester_revision_state(
                 peer_public_key.as_bytes(),
@@ -2705,6 +2718,14 @@ impl Node {
                     .requester_latest_known_content
                     .as_ref()
                     .map(|content| content.content_length),
+            )?;
+            store.set_peer_requester_remaining_state(
+                peer_public_key.as_bytes(),
+                revision.requester_remaining_seconds,
+                (
+                    i64::try_from(observed_at.secs).unwrap_or(i64::MAX),
+                    i64::from(observed_at.nanos),
+                ),
             )
         })
     }
@@ -3944,6 +3965,10 @@ impl Node {
                             .unwrap_or(0),
                         our_content_synced: requester_latest_stored.as_ref()
                             == current_content.as_ref(),
+                        our_score_there_seconds: peer.requester_remaining_seconds,
+                        our_score_there_measured_at: optional_timestamp_parts(
+                            peer.requester_remaining_observed_at.as_ref(),
+                        ),
                         last_live_at: peer.last_live_at,
                     },
                 );
@@ -4008,6 +4033,11 @@ impl Node {
                 our_content_synced: tracked_peer
                     .map(|peer| peer.our_content_synced)
                     .unwrap_or(false),
+                our_score_there_seconds: tracked_peer
+                    .map(|peer| peer.our_score_there_seconds)
+                    .unwrap_or_default(),
+                our_score_there_measured_at: tracked_peer
+                    .and_then(|peer| peer.our_score_there_measured_at),
                 last_live_at: tracked_peer
                     .map(|peer| peer.last_live_at)
                     .unwrap_or_default(),
@@ -4244,11 +4274,11 @@ impl Node {
 
     /// Build the local peer inventory response without dialing peers live.
     pub fn peers_response(&self) -> Result<clirpc::PeersResponse, Status> {
-        Ok(clirpc::PeersResponse {
-            peers: self
-                .peer_inventory()?
-                .into_iter()
-                .map(|peer| clirpc::PeerInfo {
+        let peers = self
+            .peer_inventory()?
+            .into_iter()
+            .map(|peer| {
+                Ok(clirpc::PeerInfo {
                     peer: Some(clirpc::Peer {
                         onion_service_id: peer.onion_service_id,
                     }),
@@ -4266,6 +4296,11 @@ impl Node {
                     tracked_only: peer.tracked_only,
                     our_stored_content_bytes: peer.our_stored_content_bytes,
                     our_content_synced: peer.our_content_synced,
+                    our_score_there_seconds: peer.our_score_there_seconds,
+                    our_score_there_measured_at: peer
+                        .our_score_there_measured_at
+                        .map(|timestamp| proto_timestamp_from_parts(timestamp.0, timestamp.1))
+                        .transpose()?,
                     last_live_at: peer.last_live_at,
                     last_failure_at: peer.last_failure_at,
                     last_error_class: peer.last_error_class,
@@ -4273,8 +4308,10 @@ impl Node {
                     consecutive_failures: peer.consecutive_failures,
                     next_retry_at: peer.next_retry_at,
                 })
-                .collect(),
-        })
+            })
+            .collect::<Result<Vec<_>, Status>>()?;
+
+        Ok(clirpc::PeersResponse { peers })
     }
 
     /// Build a live peer-storage snapshot for the configured peers.
@@ -8043,6 +8080,8 @@ mod tests {
             requester_last_downloaded_advertised_content: None,
             requester_last_downloaded_advertised_at: None,
             requester_last_download_latency_seconds: 0,
+            requester_remaining_seconds: 0,
+            requester_remaining_observed_at: None,
         }
     }
 
@@ -9093,6 +9132,59 @@ mod tests {
 
         remote_server.abort();
         local_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_inventory_reports_latest_remote_score_for_our_data() -> anyhow::Result<()> {
+        let local_clock = Arc::new(ManualClock::new(Timestamp::new(900, 7).unwrap()));
+        let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let remote_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let local_node = Arc::new(Node::with_local_storage_and_clock(
+            "peer-inventory-remote-score-local",
+            local_filesystem,
+            local_clock.clone(),
+        )?);
+        let remote_node = Arc::new(Node::with_local_storage(
+            "peer-inventory-remote-score-remote",
+            remote_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        local_node.set_peer_connector(connector.clone());
+        remote_node.set_peer_connector(connector.clone());
+
+        local_node.add_known_peer(remote_node.address())?;
+        let local_public_key = keys::public_key_from_onion_hostname(local_node.address())?;
+        remote_node.with_store(|store| {
+            store.set_peer_score(local_public_key.as_bytes(), 321, 100)?;
+            Ok(())
+        })?;
+
+        let remote_server =
+            spawn_registered_p2p_server(remote_node.clone(), connector.as_ref()).await?;
+        let mut client =
+            connect_p2p_client(local_node.clone(), remote_node.clone(), connector.as_ref()).await?;
+        let revision = client
+            .get_content_revision(bbrpc::GetContentRevisionRequest {})
+            .await?
+            .into_inner();
+        let remote_public_key = keys::public_key_from_onion_hostname(remote_node.address())?;
+        local_node.record_requester_revision_observation(&remote_public_key, &revision)?;
+
+        let peer = peer_inventory_entry(local_node.as_ref(), remote_node.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing inventory entry"))?;
+        assert_eq!(peer.our_score_there_seconds, 321);
+        assert_eq!(peer.our_score_there_measured_at, Some((900, 7)));
+
+        let tracked_peer = peer_entry(local_node.as_ref(), remote_node.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing tracked peer entry"))?;
+        assert_eq!(tracked_peer.requester_remaining_seconds, 321);
+        assert_eq!(
+            optional_timestamp_parts(tracked_peer.requester_remaining_observed_at.as_ref()),
+            Some((900, 7))
+        );
+
+        remote_server.abort();
         Ok(())
     }
 

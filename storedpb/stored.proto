@@ -179,6 +179,14 @@ message Peer {
     // download requester_last_downloaded_advertised_content after we first
     // advertised it.
     int64 requester_last_download_latency_seconds = 23;
+
+    // requester_remaining_seconds is the latest observed score for our data
+    // from this peer's perspective.
+    int64 requester_remaining_seconds = 24;
+
+    // requester_remaining_observed_at is when we last observed
+    // requester_remaining_seconds from this peer.
+    google.protobuf.Timestamp requester_remaining_observed_at = 25;
 }
 
 // RecoveredRevision records one authenticated older-lineage revision that was

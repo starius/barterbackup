@@ -446,6 +446,8 @@ fn ensure_peer_entry(
         requester_last_downloaded_advertised_content: None,
         requester_last_downloaded_advertised_at: None,
         requester_last_download_latency_seconds: 0,
+        requester_remaining_seconds: 0,
+        requester_remaining_observed_at: None,
     });
 }
 
@@ -896,6 +898,8 @@ impl Store {
                     requester_last_downloaded_advertised_content: None,
                     requester_last_downloaded_advertised_at: None,
                     requester_last_download_latency_seconds: 0,
+                    requester_remaining_seconds: 0,
+                    requester_remaining_observed_at: None,
                 });
             }
             Ok(true)
@@ -1316,6 +1320,36 @@ impl Store {
             }
             peer.requester_latest_stored_content = next_latest_stored;
             peer.requester_latest_known_content = next_latest_known;
+            Ok(true)
+        })
+    }
+
+    /// Persist the latest requester score we observed from this peer.
+    pub fn set_peer_requester_remaining_state(
+        &mut self,
+        onion_pubkey: &[u8],
+        requester_remaining_seconds: i64,
+        observed_at: (i64, i64),
+    ) -> Result<(), StorageError> {
+        if onion_pubkey.is_empty() {
+            return Err(StorageError::InvalidFileName);
+        }
+
+        let first_seen_at = observed_at;
+        self.update_peers(|peers| {
+            ensure_peer_entry(peers, onion_pubkey, first_seen_at);
+            let peer = peers
+                .iter_mut()
+                .find(|peer| peer.onion_pubkey == onion_pubkey)
+                .expect("peer entry must exist after ensure");
+            let next_observed_at = Some(proto_timestamp(observed_at.0, observed_at.1)?);
+            if peer.requester_remaining_seconds == requester_remaining_seconds
+                && peer.requester_remaining_observed_at == next_observed_at
+            {
+                return Ok(false);
+            }
+            peer.requester_remaining_seconds = requester_remaining_seconds;
+            peer.requester_remaining_observed_at = next_observed_at;
             Ok(true)
         })
     }
@@ -2310,6 +2344,8 @@ mod tests {
             requester_last_downloaded_advertised_content: None,
             requester_last_downloaded_advertised_at: None,
             requester_last_download_latency_seconds: 0,
+            requester_remaining_seconds: 0,
+            requester_remaining_observed_at: None,
         }
     }
 
@@ -2650,6 +2686,9 @@ mod tests {
                 Some(456),
             )
             .unwrap();
+        store
+            .set_peer_requester_remaining_state(b"peer-a", 789, (12, 3))
+            .unwrap();
         store.record_peer_call_outcome(b"peer-a", true).unwrap();
         store.record_peer_call_outcome(b"peer-a", false).unwrap();
 
@@ -2668,6 +2707,11 @@ mod tests {
                 .as_ref()
                 .map(|content| (content.content_id.clone(), content.content_length)),
             Some((b"known-revision".to_vec(), 456))
+        );
+        assert_eq!(peer.requester_remaining_seconds, 789);
+        assert_eq!(
+            optional_metadata_timestamp(peer.requester_remaining_observed_at.as_ref()).unwrap(),
+            Some((12, 3))
         );
     }
 
