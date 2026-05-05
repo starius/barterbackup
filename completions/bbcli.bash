@@ -471,7 +471,7 @@ _bbcli() {
             return 0
             ;;
         bbcli__subcmd__file__subcmd__set)
-            opts="-h --help <NAME> <PATH>"
+            opts="-h --help <NAME> [PATH]"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

@@ -223,10 +223,10 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (set)
 _arguments "${_arguments_options[@]}" : \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 ':name -- name is the stable file name inside the encrypted content set:_default' \
-':path -- path is the plaintext file path to upload:_files' \
+'::path -- path is the optional plaintext file path to upload:_files' \
 && ret=0
 ;;
 (get)

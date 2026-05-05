@@ -244,7 +244,7 @@ Add or replace a file in the latest encrypted content blob
 .PP
 .nf
 .B Usage:
-Usage: bbcli file set <NAME> <PATH>
+Usage: bbcli file set <NAME> [PATH]
 .fi
 .PP
 .B Options
@@ -253,7 +253,9 @@ Usage: bbcli file set <NAME> <PATH>
 name is the stable file name inside the encrypted content set
 .TP
 .B "path <PATH>"
-path is the plaintext file path to upload
+path is the optional plaintext file path to upload.
+
+When omitted or `\-`, `bbcli` reads the plaintext bytes from standard input instead.
 .SS "bbcli file get"
 Download a file from the latest encrypted content blob
 .PP

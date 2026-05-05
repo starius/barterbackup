@@ -136,8 +136,8 @@ set edit:completion:arg-completer[bbcli] = {|@words|
             cand --help 'Print help'
         }
         &'bbcli;file;set'= {
-            cand -h 'Print help'
-            cand --help 'Print help'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
         }
         &'bbcli;file;get'= {
             cand -h 'Print help'

@@ -216,13 +216,15 @@ Add or replace a file in the latest encrypted content blob
 #### Usage
 
 ```text
-Usage: bbcli file set <NAME> <PATH>
+Usage: bbcli file set <NAME> [PATH]
 ```
 
 #### Options
 
 - `name <NAME>`: name is the stable file name inside the encrypted content set
-- `path <PATH>`: path is the plaintext file path to upload
+- `path <PATH>`: path is the optional plaintext file path to upload.
+
+When omitted or `-`, `bbcli` reads the plaintext bytes from standard input instead.
 
 ### `bbcli file get`
 

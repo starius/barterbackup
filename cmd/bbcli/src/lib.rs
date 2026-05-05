@@ -318,8 +318,11 @@ enum FileCommand {
         /// name is the stable file name inside the encrypted content set.
         name: String,
 
-        /// path is the plaintext file path to upload.
-        path: PathBuf,
+        /// path is the optional plaintext file path to upload.
+        ///
+        /// When omitted or `-`, `bbcli` reads the plaintext bytes from
+        /// standard input instead.
+        path: Option<PathBuf>,
     },
 
     /// Download a file from the latest encrypted content blob.
@@ -540,7 +543,7 @@ async fn run_parsed(args: Args) -> Result<()> {
         },
         Command::File { cmd } => match cmd {
             FileCommand::List => list_files(&target).await,
-            FileCommand::Set { name, path } => set_file(&target, &name, &path).await,
+            FileCommand::Set { name, path } => set_file(&target, &name, path.as_deref()).await,
             FileCommand::Get { name, out } => get_file(&target, &name, out.as_deref()).await,
             FileCommand::Delete { name } => delete_file(&target, &name).await,
         },
@@ -1513,10 +1516,13 @@ async fn list_files(target: &LocalCliTarget) -> Result<()> {
 }
 
 /// Upload one plaintext file.
-async fn set_file(target: &LocalCliTarget, name: &str, path: &Path) -> Result<()> {
+async fn set_file(target: &LocalCliTarget, name: &str, path: Option<&Path>) -> Result<()> {
     let mut client = connect_client(target).await?;
-    let data = fs::read(path).with_context(|| format!("read input file {}", path.display()))?;
-    let (modified_at, modified_at_ns) = local_file_modified_at(path)?;
+    let stdin_is_terminal = io::stdin().is_terminal();
+    let stdin = io::stdin();
+    let mut stdin = stdin.lock();
+    let (data, modified_at, modified_at_ns) =
+        read_set_file_input(path, stdin_is_terminal, &mut stdin)?;
     set_file_with_client(&mut client, name, data, modified_at, modified_at_ns).await
 }
 
@@ -1552,13 +1558,42 @@ fn local_file_modified_at(path: &Path) -> Result<(i64, i64)> {
     let modified = fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .unwrap_or_else(|_| SystemTime::now());
-    let duration = modified
+    Ok(system_time_parts(modified))
+}
+
+/// Convert one system time into protobuf-compatible timestamp parts.
+fn system_time_parts(time: SystemTime) -> (i64, i64) {
+    let duration = time
         .duration_since(UNIX_EPOCH)
         .unwrap_or_else(|_| SystemTime::now().duration_since(UNIX_EPOCH).unwrap());
-    Ok((
+    (
         i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
         i64::from(duration.subsec_nanos()),
-    ))
+    )
+}
+
+/// Read one `bbcli file set` input body from a file path or standard input.
+fn read_set_file_input(
+    path: Option<&Path>,
+    stdin_is_terminal: bool,
+    stdin: &mut impl Read,
+) -> Result<(Vec<u8>, i64, i64)> {
+    if let Some(path) = path.filter(|candidate| *candidate != Path::new("-")) {
+        let data = fs::read(path).with_context(|| format!("read input file {}", path.display()))?;
+        let (modified_at, modified_at_ns) = local_file_modified_at(path)?;
+        return Ok((data, modified_at, modified_at_ns));
+    }
+
+    if path == Some(Path::new("-")) || !stdin_is_terminal {
+        let mut data = Vec::new();
+        stdin
+            .read_to_end(&mut data)
+            .context("read input file data from standard input")?;
+        let (modified_at, modified_at_ns) = system_time_parts(SystemTime::now());
+        return Ok((data, modified_at, modified_at_ns));
+    }
+
+    bail!("input file path is required unless file data is piped on standard input")
 }
 
 /// Build one streamed upload request from file metadata and plaintext bytes.
@@ -2992,6 +3027,55 @@ mod tests {
     }
 
     #[test]
+    fn read_set_file_input_reads_one_named_file() {
+        let temp_dir = tempdir().unwrap();
+        let path = temp_dir.path().join("alpha.txt");
+        fs::write(&path, b"alpha").unwrap();
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+
+        let (data, modified_at, modified_at_ns) =
+            read_set_file_input(Some(&path), true, &mut stdin).unwrap();
+
+        assert_eq!(data, b"alpha".to_vec());
+        assert!(modified_at >= 0);
+        assert!(modified_at_ns >= 0);
+    }
+
+    #[test]
+    fn read_set_file_input_reads_piped_stdin_without_a_path() {
+        let mut stdin = Cursor::new(b"alpha".to_vec());
+
+        let before = system_time_parts(SystemTime::now());
+        let (data, modified_at, modified_at_ns) =
+            read_set_file_input(None, false, &mut stdin).unwrap();
+        let after = system_time_parts(SystemTime::now());
+
+        assert_eq!(data, b"alpha".to_vec());
+        assert!((modified_at, modified_at_ns) >= before);
+        assert!((modified_at, modified_at_ns) <= after);
+    }
+
+    #[test]
+    fn read_set_file_input_reads_stdin_when_path_is_dash() {
+        let mut stdin = Cursor::new(b"alpha".to_vec());
+
+        let (data, _, _) = read_set_file_input(Some(Path::new("-")), true, &mut stdin).unwrap();
+
+        assert_eq!(data, b"alpha".to_vec());
+    }
+
+    #[test]
+    fn read_set_file_input_rejects_missing_path_on_terminal_stdin() {
+        let mut stdin = Cursor::new(Vec::<u8>::new());
+        let error = read_set_file_input(None, true, &mut stdin).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "input file path is required unless file data is piped on standard input"
+        );
+    }
+
+    #[test]
     fn password_confirmation_accepts_matching_values() {
         let password =
             ensure_matching_passwords("seed phrase".to_string(), "seed phrase".to_string())
@@ -3744,6 +3828,14 @@ mod tests {
             args.cmd,
             Command::File {
                 cmd: FileCommand::Set { .. }
+            }
+        ));
+
+        let args = Args::parse_from(["bbcli", "file", "set", "alpha.txt"]);
+        assert!(matches!(
+            args.cmd,
+            Command::File {
+                cmd: FileCommand::Set { path: None, .. }
             }
         ));
     }

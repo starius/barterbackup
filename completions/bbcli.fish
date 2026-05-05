@@ -81,7 +81,7 @@ complete -c bbcli -n "__fish_bbcli_using_subcommand file; and not __fish_seen_su
 complete -c bbcli -n "__fish_bbcli_using_subcommand file; and not __fish_seen_subcommand_from list set get delete help" -f -a "delete" -d 'Delete a file from the latest encrypted content blob'
 complete -c bbcli -n "__fish_bbcli_using_subcommand file; and not __fish_seen_subcommand_from list set get delete help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c bbcli -n "__fish_bbcli_using_subcommand file; and __fish_seen_subcommand_from list" -s h -l help -d 'Print help'
-complete -c bbcli -n "__fish_bbcli_using_subcommand file; and __fish_seen_subcommand_from set" -s h -l help -d 'Print help'
+complete -c bbcli -n "__fish_bbcli_using_subcommand file; and __fish_seen_subcommand_from set" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c bbcli -n "__fish_bbcli_using_subcommand file; and __fish_seen_subcommand_from get" -s h -l help -d 'Print help'
 complete -c bbcli -n "__fish_bbcli_using_subcommand file; and __fish_seen_subcommand_from delete" -s h -l help -d 'Print help'
 complete -c bbcli -n "__fish_bbcli_using_subcommand file; and __fish_seen_subcommand_from help" -f -a "list" -d 'Print the names of all files in the latest encrypted content blob'
