@@ -4730,6 +4730,25 @@ impl Node {
                         bbrpc::SetContentRevisionStorageResult::try_from(response.storage_result)
                             .unwrap_or(bbrpc::SetContentRevisionStorageResult::Unknown),
                     );
+                    self.with_store(|store| {
+                        store.set_peer_requester_revision_state(
+                            peer_public_key.as_bytes(),
+                            match publication_storage_result {
+                                clirpc::PublicationStorageResult::MirroredBytesCached => {
+                                    Some(our_content.content_id.as_slice())
+                                }
+                                _ => None,
+                            },
+                            match publication_storage_result {
+                                clirpc::PublicationStorageResult::MirroredBytesCached => {
+                                    Some(our_content.content_length)
+                                }
+                                _ => None,
+                            },
+                            Some(our_content.content_id.as_slice()),
+                            Some(our_content.content_length),
+                        )
+                    })?;
                     if publication_storage_result
                         == clirpc::PublicationStorageResult::SidecarOnly
                     {
@@ -8994,7 +9013,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn peer_inventory_reports_our_stored_content_and_sync_state() -> anyhow::Result<()> {
+    async fn peer_inventory_marks_our_content_synced_immediately_after_peer_download(
+    ) -> anyhow::Result<()> {
         let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let remote_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let local_node = Arc::new(Node::with_local_storage(
@@ -9014,7 +9034,7 @@ mod tests {
         let remote_server =
             spawn_registered_p2p_server(remote_node.clone(), connector.as_ref()).await?;
 
-        local_node.connect_known_peer(remote_node.address()).await?;
+        local_node.add_known_peer(remote_node.address())?;
         CliService::new(local_node.clone())
             .set_file(tonic::Request::new(clirpc::SetFileRequest {
                 file: Some(clirpc::File {
@@ -9028,13 +9048,26 @@ mod tests {
         let published = local_node
             .current_content_info()?
             .ok_or_else(|| anyhow::anyhow!("missing local content info"))?;
-        publish_current_content_to_peer(
-            local_node.clone(),
-            remote_node.clone(),
-            connector.as_ref(),
-        )
-        .await?;
-        let _ = local_node.get_peer_storage_response().await?;
+        let updates = local_node
+            .publish_to_peer_updates(remote_node.address())
+            .await?;
+        assert_eq!(updates.last().map(|update| update.success), Some(true));
+        let tracked_peer = peer_entry(local_node.as_ref(), remote_node.address())?
+            .ok_or_else(|| anyhow::anyhow!("missing tracked peer entry"))?;
+        assert_eq!(
+            tracked_peer
+                .requester_latest_stored_content
+                .as_ref()
+                .map(|content| content.content_length),
+            Some(published.content_length)
+        );
+        assert_eq!(
+            tracked_peer
+                .requester_latest_known_content
+                .as_ref()
+                .map(|content| content.content_length),
+            Some(published.content_length)
+        );
         let peer = peer_inventory_entry(local_node.as_ref(), remote_node.address())?
             .ok_or_else(|| anyhow::anyhow!("missing inventory entry"))?;
         assert_eq!(peer.our_stored_content_bytes, published.content_length);

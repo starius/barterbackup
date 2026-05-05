@@ -1411,6 +1411,8 @@ impl Store {
             }
 
             let latency_seconds = downloaded_at.0.saturating_sub(advertised_at.0).max(0);
+            peer.requester_latest_stored_content = Some(advertised_content.clone());
+            peer.requester_latest_known_content = Some(advertised_content.clone());
             peer.requester_last_downloaded_advertised_content = Some(advertised_content.clone());
             peer.requester_last_downloaded_advertised_at =
                 Some(proto_timestamp(downloaded_at.0, downloaded_at.1)?);
@@ -2740,6 +2742,18 @@ mod tests {
         let peer = &reloaded.peers()[0];
         assert_eq!(
             peer.requester_last_downloaded_advertised_content
+                .as_ref()
+                .map(|content| (content.content_id.clone(), content.content_length)),
+            Some((b"revision-a".to_vec(), 111))
+        );
+        assert_eq!(
+            peer.requester_latest_stored_content
+                .as_ref()
+                .map(|content| (content.content_id.clone(), content.content_length)),
+            Some((b"revision-a".to_vec(), 111))
+        );
+        assert_eq!(
+            peer.requester_latest_known_content
                 .as_ref()
                 .map(|content| (content.content_id.clone(), content.content_length)),
             Some((b"revision-a".to_vec(), 111))
