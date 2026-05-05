@@ -1711,7 +1711,8 @@ fn format_peers_response(
         ("STORAGE", TableAlignment::Left),
         ("OURS ON THEM", TableAlignment::Right),
         ("THEIRS ON US", TableAlignment::Right),
-        ("SCORE", TableAlignment::Right),
+        ("OUR SCORE THERE", TableAlignment::Right),
+        ("THEIR SCORE HERE", TableAlignment::Right),
         ("LAST SEEN", TableAlignment::Left),
         ("FAILURE", TableAlignment::Left),
         ("FLAGS", TableAlignment::Left),
@@ -1910,6 +1911,15 @@ fn peer_failure_summary(peer: &PeerInfo) -> TableCell {
     colored_table_cell(label, TableCellColor::Yellow)
 }
 
+/// Render the latest known score for our data on that peer.
+fn peer_remote_score_summary(peer: &PeerInfo) -> TableCell {
+    if peer.our_score_there_measured_at.is_some() {
+        plain_table_cell(format_duration_human(peer.our_score_there_seconds))
+    } else {
+        colored_table_cell("unknown", TableCellColor::DarkGrey)
+    }
+}
+
 /// Format one peer inventory entry as one aligned table row.
 fn format_peer_info_row(
     peer: &PeerInfo,
@@ -1937,6 +1947,7 @@ fn format_peer_info_row(
         colored_table_cell(storage_label, storage_color),
         plain_table_cell(format_byte_count(peer.our_stored_content_bytes)),
         plain_table_cell(format_byte_count(peer.stored_content_bytes)),
+        peer_remote_score_summary(peer),
         plain_table_cell(format_duration_human(peer.score_seconds)),
         plain_table_cell(format_unix_timestamp_local_or(
             peer.last_live_at,
@@ -3967,8 +3978,8 @@ mod tests {
                     tracked_only: false,
                     our_stored_content_bytes: 23,
                     our_content_synced: true,
-                    our_score_there_seconds: 0,
-                    our_score_there_measured_at: None,
+                    our_score_there_seconds: 29,
+                    our_score_there_measured_at: Some(proto_timestamp_from_parts(13, 0).unwrap()),
                     last_live_at: 23,
                     last_failure_at: 0,
                     last_error_class: protos::clirpc::PeerFailureClass::Unknown as i32,
@@ -4019,17 +4030,21 @@ mod tests {
         assert!(lines[0].contains("STORAGE"));
         assert!(lines[0].contains("OURS ON THEM"));
         assert!(lines[0].contains("THEIRS ON US"));
+        assert!(lines[0].contains("OUR SCORE THERE"));
+        assert!(lines[0].contains("THEIR SCORE HERE"));
         assert!(lines[1].contains("contract.onion"));
         assert!(lines[1].contains("connected"));
         assert!(lines[1].contains("mutual"));
         assert!(lines[1].contains("23"));
         assert!(lines[1].contains("13"));
+        assert!(lines[1].contains("29s"));
         assert!(lines[1].contains("7s"));
         assert!(lines[1].contains("1969-12-31 19:00:23 -05:00"));
         assert!(lines[1].contains("pin,pins-us"));
         assert!(lines[2].contains("online.onion"));
         assert!(lines[2].contains("online"));
         assert!(lines[2].contains("none"));
+        assert!(lines[2].contains("unknown"));
     }
 
     #[test]
