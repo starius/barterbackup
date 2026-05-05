@@ -11,3 +11,5 @@ target-sanitize/
 fuzz/target/
 integration/docker/gen/
 target-integration/
+
+result
