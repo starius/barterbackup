@@ -1077,6 +1077,15 @@ fn format_timestamp_local_or_unknown(
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Return whether two protobuf timestamps represent the same instant.
+fn proto_timestamps_equal(left: Option<&ProtoTimestamp>, right: Option<&ProtoTimestamp>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.seconds == right.seconds && left.nanos == right.nanos,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 /// Render one Unix timestamp in local time or one fallback label when unset.
 fn format_unix_timestamp_local_or(seconds: i64, offset: UtcOffset, fallback: &str) -> String {
     if seconds > 0 {
@@ -1626,11 +1635,13 @@ async fn unpin_peer(target: &LocalCliTarget, onion_service_id: &str) -> Result<(
 /// Print the current configured peers.
 async fn peers(target: &LocalCliTarget, filter: PeerListFilter) -> Result<()> {
     let mut client = connect_client(target).await?;
+    let context = peer_list_context_from_state(&state_response_with_client(&mut client).await?);
     for line in format_peers_response(
         &peers_response_with_client(&mut client).await?,
         &filter,
         local_utc_offset(),
         io::stdout().is_terminal(),
+        context,
     ) {
         println!("{line}");
     }
@@ -1681,6 +1692,7 @@ fn format_peers_response(
     filter: &PeerListFilter,
     local_offset: UtcOffset,
     use_color: bool,
+    context: PeerListContext,
 ) -> Vec<String> {
     let mut peers = response
         .peers
@@ -1691,7 +1703,7 @@ fn format_peers_response(
         return vec!["no peers".to_string()];
     }
 
-    peers.sort_by(|left, right| peer_sort_key(left).cmp(&peer_sort_key(right)));
+    peers.sort_by(|left, right| peer_sort_key(left, context).cmp(&peer_sort_key(right, context)));
 
     let headers = [
         ("PEER", TableAlignment::Left),
@@ -1706,7 +1718,7 @@ fn format_peers_response(
     ];
     let rows = peers
         .into_iter()
-        .map(|peer| format_peer_info_row(peer, local_offset))
+        .map(|peer| format_peer_info_row(peer, local_offset, context))
         .collect::<Vec<_>>();
     render_table(&headers, &rows, use_color)
 }
@@ -1754,35 +1766,65 @@ fn peer_failure_class_label(failure_class: protos::clirpc::PeerFailureClass) -> 
 enum PeerStorageState {
     /// MutualFresh means both sides store bytes and both sides are current.
     MutualFresh,
+    /// UnilateralFresh means only one side currently stores peer bytes and the
+    /// stored copy is current.
+    UnilateralFresh,
+    /// Recovered means the peer stores our current recovered revision but we
+    /// have not yet refreshed that fact through a later verification pass.
+    Recovered,
     /// MutualOutdated means both sides store bytes but at least one side is stale.
     MutualOutdated,
-    /// OurFresh means only the remote peer stores our current content.
-    OurFresh,
-    /// OurOutdated means only the remote peer stores our stale content.
-    OurOutdated,
-    /// TheirFresh means we store only the peer's current mirrored content.
-    TheirFresh,
-    /// TheirOutdated means we store only the peer's stale mirrored content.
-    TheirOutdated,
+    /// UnilateralOutdated means only one side stores bytes and that copy is stale.
+    UnilateralOutdated,
     /// None means neither side currently stores peer bytes.
     None,
 }
 
+/// PeerListContext carries local-only state that affects peer-row wording.
+#[derive(Clone, Copy, Debug, Default)]
+struct PeerListContext {
+    /// local_current_is_recovered reports whether the current local revision is
+    /// the latest recovered revision while recovery mode is still active.
+    local_current_is_recovered: bool,
+}
+
+/// Derive local peer-list wording context from the current daemon state.
+fn peer_list_context_from_state(response: &StateResponse) -> PeerListContext {
+    let Some(local_summary) = response.local_summary.as_ref() else {
+        return PeerListContext::default();
+    };
+    let Some(content) = local_summary.content.as_ref() else {
+        return PeerListContext::default();
+    };
+    let Some(recovery) = local_summary.recovery.as_ref() else {
+        return PeerListContext::default();
+    };
+    if !recovery.recovery_mode_enabled || recovery.latest_recovered_content_id.is_empty() {
+        return PeerListContext::default();
+    }
+
+    PeerListContext {
+        local_current_is_recovered: proto_timestamps_equal(
+            content.last_updated_at.as_ref(),
+            recovery.latest_recovered_at.as_ref(),
+        ),
+    }
+}
+
 /// Return the peer sort key for one operator-facing inventory row.
-fn peer_sort_key(peer: &PeerInfo) -> (i32, i32, Reverse<i64>, String) {
+fn peer_sort_key(peer: &PeerInfo, context: PeerListContext) -> (i32, i32, Reverse<i64>, String) {
     let pin_rank = if peer.pinned_by_us || peer.pins_us {
         0
     } else {
         1
     };
-    let storage_rank = match peer_storage_state(peer) {
+    let storage_rank = match peer_storage_state(peer, context) {
         PeerStorageState::MutualFresh => 0,
-        PeerStorageState::MutualOutdated => 1,
-        PeerStorageState::OurFresh => 2,
-        PeerStorageState::OurOutdated => 3,
-        PeerStorageState::TheirFresh => 4,
-        PeerStorageState::TheirOutdated => 5,
-        PeerStorageState::None => 6,
+        PeerStorageState::UnilateralFresh => 1,
+        PeerStorageState::Recovered => 2,
+        PeerStorageState::MutualOutdated => 3,
+        PeerStorageState::UnilateralOutdated => 4,
+        PeerStorageState::None => 5,
     };
     (
         pin_rank,
@@ -1796,20 +1838,22 @@ fn peer_sort_key(peer: &PeerInfo) -> (i32, i32, Reverse<i64>, String) {
 }
 
 /// Return the display/storage classification for one peer row.
-fn peer_storage_state(peer: &PeerInfo) -> PeerStorageState {
+fn peer_storage_state(peer: &PeerInfo, context: PeerListContext) -> PeerStorageState {
     let our_has_bytes = peer.our_stored_content_bytes > 0;
     let their_has_bytes = peer.stored_content_bytes > 0;
     let their_side_stale = peer.stale_cache || peer.tracked_only;
+    let our_side_recovered =
+        our_has_bytes && !peer.our_content_synced && context.local_current_is_recovered;
 
     match (our_has_bytes, their_has_bytes) {
         (true, true) if peer.our_content_synced && !their_side_stale => {
             PeerStorageState::MutualFresh
         }
+        (true, false) if peer.our_content_synced => PeerStorageState::UnilateralFresh,
+        _ if our_side_recovered => PeerStorageState::Recovered,
         (true, true) => PeerStorageState::MutualOutdated,
-        (true, false) if peer.our_content_synced => PeerStorageState::OurFresh,
-        (true, false) => PeerStorageState::OurOutdated,
-        (false, true) if !their_side_stale => PeerStorageState::TheirFresh,
-        (false, true) => PeerStorageState::TheirOutdated,
+        (false, true) if !their_side_stale => PeerStorageState::UnilateralFresh,
+        (true, false) | (false, true) => PeerStorageState::UnilateralOutdated,
         (false, false) => PeerStorageState::None,
     }
 }
@@ -1817,12 +1861,11 @@ fn peer_storage_state(peer: &PeerInfo) -> PeerStorageState {
 /// Return the operator-facing storage label and preferred color.
 fn peer_storage_state_display(state: PeerStorageState) -> (&'static str, TableCellColor) {
     match state {
-        PeerStorageState::MutualFresh => ("mutual fresh", TableCellColor::Green),
+        PeerStorageState::MutualFresh => ("mutual", TableCellColor::Green),
+        PeerStorageState::UnilateralFresh => ("unilateral", TableCellColor::Green),
+        PeerStorageState::Recovered => ("recovered", TableCellColor::Cyan),
         PeerStorageState::MutualOutdated => ("mutual old", TableCellColor::Yellow),
-        PeerStorageState::OurFresh => ("us fresh", TableCellColor::Green),
-        PeerStorageState::OurOutdated => ("us old", TableCellColor::Yellow),
-        PeerStorageState::TheirFresh => ("them only", TableCellColor::Green),
-        PeerStorageState::TheirOutdated => ("them old", TableCellColor::Yellow),
+        PeerStorageState::UnilateralOutdated => ("unilateral old", TableCellColor::Yellow),
         PeerStorageState::None => ("none", TableCellColor::Red),
     }
 }
@@ -1868,7 +1911,11 @@ fn peer_failure_summary(peer: &PeerInfo) -> TableCell {
 }
 
 /// Format one peer inventory entry as one aligned table row.
-fn format_peer_info_row(peer: &PeerInfo, local_offset: UtcOffset) -> Vec<TableCell> {
+fn format_peer_info_row(
+    peer: &PeerInfo,
+    local_offset: UtcOffset,
+    context: PeerListContext,
+) -> Vec<TableCell> {
     let onion_service_id = peer
         .peer
         .as_ref()
@@ -1876,7 +1923,7 @@ fn format_peer_info_row(peer: &PeerInfo, local_offset: UtcOffset) -> Vec<TableCe
         .unwrap_or("");
     let status = peer_info_status(peer);
     let (status_label, status_color) = peer_status_display(status);
-    let storage_state = peer_storage_state(peer);
+    let storage_state = peer_storage_state(peer, context);
     let (storage_label, storage_color) = peer_storage_state_display(storage_state);
     let flags = peer_flags(peer)
         .into_iter()
@@ -3960,6 +4007,7 @@ mod tests {
             &PeerListFilter::default(),
             UtcOffset::from_hms(-5, 0, 0).unwrap(),
             false,
+            PeerListContext::default(),
         );
 
         assert!(lines[0].contains("PEER"));
@@ -3969,7 +4017,7 @@ mod tests {
         assert!(lines[0].contains("THEIRS ON US"));
         assert!(lines[1].contains("contract.onion"));
         assert!(lines[1].contains("connected"));
-        assert!(lines[1].contains("mutual fresh"));
+        assert!(lines[1].contains("mutual"));
         assert!(lines[1].contains("23"));
         assert!(lines[1].contains("13"));
         assert!(lines[1].contains("7s"));
@@ -4042,18 +4090,64 @@ mod tests {
             &PeerListFilter::new(vec![PeerStatusFilter::Offline], false, true),
             UtcOffset::from_hms(-5, 0, 0).unwrap(),
             false,
+            PeerListContext::default(),
         );
 
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("FAILURE"));
         assert!(lines[1].contains("offline.onion"));
         assert!(lines[1].contains("offline"));
-        assert!(lines[1].contains("us old"));
+        assert!(lines[1].contains("unilateral old"));
         assert!(lines[1].contains("-5s"));
         assert!(lines[1].contains("never"));
         assert!(lines[1].contains("timeout x2"));
         assert!(lines[1].contains("tracked"));
         assert!(!lines[1].contains("contract.onion"));
+    }
+
+    #[test]
+    fn peer_output_labels_recovered_current_storage() {
+        let response = PeersResponse {
+            peers: vec![PeerInfo {
+                peer: Some(protos::clirpc::Peer {
+                    onion_service_id: "recovered.onion".to_string(),
+                }),
+                status: PeerStatus::Online as i32,
+                pinned_by_us: false,
+                pins_us: false,
+                has_storage: false,
+                score_seconds: 0,
+                score_measured_at: 0,
+                stored_content_bytes: 0,
+                latest_known_content_length: 0,
+                latest_cached_content_length: 0,
+                stale_cache: false,
+                storage_protection: protos::clirpc::PeerStorageProtection::None as i32,
+                tracked_only: false,
+                our_stored_content_bytes: 23,
+                our_content_synced: false,
+                last_live_at: 29,
+                last_failure_at: 0,
+                last_error_class: protos::clirpc::PeerFailureClass::Unknown as i32,
+                last_error_message: String::new(),
+                consecutive_failures: 0,
+                next_retry_at: 0,
+            }],
+        };
+
+        let lines = format_peers_response(
+            &response,
+            &PeerListFilter::default(),
+            UtcOffset::UTC,
+            false,
+            PeerListContext {
+                local_current_is_recovered: true,
+            },
+        );
+
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("recovered"));
+        assert!(!lines[1].contains("old"));
     }
 
     #[test]
