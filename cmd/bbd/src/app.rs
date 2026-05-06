@@ -20,16 +20,19 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 #[cfg(test)]
 use std::time::Instant;
 use storage::OsFilesystem;
 use tlsutil::{build_server_tls, generate_ed25519, write_keys};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify};
 use tokio_rustls::server::TlsStream;
 use tokio_stream::wrappers::{TcpListenerStream, UnboundedReceiverStream};
 use tokio_util::sync::CancellationToken;
+use tonic::transport::server::Connected;
 use tonic::{Response, Status};
 use tracing::{error, info, warn};
 
@@ -1353,6 +1356,32 @@ fn decode_test_duration(seconds: u64, nanoseconds: u32) -> Result<Duration, Stat
     Ok(Duration::new(seconds, nanoseconds))
 }
 
+/// Return the local CLI disconnect token attached to one tonic request, if any.
+fn local_cli_disconnect_token<T>(request: &tonic::Request<T>) -> Option<CancellationToken> {
+    request
+        .extensions()
+        .get::<LocalCliConnectInfo>()
+        .map(|info| info.disconnect.clone())
+}
+
+/// Run one local CLI RPC and abort it early if the client connection closes.
+async fn run_local_cli_rpc<R, F>(
+    disconnect: Option<CancellationToken>,
+    future: F,
+) -> Result<R, Status>
+where
+    F: std::future::Future<Output = Result<R, Status>>,
+{
+    if let Some(disconnect) = disconnect {
+        tokio::select! {
+            result = future => result,
+            _ = disconnect.cancelled() => Err(Status::cancelled("local CLI request cancelled")),
+        }
+    } else {
+        future.await
+    }
+}
+
 #[tonic::async_trait]
 impl BarterBackupClient for DaemonService {
     /// TimerInterceptStream streams hidden labeled timer registrations.
@@ -1842,7 +1871,8 @@ impl BarterBackupClient for DaemonRpcService {
         &self,
         request: tonic::Request<clirpc::ConnectPeerRequest>,
     ) -> Result<Response<clirpc::ConnectPeerResponse>, Status> {
-        self.daemon.connect_peer(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.connect_peer(request)).await
     }
 
     async fn pin_peer(
@@ -1950,6 +1980,110 @@ struct LocalCliTls {
     key_dir: PathBuf,
     /// server_tls is the daemon's local mTLS server configuration.
     server_tls: tokio_rustls::rustls::ServerConfig,
+}
+
+/// LocalCliConnectInfo exposes local request-cancellation state through tonic request extensions.
+#[derive(Clone, Debug)]
+struct LocalCliConnectInfo {
+    /// disconnect cancels when the local CLI connection closes or errors.
+    disconnect: CancellationToken,
+}
+
+/// LocalCliTlsStream wraps one accepted local TLS stream and tracks disconnects.
+struct LocalCliTlsStream {
+    /// inner is the accepted TLS stream handed to tonic.
+    inner: TlsStream<TcpStream>,
+    /// disconnect cancels when the underlying connection goes away.
+    disconnect: CancellationToken,
+}
+
+impl LocalCliTlsStream {
+    /// Wrap one accepted local TLS stream with disconnect tracking.
+    fn new(inner: TlsStream<TcpStream>) -> Self {
+        Self {
+            inner,
+            disconnect: CancellationToken::new(),
+        }
+    }
+}
+
+impl Drop for LocalCliTlsStream {
+    fn drop(&mut self) {
+        self.disconnect.cancel();
+    }
+}
+
+impl Connected for LocalCliTlsStream {
+    type ConnectInfo = LocalCliConnectInfo;
+
+    fn connect_info(&self) -> Self::ConnectInfo {
+        LocalCliConnectInfo {
+            disconnect: self.disconnect.clone(),
+        }
+    }
+}
+
+impl AsyncRead for LocalCliTlsStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        let filled_before = buf.filled().len();
+        match Pin::new(&mut this.inner).poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                if buf.filled().len() == filled_before {
+                    this.disconnect.cancel();
+                }
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(error)) => {
+                this.disconnect.cancel();
+                Poll::Ready(Err(error))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl AsyncWrite for LocalCliTlsStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_write(cx, buf) {
+            Poll::Ready(Err(error)) => {
+                this.disconnect.cancel();
+                Poll::Ready(Err(error))
+            }
+            other => other,
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_flush(cx) {
+            Poll::Ready(Err(error)) => {
+                this.disconnect.cancel();
+                Poll::Ready(Err(error))
+            }
+            other => other,
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_shutdown(cx) {
+            Poll::Ready(result) => {
+                this.disconnect.cancel();
+                Poll::Ready(result)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 /// DirLock keeps an exclusive lock file open for the daemon lifetime.
@@ -2624,7 +2758,9 @@ where
         async move {
             match result {
                 Ok(socket) => match tls_acceptor.accept(socket).await {
-                    Ok(stream) => Some(Ok::<TlsStream<TcpStream>, std::io::Error>(stream)),
+                    Ok(stream) => Some(Ok::<LocalCliTlsStream, std::io::Error>(
+                        LocalCliTlsStream::new(stream),
+                    )),
                     Err(error) => {
                         error!(%error, "failed local CLI TLS handshake");
                         None
@@ -2787,6 +2923,8 @@ mod tests {
     struct HangingPeerConnector {
         started: AtomicBool,
         started_notify: Notify,
+        cancelled: AtomicBool,
+        cancelled_notify: Notify,
     }
 
     impl HangingPeerConnector {
@@ -2801,6 +2939,30 @@ mod tests {
                 .context("wait for hanging peer dial")?;
             Ok(())
         }
+
+        /// Wait until one hanging dial future is dropped by cancellation.
+        async fn wait_cancelled(&self, timeout: Duration) -> anyhow::Result<()> {
+            if self.cancelled.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+
+            tokio::time::timeout(timeout, self.cancelled_notify.notified())
+                .await
+                .context("wait for hanging peer dial cancellation")?;
+            Ok(())
+        }
+    }
+
+    /// HangingDialGuard notifies tests when one pending dial future is dropped.
+    struct HangingDialGuard<'a> {
+        connector: &'a HangingPeerConnector,
+    }
+
+    impl Drop for HangingDialGuard<'_> {
+        fn drop(&mut self) {
+            self.connector.cancelled.store(true, Ordering::SeqCst);
+            self.connector.cancelled_notify.notify_waiters();
+        }
     }
 
     #[async_trait]
@@ -2812,7 +2974,9 @@ mod tests {
         ) -> anyhow::Result<transport::PeerClient> {
             self.started.store(true, Ordering::SeqCst);
             self.started_notify.notify_waiters();
-            std::future::pending().await
+            let _guard = HangingDialGuard { connector: self };
+            std::future::pending::<()>().await;
+            unreachable!("hanging peer dial should never complete")
         }
     }
 
@@ -4633,6 +4797,88 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(5), daemon_task).await??;
 
         assert!(!keys_dir.exists());
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_cli_connect_peer_cancels_when_client_disconnects() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let cli_addr = reserve_loopback_addr()?;
+        let daemon_addr = format!("https://{cli_addr}");
+        let connector = Arc::new(HangingPeerConnector::default());
+        let peer_runtime_factory = Arc::new(HangingPeerRuntimeFactory {
+            connector: connector.clone(),
+        });
+        let shutdown = CancellationToken::new();
+        let shutdown_signal = shutdown.clone();
+        let config = Config {
+            local_addr: Some(cli_addr),
+            data_dir: Some(temp_dir.path().to_path_buf()),
+            arti_config: None,
+            test_clock: false,
+            disable_maintenance: false,
+            peer_metadata_flush_delay_secs: 60,
+        };
+        let daemon_task = tokio::spawn(async move {
+            run_with_peer_runtime_until(config, peer_runtime_factory, async move {
+                shutdown_signal.cancelled().await;
+            })
+            .await
+        });
+        let keys_dir = temp_dir.path().join("cli-keys");
+
+        init_with_keys_dir(
+            &daemon_addr,
+            "correct horse battery staple",
+            false,
+            &keys_dir,
+            Duration::from_secs(5),
+        )
+        .await?;
+        unlock_with_keys_dir(
+            &daemon_addr,
+            "correct horse battery staple",
+            &keys_dir,
+            Duration::from_secs(5),
+        )
+        .await?;
+
+        let hanging_peer = Arc::new(Node::new("hanging-peer")?);
+        let daemon_addr_for_client = daemon_addr.clone();
+        let keys_dir_for_client = keys_dir.clone();
+        let request_task = tokio::spawn(async move {
+            let mut client =
+                connect_client_with_keys_dir(&daemon_addr_for_client, &keys_dir_for_client)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
+            client
+                .connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
+                    peer: Some(clirpc::Peer {
+                        onion_service_id: hanging_peer.address().to_string(),
+                    }),
+                }))
+                .await
+        });
+
+        connector.wait_started(Duration::from_secs(5)).await?;
+        request_task.abort();
+        match request_task.await {
+            Err(error) if error.is_cancelled() => {}
+            Ok(Ok(_)) => bail!("local CLI connect_peer unexpectedly succeeded"),
+            Ok(Err(error)) => bail!("local CLI connect_peer unexpectedly failed cleanly: {error}"),
+            Err(error) => return Err(anyhow!(error)),
+        }
+        connector.wait_cancelled(Duration::from_secs(5)).await?;
+
+        let mut client = connect_client_with_keys_dir(&daemon_addr, &keys_dir).await?;
+        let health = client
+            .state(tonic::Request::new(clirpc::StateRequest {}))
+            .await?
+            .into_inner();
+        assert!(!health.server_onion.is_empty());
+
+        shutdown.cancel();
+        daemon_task.await??;
         Ok(())
     }
 
