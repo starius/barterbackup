@@ -34,7 +34,7 @@ use tokio_stream::wrappers::{TcpListenerStream, UnboundedReceiverStream};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::server::Connected;
 use tonic::{Response, Status};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 const SELF_CHECK_INITIAL_DELAY_MEAN: Duration = Duration::from_secs(15 * 60);
 const SELF_CHECK_HEALTHY_DELAY_MEAN: Duration = Duration::from_secs(6 * 60 * 60);
@@ -1382,6 +1382,17 @@ where
     }
 }
 
+/// Return whether a local TLS handshake error is an expected client disconnect.
+fn is_expected_local_cli_tls_disconnect(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::BrokenPipe
+    )
+}
+
 #[tonic::async_trait]
 impl BarterBackupClient for DaemonService {
     /// TimerInterceptStream streams hidden labeled timer registrations.
@@ -1815,56 +1826,64 @@ impl BarterBackupClient for DaemonRpcService {
         &self,
         request: tonic::Request<clirpc::StateRequest>,
     ) -> Result<Response<clirpc::StateResponse>, Status> {
-        self.daemon.state(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.state(request)).await
     }
 
     async fn get_test_time(
         &self,
         request: tonic::Request<clirpc::GetTestTimeRequest>,
     ) -> Result<Response<clirpc::GetTestTimeResponse>, Status> {
-        self.daemon.get_test_time(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.get_test_time(request)).await
     }
 
     async fn set_test_time(
         &self,
         request: tonic::Request<clirpc::SetTestTimeRequest>,
     ) -> Result<Response<clirpc::SetTestTimeResponse>, Status> {
-        self.daemon.set_test_time(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.set_test_time(request)).await
     }
 
     async fn advance_test_time(
         &self,
         request: tonic::Request<clirpc::AdvanceTestTimeRequest>,
     ) -> Result<Response<clirpc::AdvanceTestTimeResponse>, Status> {
-        self.daemon.advance_test_time(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.advance_test_time(request)).await
     }
 
     async fn timer_intercept(
         &self,
         request: tonic::Request<clirpc::TimerInterceptRequest>,
     ) -> Result<Response<Self::TimerInterceptStream>, Status> {
-        self.daemon.timer_intercept(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.timer_intercept(request)).await
     }
 
     async fn init(
         &self,
         request: tonic::Request<clirpc::InitRequest>,
     ) -> Result<Response<clirpc::InitResponse>, Status> {
-        self.daemon.init(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.init(request)).await
     }
 
     async fn unlock(
         &self,
         request: tonic::Request<clirpc::UnlockRequest>,
     ) -> Result<Response<clirpc::UnlockResponse>, Status> {
-        self.daemon.unlock(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.unlock(request)).await
     }
 
     async fn stop(
         &self,
         request: tonic::Request<clirpc::StopRequest>,
     ) -> Result<Response<clirpc::StopResponse>, Status> {
-        self.daemon.stop(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.stop(request)).await
     }
 
     async fn connect_peer(
@@ -1879,98 +1898,112 @@ impl BarterBackupClient for DaemonRpcService {
         &self,
         request: tonic::Request<clirpc::PinPeerRequest>,
     ) -> Result<Response<clirpc::PinPeerResponse>, Status> {
-        self.daemon.pin_peer(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.pin_peer(request)).await
     }
 
     async fn unpin_peer(
         &self,
         request: tonic::Request<clirpc::UnpinPeerRequest>,
     ) -> Result<Response<clirpc::UnpinPeerResponse>, Status> {
-        self.daemon.unpin_peer(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.unpin_peer(request)).await
     }
 
     async fn peers(
         &self,
         request: tonic::Request<clirpc::PeersRequest>,
     ) -> Result<Response<clirpc::PeersResponse>, Status> {
-        self.daemon.peers(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.peers(request)).await
     }
 
     async fn export_built_in_peers(
         &self,
         request: tonic::Request<clirpc::ExportBuiltInPeersRequest>,
     ) -> Result<Response<clirpc::ExportBuiltInPeersResponse>, Status> {
-        self.daemon.export_built_in_peers(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.export_built_in_peers(request)).await
     }
 
     async fn set_file_stream(
         &self,
         request: tonic::Request<tonic::Streaming<clirpc::SetFileChunk>>,
     ) -> Result<Response<clirpc::SetFileResponse>, Status> {
-        self.daemon.set_file_stream(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.set_file_stream(request)).await
     }
 
     async fn delete_file(
         &self,
         request: tonic::Request<clirpc::DeleteFileRequest>,
     ) -> Result<Response<clirpc::DeleteFileResponse>, Status> {
-        self.daemon.delete_file(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.delete_file(request)).await
     }
 
     async fn get_file_stream(
         &self,
         request: tonic::Request<clirpc::GetFileRequest>,
     ) -> Result<Response<Self::GetFileStreamStream>, Status> {
-        self.daemon.get_file_stream(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.get_file_stream(request)).await
     }
 
     async fn list_files(
         &self,
         request: tonic::Request<clirpc::ListFilesRequest>,
     ) -> Result<Response<clirpc::ListFilesResponse>, Status> {
-        self.daemon.list_files(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.list_files(request)).await
     }
 
     async fn set_storage_config(
         &self,
         request: tonic::Request<clirpc::SetStorageConfigRequest>,
     ) -> Result<Response<clirpc::SetStorageConfigResponse>, Status> {
-        self.daemon.set_storage_config(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.set_storage_config(request)).await
     }
 
     async fn get_storage_config(
         &self,
         request: tonic::Request<clirpc::GetStorageConfigRequest>,
     ) -> Result<Response<clirpc::GetStorageConfigResponse>, Status> {
-        self.daemon.get_storage_config(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.get_storage_config(request)).await
     }
 
     async fn get_peer_storage(
         &self,
         request: tonic::Request<clirpc::GetPeerStorageRequest>,
     ) -> Result<Response<clirpc::GetPeerStorageResponse>, Status> {
-        self.daemon.get_peer_storage(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.get_peer_storage(request)).await
     }
 
     async fn publish_to_peer(
         &self,
         request: tonic::Request<clirpc::PublishToPeerRequest>,
     ) -> Result<Response<Self::PublishToPeerStream>, Status> {
-        self.daemon.publish_to_peer(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.publish_to_peer(request)).await
     }
 
     async fn verify_peer_storage(
         &self,
         request: tonic::Request<clirpc::VerifyPeerStorageRequest>,
     ) -> Result<Response<Self::VerifyPeerStorageStream>, Status> {
-        self.daemon.verify_peer_storage(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.verify_peer_storage(request)).await
     }
 
     async fn init_complete(
         &self,
         request: tonic::Request<clirpc::InitCompleteRequest>,
     ) -> Result<Response<clirpc::InitCompleteResponse>, Status> {
-        self.daemon.init_complete(request).await
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.init_complete(request)).await
     }
 }
 
@@ -2762,7 +2795,11 @@ where
                         LocalCliTlsStream::new(stream),
                     )),
                     Err(error) => {
-                        error!(%error, "failed local CLI TLS handshake");
+                        if is_expected_local_cli_tls_disconnect(&error) {
+                            debug!(%error, "local CLI client disconnected during TLS handshake");
+                        } else {
+                            error!(%error, "failed local CLI TLS handshake");
+                        }
                         None
                     }
                 },
