@@ -11,6 +11,7 @@ path = "src/lib.rs"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 tonic = { version = "0.14.5", features = ["transport"] }
 anyhow = "1"
+keys = { path = "../keys" }
 tlsutil = { path = "../tlsutil" }
 ed25519-dalek = "1"
 futures-util = "0.3"
@@ -20,3 +21,5 @@ transport = { path = "../transport" }
 async-trait = "0.1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 tower = { version = "0.5", features = ["util"] }
+tokio-util = "0.7"
+tracing = "0.1"

@@ -74,7 +74,8 @@ pub struct Node {
     storage_config: Mutex<clirpc::StorageConfig>,
     /// peer_connector dials other nodes when peer sync is enabled.
     peer_connector: Mutex<Option<Arc<dyn PeerConnector>>>,
-    /// peer_client_cache reuses recent outbound peer clients across operations.
+    /// peer_client_cache reuses recent outbound peer clients across operations
+    /// for connectors that are not session-backed.
     peer_client_cache: Mutex<BTreeMap<String, CachedPeerClient>>,
     /// peer_exchange_last_attempt records the last in-memory peer exchange attempt.
     peer_exchange_last_attempt: Mutex<BTreeMap<String, i64>>,
@@ -188,10 +189,12 @@ const DEFAULT_MIN_REPLICAS: i64 = 100;
 /// MAX_TRACKED_PEERS is the maximum number of peers kept in metadata.
 const MAX_TRACKED_PEERS: usize = 1024;
 
-/// MAX_CACHED_PEER_CLIENTS bounds the in-memory outbound peer client cache.
+/// MAX_CACHED_PEER_CLIENTS bounds the in-memory outbound peer client cache for
+/// non-session-backed connectors.
 const MAX_CACHED_PEER_CLIENTS: usize = 32;
 
-/// PEER_CLIENT_CACHE_IDLE_TTL_SECS expires idle cached peer clients.
+/// PEER_CLIENT_CACHE_IDLE_TTL_SECS expires idle cached peer clients for
+/// non-session-backed connectors.
 const PEER_CLIENT_CACHE_IDLE_TTL_SECS: i64 = 5 * 60;
 
 /// PEER_EXCHANGE_COOLDOWN_SECS limits how often one peer exchange runs per peer.
@@ -301,7 +304,7 @@ struct CachedPeerClient {
 /// PeerInventoryStatus reports the local daemon's current view of one peer.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum PeerInventoryStatus {
-    /// Connected means an outbound cached client is currently open.
+    /// Connected means a live peer session or cached outbound client exists.
     Connected,
     /// Online means the last completed transport interaction succeeded.
     Online,
@@ -1305,6 +1308,20 @@ fn peer_inventory_group_rank(entry: &PeerInventoryEntry) -> u8 {
     }
 }
 
+/// Return the priority used when proactively preparing long-lived peer
+/// sessions.
+fn preferred_session_group_rank(entry: &PeerInventoryEntry) -> u8 {
+    if entry.pinned_by_us {
+        0
+    } else if entry.has_storage && entry.our_stored_content_bytes > 0 {
+        1
+    } else if entry.our_stored_content_bytes > 0 {
+        2
+    } else {
+        3
+    }
+}
+
 /// Return the status priority used inside one peer listing group.
 fn peer_inventory_status_rank(status: PeerInventoryStatus) -> u8 {
     match status {
@@ -2263,7 +2280,8 @@ impl Node {
         self.update_peer_score(&peer_public_key, false).ok()
     }
 
-    /// Return one cached outbound peer client when it is still inside the idle TTL.
+    /// Return one cached outbound peer client when it is still inside the idle
+    /// TTL for non-session-backed connectors.
     fn cached_peer_client(&self, peer_onion: &str) -> Option<transport::PeerClient> {
         let now_secs = self.cache_now_secs();
         self.prune_peer_runtime_state(now_secs);
@@ -2274,8 +2292,15 @@ impl Node {
         Some(entry.client.clone())
     }
 
-    /// Report whether one cached outbound peer client is currently open.
+    /// Report whether one live peer session or cached outbound peer client is
+    /// currently open.
     fn has_cached_peer_client(&self, peer_onion: &str) -> bool {
+        if let Some(connector) = self.peer_connector.lock().unwrap().as_ref() {
+            if connector.session_backed() {
+                return connector.connected(peer_onion, &self.ed25519_keypair.secret);
+            }
+        }
+
         let now_secs = self.cache_now_secs();
         self.prune_peer_runtime_state(now_secs);
         self.peer_client_cache
@@ -2284,7 +2309,8 @@ impl Node {
             .contains_key(peer_onion)
     }
 
-    /// Remember one outbound peer client in the bounded in-memory cache.
+    /// Remember one outbound peer client in the bounded in-memory cache for
+    /// non-session-backed connectors.
     fn remember_peer_client(&self, peer_onion: &str, client: &transport::PeerClient) {
         let now_secs = self.cache_now_secs();
         self.prune_peer_runtime_state(now_secs);
@@ -2656,6 +2682,16 @@ impl Node {
         &self,
         request: &tonic::Request<T>,
     ) -> Result<PeerIdentity, Status> {
+        if let Some(peer_info) = request
+            .extensions()
+            .get::<transport::PeerSessionConnectInfo>()
+        {
+            return Ok(PeerIdentity {
+                onion_address: keys::onion_hostname_from_public_key(&peer_info.public_key),
+                public_key: peer_info.public_key,
+            });
+        }
+
         let peer_certificates = request
             .extensions()
             .get::<TlsConnectInfo<TcpConnectInfo>>()
@@ -2863,18 +2899,18 @@ impl Node {
         connect_timeout: Duration,
         track_peer: bool,
     ) -> Result<transport::PeerClient, Status> {
-        if track_peer {
-            if let Some(client) = self.cached_peer_client(peer_onion) {
-                return Ok(client);
-            }
-        }
-
         let connector = self
             .peer_connector
             .lock()
             .unwrap()
             .clone()
             .ok_or_else(|| Status::failed_precondition("peer connector is not configured"))?;
+        let session_backed = connector.session_backed();
+        if track_peer && !session_backed {
+            if let Some(client) = self.cached_peer_client(peer_onion) {
+                return Ok(client);
+            }
+        }
         let client = tokio::time::timeout(
             connect_timeout,
             connector.connect(peer_onion, &self.ed25519_keypair.secret),
@@ -2894,10 +2930,74 @@ impl Node {
         }
 
         let client = transport::configure_peer_client(client);
-        if track_peer {
+        if track_peer && !session_backed {
             self.remember_peer_client(peer_onion, &client);
         }
         Ok(client)
+    }
+
+    /// Return the current preferred outer-session capacity derived from the
+    /// replica target.
+    fn preferred_session_capacity(&self) -> usize {
+        let min_replicas = self.storage_config.lock().unwrap().min_replicas.max(0) as usize;
+        min_replicas.saturating_mul(2).max(1)
+    }
+
+    /// Return peers ordered by the current proactive session-preparation
+    /// priority.
+    fn preferred_session_peers(&self) -> Result<Vec<String>, Status> {
+        let mut inventory = self.peer_inventory()?;
+        inventory.sort_by(|left, right| {
+            preferred_session_group_rank(left)
+                .cmp(&preferred_session_group_rank(right))
+                .then(
+                    peer_inventory_status_rank(left.status)
+                        .cmp(&peer_inventory_status_rank(right.status)),
+                )
+                .then(right.last_live_at.cmp(&left.last_live_at))
+                .then(
+                    right
+                        .our_score_there_seconds
+                        .cmp(&left.our_score_there_seconds),
+                )
+                .then(left.onion_service_id.cmp(&right.onion_service_id))
+        });
+        Ok(inventory
+            .into_iter()
+            .map(|entry| entry.onion_service_id)
+            .collect())
+    }
+
+    /// Proactively establish long-lived outer sessions for the highest-priority
+    /// peers without waiting for user traffic.
+    pub async fn prepare_preferred_peer_sessions(&self) -> Result<(), Status> {
+        let connector = self
+            .peer_connector
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| Status::failed_precondition("peer connector is not configured"))?;
+        let capacity = self.preferred_session_capacity();
+        connector.set_session_capacity(&self.ed25519_keypair.secret, capacity);
+        for peer_onion in self.preferred_session_peers()?.into_iter().take(capacity) {
+            if self.is_our_onion(&peer_onion) {
+                continue;
+            }
+            if connector.connected(&peer_onion, &self.ed25519_keypair.secret) {
+                continue;
+            }
+            if let Err(error) = self
+                .connect_peer_client_with_timeout_and_tracking_base(
+                    &peer_onion,
+                    transport::PEER_CONNECT_TIMEOUT,
+                    true,
+                )
+                .await
+            {
+                debug!(peer = %peer_onion, %error, "preferred peer session preparation failed");
+            }
+        }
+        Ok(())
     }
 
     /// Run one peer RPC under the shared timeout policy.
@@ -6443,11 +6543,14 @@ mod tests {
         let service = P2pService::new(node.clone());
         let listener = netmock::bind_peer_listener(&node.ed25519_keypair().secret).await?;
         let endpoint = listener.endpoint().to_string();
-        let router = tonic::transport::Server::builder().add_service(
-            BarterBackupServerServer::new(service)
-                .max_decoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES)
-                .max_encoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES),
-        );
+        let router = tonic::transport::Server::builder()
+            .http2_keepalive_interval(Some(transport::PEER_GRPC_KEEPALIVE_INTERVAL))
+            .http2_keepalive_timeout(Some(transport::PEER_GRPC_KEEPALIVE_TIMEOUT))
+            .add_service(
+                BarterBackupServerServer::new(service)
+                    .max_decoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES)
+                    .max_encoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES),
+            );
         let handle = tokio::spawn(router.serve_with_incoming(listener.into_incoming()));
 
         Ok((endpoint, handle))
@@ -6569,6 +6672,18 @@ mod tests {
                 transport::PeerClient::new(channel),
             ))
         }
+
+        fn connected(
+            &self,
+            _peer_onion: &str,
+            _client_private_key: &ed25519_dalek::SecretKey,
+        ) -> bool {
+            false
+        }
+
+        fn session_backed(&self) -> bool {
+            false
+        }
     }
 
     /// FlakyPeerConnector fails the first few dials before delegating to a real
@@ -6613,6 +6728,18 @@ mod tests {
             }
 
             self.delegate.connect(peer_onion, client_private_key).await
+        }
+
+        fn connected(
+            &self,
+            peer_onion: &str,
+            client_private_key: &ed25519_dalek::SecretKey,
+        ) -> bool {
+            self.delegate.connected(peer_onion, client_private_key)
+        }
+
+        fn session_backed(&self) -> bool {
+            self.delegate.session_backed()
         }
     }
 
@@ -7271,6 +7398,23 @@ mod tests {
             .await
     }
 
+    async fn wait_for_condition<F, Fut>(timeout: Duration, mut condition: F) -> anyhow::Result<()>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<bool>>,
+    {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if condition().await? {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!("timed out waiting for condition");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// Publish the requester's current content to the responder with the
     /// compare-and-swap field set from the responder's stored peer metadata.
     async fn publish_current_content_to_peer(
@@ -7881,6 +8025,149 @@ mod tests {
         assert!(node.known_peers().is_empty());
 
         server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preferred_session_preparation_marks_peer_connected_without_rpc() -> anyhow::Result<()>
+    {
+        let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let local_node = Arc::new(Node::with_local_storage(
+            "preferred-session-local",
+            local_filesystem,
+        )?);
+        let peer_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer_node = Arc::new(Node::with_local_storage(
+            "preferred-session-peer",
+            peer_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        local_node.set_peer_connector(connector.clone());
+        peer_node.set_peer_connector(connector.clone());
+        local_node.add_known_peer(peer_node.address())?;
+        peer_node.add_known_peer(local_node.address())?;
+        let peer_server =
+            spawn_registered_p2p_server(peer_node.clone(), connector.as_ref()).await?;
+
+        assert!(!connector.connected(peer_node.address(), &local_node.ed25519_keypair.secret));
+        local_node.prepare_preferred_peer_sessions().await?;
+        assert!(connector.connected(peer_node.address(), &local_node.ed25519_keypair.secret));
+
+        let peer_entry = local_node
+            .peer_inventory()?
+            .into_iter()
+            .find(|entry| entry.onion_service_id == peer_node.address())
+            .ok_or_else(|| anyhow::anyhow!("missing peer inventory entry"))?;
+        assert_eq!(peer_entry.status, PeerInventoryStatus::Connected);
+
+        peer_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repeated_peer_rpcs_reuse_the_same_outer_session() -> anyhow::Result<()> {
+        let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let local_node = Arc::new(Node::with_local_storage(
+            "reuse-session-local",
+            local_filesystem,
+        )?);
+        let peer_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer_node = Arc::new(Node::with_local_storage(
+            "reuse-session-peer",
+            peer_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        local_node.set_peer_connector(connector.clone());
+        peer_node.set_peer_connector(connector.clone());
+        local_node.add_known_peer(peer_node.address())?;
+        peer_node.add_known_peer(local_node.address())?;
+        let peer_server =
+            spawn_registered_p2p_server(peer_node.clone(), connector.as_ref()).await?;
+
+        local_node.prepare_preferred_peer_sessions().await?;
+        let first_nonce = connector
+            .session_nonce(&local_node.ed25519_keypair.secret, peer_node.address())
+            .ok_or_else(|| anyhow::anyhow!("missing first session nonce"))?;
+
+        let mut client = local_node
+            .connect_peer_client_with_timeout(peer_node.address(), transport::PEER_CONNECT_TIMEOUT)
+            .await?;
+        client
+            .health_check(bbrpc::HealthCheckRequest::default())
+            .await?;
+        let mut second_client = local_node
+            .connect_peer_client_with_timeout(peer_node.address(), transport::PEER_CONNECT_TIMEOUT)
+            .await?;
+        second_client
+            .health_check(bbrpc::HealthCheckRequest::default())
+            .await?;
+
+        let second_nonce = connector
+            .session_nonce(&local_node.ed25519_keypair.secret, peer_node.address())
+            .ok_or_else(|| anyhow::anyhow!("missing second session nonce"))?;
+        assert_eq!(first_nonce, second_nonce);
+        assert_eq!(
+            connector.connected_peer_count(&local_node.ed25519_keypair.secret),
+            1
+        );
+
+        peer_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn simultaneous_dials_collapse_to_one_outer_session_per_peer() -> anyhow::Result<()> {
+        let left_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let left_node = Arc::new(Node::with_local_storage("duplicate-left", left_filesystem)?);
+        let right_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let right_node = Arc::new(Node::with_local_storage(
+            "duplicate-right",
+            right_filesystem,
+        )?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        left_node.set_peer_connector(connector.clone());
+        right_node.set_peer_connector(connector.clone());
+        left_node.add_known_peer(right_node.address())?;
+        right_node.add_known_peer(left_node.address())?;
+        let left_server =
+            spawn_registered_p2p_server(left_node.clone(), connector.as_ref()).await?;
+        let right_server =
+            spawn_registered_p2p_server(right_node.clone(), connector.as_ref()).await?;
+
+        let (left_result, right_result) = tokio::join!(
+            left_node.prepare_preferred_peer_sessions(),
+            right_node.prepare_preferred_peer_sessions(),
+        );
+        left_result?;
+        right_result?;
+
+        wait_for_condition(Duration::from_secs(2), || {
+            let connector = connector.clone();
+            let left_node = left_node.clone();
+            let right_node = right_node.clone();
+            async move {
+                Ok(
+                    connector.connected_peer_count(&left_node.ed25519_keypair.secret) == 1
+                        && connector.connected_peer_count(&right_node.ed25519_keypair.secret) == 1,
+                )
+            }
+        })
+        .await?;
+
+        let smaller_dials = left_node.address() < right_node.address();
+        assert_eq!(
+            connector
+                .session_initiated_by_us(&left_node.ed25519_keypair.secret, right_node.address()),
+            Some(smaller_dials)
+        );
+        assert_eq!(
+            connector
+                .session_initiated_by_us(&right_node.ed25519_keypair.secret, left_node.address()),
+            Some(!smaller_dials)
+        );
+
+        right_server.abort();
+        left_server.abort();
         Ok(())
     }
 

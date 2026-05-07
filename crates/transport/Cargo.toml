@@ -11,5 +11,13 @@ path = "src/lib.rs"
 anyhow = "1"
 async-trait = "0.1"
 ed25519-dalek = "1"
+futures-util = "0.3"
+hyper-util = { version = "0.1", features = ["tokio"] }
 protos = { path = "../protos" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["compat"] }
 tonic = { version = "0.14.5", features = ["transport"] }
+tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+yamux = "0.13.10"

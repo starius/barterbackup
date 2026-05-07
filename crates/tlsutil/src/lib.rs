@@ -154,7 +154,7 @@ pub fn build_peer_server_tls(server_priv: &SecretKey) -> Result<ServerConfig> {
         .with_client_cert_verifier(verifier)
         .with_single_cert(vec![server_cert], server_key)
         .map_err(|e| anyhow!("server cert: {e}"))?;
-    cfg.alpn_protocols = vec![b"h2".to_vec()];
+    cfg.alpn_protocols = vec![transport::PEER_TRANSPORT_ALPN.to_vec()];
     Ok(cfg)
 }
 
@@ -190,7 +190,7 @@ pub fn build_peer_client_tls(
         }))
         .with_client_auth_cert(vec![client_cert], client_key)
         .map_err(|e| anyhow!("client cert: {e}"))?;
-    cfg.alpn_protocols = vec![b"h2".to_vec()];
+    cfg.alpn_protocols = vec![transport::PEER_TRANSPORT_ALPN.to_vec()];
     Ok(cfg)
 }
 

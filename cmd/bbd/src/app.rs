@@ -715,11 +715,14 @@ impl PeerRuntimeFactory for TorPeerRuntimeFactory {
         // Run the peer-facing gRPC server until shutdown is requested.
         let shutdown = CancellationToken::new();
         let shutdown_signal = shutdown.clone();
-        let router = tonic::transport::Server::builder().add_service(
-            BarterBackupServerServer::new(P2pService::new(node.clone()))
-                .max_decoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES)
-                .max_encoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES),
-        );
+        let router = tonic::transport::Server::builder()
+            .http2_keepalive_interval(Some(transport::PEER_GRPC_KEEPALIVE_INTERVAL))
+            .http2_keepalive_timeout(Some(transport::PEER_GRPC_KEEPALIVE_TIMEOUT))
+            .add_service(
+                BarterBackupServerServer::new(P2pService::new(node.clone()))
+                    .max_decoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES)
+                    .max_encoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES),
+            );
         let task = tokio::spawn(async move {
             router
                 .serve_with_incoming_shutdown(listener.into_incoming(), async move {
@@ -2430,6 +2433,17 @@ async fn run_maintenance_pass(
     self_check: Arc<StdMutex<SelfCheckHealth>>,
     shutdown: &CancellationToken,
 ) {
+    let Some(session_result) = wait_for_maintenance_step(shutdown, async {
+        node.prepare_preferred_peer_sessions().await
+    })
+    .await
+    else {
+        return;
+    };
+    if let Err(error) = session_result {
+        warn!(%error, "background peer session preparation failed");
+    }
+
     // Attempt recovery first so the local node restores its newest revision
     // before it starts proposing or checking contracts.
     let Some(recovery_result) = wait_for_maintenance_step(shutdown, node.run_recovery_pass()).await
@@ -3236,6 +3250,8 @@ mod tests {
         let shutdown_signal = shutdown.clone();
         let task = tokio::spawn(async move {
             tonic::transport::Server::builder()
+                .http2_keepalive_interval(Some(transport::PEER_GRPC_KEEPALIVE_INTERVAL))
+                .http2_keepalive_timeout(Some(transport::PEER_GRPC_KEEPALIVE_TIMEOUT))
                 .add_service(
                     BarterBackupServerServer::new(P2pService::new(node))
                         .max_decoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES)
@@ -3328,6 +3344,8 @@ mod tests {
             let shutdown_signal = shutdown.clone();
             let task = tokio::spawn(async move {
                 tonic::transport::Server::builder()
+                    .http2_keepalive_interval(Some(transport::PEER_GRPC_KEEPALIVE_INTERVAL))
+                    .http2_keepalive_timeout(Some(transport::PEER_GRPC_KEEPALIVE_TIMEOUT))
                     .add_service(
                         BarterBackupServerServer::new(P2pService::new(node))
                             .max_decoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES)
@@ -3356,6 +3374,8 @@ mod tests {
 
         Ok(tokio::spawn(async move {
             tonic::transport::Server::builder()
+                .http2_keepalive_interval(Some(transport::PEER_GRPC_KEEPALIVE_INTERVAL))
+                .http2_keepalive_timeout(Some(transport::PEER_GRPC_KEEPALIVE_TIMEOUT))
                 .add_service(
                     BarterBackupServerServer::new(P2pService::new(node))
                         .max_decoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES)

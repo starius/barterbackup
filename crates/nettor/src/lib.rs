@@ -10,7 +10,6 @@ use arti_client::{config::TorClientConfig, TorClient};
 use async_trait::async_trait;
 use ed25519_dalek::SecretKey;
 use futures::{Stream, StreamExt};
-use hyper_util::rt::TokioIo;
 use std::fs;
 use std::io;
 #[cfg(unix)]
@@ -19,17 +18,14 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::mpsc;
 use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_stream::wrappers::ReceiverStream;
 use toml::Value as TomlValue;
 use tonic::transport::server::Connected;
-use tonic::transport::Endpoint;
 use tor_config::sources::MustRead;
 use tor_config::{resolve as resolve_config, ConfigurationSource, ConfigurationSources};
 use tor_config_path::arti_client_base_resolver;
-use tower::service_fn;
 use tracing::{info, warn};
 use transport::{PeerClient, PeerConnector};
 
@@ -42,14 +38,13 @@ use tor_llcrypto::pk::ed25519::{ExpandedKeypair, Keypair};
 use tor_rtcompat::PreferredRuntime;
 
 type TorDataStream = tor_proto::client::stream::DataStream;
-type PeerTlsStream = tokio_rustls::server::TlsStream<OnionStream<TorDataStream>>;
-type PeerIncoming = Pin<Box<dyn Stream<Item = Result<PeerTlsStream, io::Error>> + Send>>;
 const BARTERBACKUP_HS_NICKNAME: &str = "barterbackup";
 
 /// TorTransport is a cloneable handle around one bootstrapped Arti client.
 #[derive(Clone)]
 pub struct TorTransport {
     client: TorClient<PreferredRuntime>,
+    sessions: Arc<Mutex<Option<transport::PeerSessionRegistry>>>,
 }
 
 /// LoadedArtiConfig is one resolved Arti client config plus its effective state dir.
@@ -70,11 +65,15 @@ impl TorTransport {
             .await
             .context("bootstrap arti")?;
 
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            sessions: Arc::new(Mutex::new(None)),
+        })
     }
 
     /// Publish a deterministic onion service and return a tonic incoming stream.
     pub async fn bind_peer_listener(&self, server_priv: &SecretKey) -> Result<TorPeerListener> {
+        let sessions = self.session_registry(server_priv)?;
         let nickname: HsNickname = BARTERBACKUP_HS_NICKNAME
             .to_string()
             .try_into()
@@ -95,27 +94,40 @@ impl TorTransport {
             keys::onion_hostname_from_public_key(&ed25519_dalek::PublicKey::from(server_priv));
         let tls_acceptor =
             tokio_rustls::TlsAcceptor::from(Arc::new(tlsutil::build_peer_server_tls(server_priv)?));
-        let (tx, rx) = mpsc::channel(32);
         let mut stream_requests = handle_rend_requests(rend_requests);
+        let accept_sessions = sessions.clone();
 
         let accept_task = tokio::spawn(async move {
             while let Some(stream_request) = stream_requests.next().await {
                 let tls_acceptor = tls_acceptor.clone();
-                let tx = tx.clone();
+                let sessions = accept_sessions.clone();
 
                 tokio::spawn(async move {
-                    let result = match stream_request
-                        .accept(tor_cell::relaycell::msg::Connected::new_empty())
-                        .await
-                    {
-                        Ok(data_stream) => tls_acceptor
+                    let result = async {
+                        let data_stream = stream_request
+                            .accept(tor_cell::relaycell::msg::Connected::new_empty())
+                            .await
+                            .map_err(io::Error::other)?;
+                        let tls_stream = tls_acceptor
                             .accept(OnionStream::new(data_stream))
                             .await
-                            .map_err(io::Error::other),
-                        Err(error) => Err(io::Error::other(error)),
-                    };
-                    if tx.send(result).await.is_err() {
-                        warn!("dropping arti peer stream because the listener was closed");
+                            .map_err(io::Error::other)?;
+                        let peer_public_key =
+                            peer_public_key_from_common_state(tls_stream.get_ref().1)
+                                .map_err(io::Error::other)?;
+                        let peer_onion = keys::onion_hostname_from_public_key(&peer_public_key);
+                        sessions
+                            .register_inbound_session(
+                                &peer_onion,
+                                peer_public_key,
+                                Box::new(tls_stream),
+                            )
+                            .await
+                            .map_err(io::Error::other)
+                    }
+                    .await;
+                    if let Err(error) = result {
+                        warn!(%error, "failed to register inbound arti peer session");
                     }
                 });
             }
@@ -124,10 +136,24 @@ impl TorTransport {
         info!(%onion_address, "arti peer listener started");
         Ok(TorPeerListener {
             onion_address,
-            incoming: Box::pin(ReceiverStream::new(rx)),
+            incoming: sessions.take_incoming()?,
             _running: running,
             _accept_task: accept_task,
         })
+    }
+
+    fn session_registry(&self, local_priv: &SecretKey) -> Result<transport::PeerSessionRegistry> {
+        let local_onion =
+            keys::onion_hostname_from_public_key(&ed25519_dalek::PublicKey::from(local_priv));
+        let mut sessions = self.sessions.lock().unwrap();
+        match sessions.as_ref() {
+            Some(existing) => Ok(existing.clone()),
+            None => {
+                let registry = transport::PeerSessionRegistry::new(local_onion);
+                *sessions = Some(registry.clone());
+                Ok(registry)
+            }
+        }
     }
 }
 
@@ -294,44 +320,53 @@ impl PeerConnector for TorTransport {
         peer_onion: &str,
         client_private_key: &SecretKey,
     ) -> Result<PeerClient> {
+        let sessions = self.session_registry(client_private_key)?;
+        if sessions.connected(peer_onion) {
+            return Ok(sessions.client_for_peer(peer_onion));
+        }
+
         let client_tls = tlsutil::build_peer_client_tls(peer_onion, client_private_key)?;
-        let endpoint = Endpoint::from_shared(format!("http://{peer_onion}:80"))?;
         let connector = tokio_rustls::TlsConnector::from(Arc::new(client_tls));
         let server_name = ServerName::try_from(peer_onion.to_string())
             .map_err(|err| anyhow!("invalid peer onion {peer_onion:?}: {err}"))?;
         let tor_client = self.client.clone();
-        let peer_onion = peer_onion.to_string();
+        let stream: TorDataStream = tor_client
+            .connect((peer_onion, 80))
+            .await
+            .context("dial peer onion through arti")?;
+        let tls_stream = connector
+            .connect(server_name, OnionStream::new(stream))
+            .await
+            .context("complete peer TLS handshake")?;
+        let peer_public_key = peer_public_key_from_common_state(tls_stream.get_ref().1)?;
+        sessions
+            .register_outbound_session(peer_onion, peer_public_key, Box::new(tls_stream))
+            .await
+    }
 
-        let channel = endpoint
-            .connect_with_connector(service_fn(move |_| {
-                let connector = connector.clone();
-                let server_name = server_name.clone();
-                let tor_client = tor_client.clone();
-                let peer_onion = peer_onion.clone();
+    fn connected(&self, peer_onion: &str, _client_private_key: &SecretKey) -> bool {
+        self.sessions
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|sessions| sessions.connected(peer_onion))
+    }
 
-                async move {
-                    let stream: TorDataStream = tor_client
-                        .connect((peer_onion.as_str(), 80))
-                        .await
-                        .map_err(io::Error::other)?;
-                    let tls_stream = connector
-                        .connect(server_name, OnionStream::new(stream))
-                        .await
-                        .map_err(io::Error::other)?;
+    fn session_backed(&self) -> bool {
+        true
+    }
 
-                    Ok::<_, io::Error>(TokioIo::new(tls_stream))
-                }
-            }))
-            .await?;
-
-        Ok(transport::configure_peer_client(PeerClient::new(channel)))
+    fn set_session_capacity(&self, client_private_key: &SecretKey, capacity: usize) {
+        if let Ok(sessions) = self.session_registry(client_private_key) {
+            sessions.set_capacity(capacity);
+        }
     }
 }
 
 /// TorPeerListener owns the published onion service and its accepted streams.
 pub struct TorPeerListener {
     onion_address: String,
-    incoming: PeerIncoming,
+    incoming: transport::PeerSessionIncoming,
     _running: Arc<RunningOnionService>,
     _accept_task: tokio::task::JoinHandle<()>,
 }
@@ -349,7 +384,7 @@ impl TorPeerListener {
 }
 
 impl Stream for TorPeerListener {
-    type Item = Result<PeerTlsStream, io::Error>;
+    type Item = Result<transport::PeerSessionServerIo, io::Error>;
 
     fn poll_next(
         mut self: Pin<&mut Self>,
@@ -358,7 +393,7 @@ impl Stream for TorPeerListener {
         // Keep the running onion service and accept task alive for as long as
         // tonic holds the incoming stream. Dropping them would tear down the
         // service immediately after startup.
-        self.as_mut().get_mut().incoming.as_mut().poll_next(cx)
+        Pin::new(&mut self.as_mut().get_mut().incoming).poll_next(cx)
     }
 }
 
@@ -425,6 +460,19 @@ fn hs_id_keypair_from_secret(server_priv: &SecretKey) -> HsIdKeypair {
     let keypair = Keypair::from_bytes(server_priv.as_bytes());
     let expanded = ExpandedKeypair::from(&keypair);
     HsIdKeypair::from(expanded)
+}
+
+/// Extract the authenticated peer public key from one completed rustls session.
+fn peer_public_key_from_common_state(
+    state: &tokio_rustls::rustls::CommonState,
+) -> Result<ed25519_dalek::PublicKey> {
+    let peer_certificates = state
+        .peer_certificates()
+        .ok_or_else(|| anyhow!("peer TLS handshake omitted client certificate"))?;
+    let end_entity = peer_certificates
+        .first()
+        .ok_or_else(|| anyhow!("peer TLS handshake omitted client certificate"))?;
+    tlsutil::public_key_from_certificate_der(end_entity.as_ref())
 }
 
 /// Build a unique temporary state directory for ad-hoc Arti experimentation.

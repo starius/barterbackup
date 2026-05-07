@@ -4,6 +4,8 @@
 //! Concrete implementations live in `netmock` for tests and `nettor` for the
 //! Tor transport.
 
+mod session;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use ed25519_dalek::SecretKey;
@@ -14,6 +16,11 @@ use tonic::Status;
 
 /// PeerClient is a connected gRPC client for the peer-to-peer API.
 pub type PeerClient = BarterBackupServerClient<Channel>;
+
+pub use session::{
+    BoxedAsyncIo, PeerSessionConnectInfo, PeerSessionIncoming, PeerSessionRegistry,
+    PeerSessionServerIo, PEER_TRANSPORT_ALPN,
+};
 
 /// MAX_PEER_CONTENT_BYTES is the largest encrypted blob the current peer RPC
 /// model is willing to move in one piece.
@@ -28,6 +35,13 @@ pub const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// PEER_RPC_TIMEOUT bounds one peer RPC once the channel is established.
 pub const PEER_RPC_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// PEER_GRPC_KEEPALIVE_INTERVAL keeps long-lived peer h2 lanes active.
+pub const PEER_GRPC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// PEER_GRPC_KEEPALIVE_TIMEOUT bounds how long one peer h2 ping may remain
+/// unacknowledged before the lane is dropped.
+pub const PEER_GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// PEER_RETRY_INITIAL_BACKOFF is the base pause before a second attempt.
 pub const PEER_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
@@ -136,6 +150,21 @@ pub trait PeerConnector: Send + Sync {
     /// Connect to `peer_onion` using the caller's Ed25519 private key.
     async fn connect(&self, peer_onion: &str, client_private_key: &SecretKey)
         -> Result<PeerClient>;
+
+    /// Return whether `peer_onion` currently has a live authenticated outer
+    /// session.
+    fn connected(&self, _peer_onion: &str, _client_private_key: &SecretKey) -> bool {
+        false
+    }
+
+    /// Report whether this connector uses long-lived outer peer sessions as
+    /// its primary connection model.
+    fn session_backed(&self) -> bool {
+        false
+    }
+
+    /// Set the outer-session capacity for the local node using this connector.
+    fn set_session_capacity(&self, _client_private_key: &SecretKey, _capacity: usize) {}
 }
 
 #[cfg(test)]
