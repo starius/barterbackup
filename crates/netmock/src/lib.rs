@@ -266,14 +266,14 @@ impl PeerConnector for MockPeerConnector {
             .session_nonce(peer_onion)
     }
 
-    fn set_session_capacity(&self, client_private_key: &SecretKey, capacity: usize) {
+    fn set_opportunistic_session_capacity(&self, client_private_key: &SecretKey, capacity: usize) {
         self.local_sessions(client_private_key)
-            .set_capacity(capacity);
+            .set_opportunistic_capacity(capacity);
     }
 
-    fn set_preferred_sessions(&self, client_private_key: &SecretKey, preferred_peers: &[String]) {
+    fn set_durable_session_peers(&self, client_private_key: &SecretKey, durable_peers: &[String]) {
         self.local_sessions(client_private_key)
-            .set_preferred_peers(preferred_peers);
+            .set_durable_peers(durable_peers);
     }
 }
 

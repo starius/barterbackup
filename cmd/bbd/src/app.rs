@@ -2433,10 +2433,8 @@ async fn run_maintenance_pass(
     self_check: Arc<StdMutex<SelfCheckHealth>>,
     shutdown: &CancellationToken,
 ) {
-    let Some(session_result) = wait_for_maintenance_step(shutdown, async {
-        node.prepare_preferred_peer_sessions().await
-    })
-    .await
+    let Some(session_result) =
+        wait_for_maintenance_step(shutdown, async { node.prepare_peer_sessions().await }).await
     else {
         return;
     };
@@ -3046,17 +3044,17 @@ mod tests {
             None
         }
 
-        fn set_session_capacity(
+        fn set_opportunistic_session_capacity(
             &self,
             _client_private_key: &ed25519_dalek::SecretKey,
             _capacity: usize,
         ) {
         }
 
-        fn set_preferred_sessions(
+        fn set_durable_session_peers(
             &self,
             _client_private_key: &ed25519_dalek::SecretKey,
-            _preferred_peers: &[String],
+            _durable_peers: &[String],
         ) {
         }
     }
@@ -3111,17 +3109,17 @@ mod tests {
             None
         }
 
-        fn set_session_capacity(
+        fn set_opportunistic_session_capacity(
             &self,
             _client_private_key: &ed25519_dalek::SecretKey,
             _capacity: usize,
         ) {
         }
 
-        fn set_preferred_sessions(
+        fn set_durable_session_peers(
             &self,
             _client_private_key: &ed25519_dalek::SecretKey,
-            _preferred_peers: &[String],
+            _durable_peers: &[String],
         ) {
         }
     }

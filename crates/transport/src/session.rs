@@ -11,6 +11,7 @@ use ed25519_dalek::PublicKey;
 use futures_util::Stream;
 use hyper_util::rt::TokioIo;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::future::poll_fn;
 use std::io;
 use std::pin::Pin;
@@ -132,8 +133,8 @@ impl PeerSessionRegistry {
             inner: Arc::new(PeerSessionRegistryInner {
                 local_onion,
                 next_session_nonce: AtomicU64::new(1),
-                capacity: AtomicUsize::new(32),
-                preferred_ranks: Mutex::new(BTreeMap::new()),
+                opportunistic_capacity: AtomicUsize::new(32),
+                durable_peers: Mutex::new(BTreeSet::new()),
                 slots: Mutex::new(BTreeMap::new()),
                 incoming_tx,
                 incoming_rx: Mutex::new(Some(incoming_rx)),
@@ -141,10 +142,11 @@ impl PeerSessionRegistry {
         }
     }
 
-    /// Set the maximum number of live peer slots this registry should keep.
-    pub fn set_capacity(&self, capacity: usize) {
+    /// Set the maximum number of opportunistic peer sessions this registry
+    /// should keep.
+    pub fn set_opportunistic_capacity(&self, capacity: usize) {
         self.inner
-            .capacity
+            .opportunistic_capacity
             .store(capacity.max(1), Ordering::Relaxed);
         let inner = self.inner.clone();
         tokio::spawn(async move {
@@ -152,15 +154,12 @@ impl PeerSessionRegistry {
         });
     }
 
-    /// Set the preferred peer-session retention order for this registry.
-    pub fn set_preferred_peers(&self, preferred_peers: &[String]) {
-        let mut preferred_ranks = self.inner.preferred_ranks.lock().unwrap();
-        preferred_ranks.clear();
-        for (rank, peer_onion) in preferred_peers.iter().enumerate() {
-            preferred_ranks.insert(peer_onion.clone(), rank);
-        }
-        drop(preferred_ranks);
-
+    /// Set the peers that should keep durable outer sessions in this registry.
+    pub fn set_durable_peers(&self, durable_peers: &[String]) {
+        let mut durable = self.inner.durable_peers.lock().unwrap();
+        durable.clear();
+        durable.extend(durable_peers.iter().cloned());
+        drop(durable);
         let inner = self.inner.clone();
         tokio::spawn(async move {
             inner.enforce_capacity().await;
@@ -296,8 +295,8 @@ impl PeerSessionRegistry {
 struct PeerSessionRegistryInner {
     local_onion: String,
     next_session_nonce: AtomicU64,
-    capacity: AtomicUsize,
-    preferred_ranks: Mutex<BTreeMap<String, usize>>,
+    opportunistic_capacity: AtomicUsize,
+    durable_peers: Mutex<BTreeSet<String>>,
     slots: Mutex<BTreeMap<String, Arc<PeerSessionSlot>>>,
     incoming_tx: mpsc::Sender<PeerSessionServerIo>,
     incoming_rx: Mutex<Option<mpsc::Receiver<PeerSessionServerIo>>>,
@@ -347,7 +346,8 @@ impl PeerSessionRegistryInner {
     }
 
     async fn enforce_capacity(self: &Arc<Self>) {
-        let capacity = self.capacity.load(Ordering::Relaxed);
+        let capacity = self.opportunistic_capacity.load(Ordering::Relaxed);
+        let durable_peers = self.durable_peers.lock().unwrap().clone();
         let mut eviction_candidates = self
             .slots
             .lock()
@@ -355,15 +355,9 @@ impl PeerSessionRegistryInner {
             .values()
             .cloned()
             .filter_map(|slot| {
-                slot.current_session().map(|session| {
-                    let rank = self
-                        .preferred_ranks
-                        .lock()
-                        .unwrap()
-                        .get(&session.peer_onion)
-                        .copied()
-                        .unwrap_or(usize::MAX);
-                    (rank, session.session_nonce, session)
+                slot.current_session().and_then(|session| {
+                    (!durable_peers.contains(&session.peer_onion))
+                        .then_some((session.session_nonce, session))
                 })
             })
             .collect::<Vec<_>>();
@@ -371,13 +365,13 @@ impl PeerSessionRegistryInner {
             return;
         }
 
-        eviction_candidates.sort_by_key(|(rank, session_nonce, _)| (*rank, *session_nonce));
+        eviction_candidates.sort_by_key(|(session_nonce, _)| *session_nonce);
         let excess = eviction_candidates.len().saturating_sub(capacity);
-        for (_, _, session) in eviction_candidates.into_iter().rev().take(excess) {
+        for (_, session) in eviction_candidates.into_iter().take(excess) {
             info!(
                 peer = %session.peer_onion,
                 session_nonce = session.session_nonce,
-                "evicting outer peer session because the registry is over capacity"
+                "evicting opportunistic outer peer session because the registry is over capacity"
             );
             session.shutdown().await;
         }

@@ -2168,9 +2168,9 @@ fn format_storage_config_response(
                 .unwrap_or_default()
         ));
         lines.push(format!(
-            "max_cached_peer_clients: {}",
+            "opportunistic_session_capacity: {}",
             resource_policy
-                .map(|policy| policy.max_cached_peer_clients)
+                .map(|policy| policy.opportunistic_session_capacity)
                 .unwrap_or_default()
         ));
         lines.push(format!(
@@ -4361,7 +4361,7 @@ mod tests {
                 peer_retry_initial_backoff_ms: 46,
                 peer_retry_max_backoff_ms: 47,
                 max_tracked_peers: 48,
-                max_cached_peer_clients: 49,
+                opportunistic_session_capacity: 49,
                 chunking_supported: false,
             }),
         };
@@ -4432,7 +4432,7 @@ mod tests {
         assert!(lines.iter().any(|line| line == "max_tracked_peers: 48"));
         assert!(lines
             .iter()
-            .any(|line| line == "max_cached_peer_clients: 49"));
+            .any(|line| line == "opportunistic_session_capacity: 49"));
         assert!(lines.iter().any(|line| line == "chunking_supported: false"));
     }
 
@@ -4466,7 +4466,7 @@ mod tests {
                 peer_retry_initial_backoff_ms: 46,
                 peer_retry_max_backoff_ms: 47,
                 max_tracked_peers: 48,
-                max_cached_peer_clients: 49,
+                opportunistic_session_capacity: 49,
                 chunking_supported: false,
             }),
         };

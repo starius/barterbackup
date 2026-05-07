@@ -740,7 +740,7 @@ pub fn resource_policy() -> clirpc::ResourcePolicy {
         peer_retry_initial_backoff_ms: duration_to_millis_i64(retry_policy.initial_backoff),
         peer_retry_max_backoff_ms: duration_to_millis_i64(retry_policy.max_backoff),
         max_tracked_peers: i64::try_from(MAX_TRACKED_PEERS).unwrap_or(i64::MAX),
-        max_cached_peer_clients: i64::try_from(DEFAULT_OPPORTUNISTIC_SESSION_CAPACITY)
+        opportunistic_session_capacity: i64::try_from(DEFAULT_OPPORTUNISTIC_SESSION_CAPACITY)
             .unwrap_or(i64::MAX),
         chunking_supported: false,
     }
@@ -1312,6 +1312,12 @@ fn preferred_session_group_rank(entry: &PeerInventoryEntry) -> u8 {
     } else {
         3
     }
+}
+
+/// Report whether real storage is currently involved with the peer in either
+/// direction.
+fn peer_has_storage_involvement(entry: &PeerInventoryEntry) -> bool {
+    entry.stored_content_bytes > 0 || entry.our_stored_content_bytes > 0
 }
 
 /// Return the status priority used inside one peer listing group.
@@ -2863,16 +2869,9 @@ impl Node {
         Ok(client)
     }
 
-    /// Return the current preferred outer-session capacity derived from the
-    /// replica target.
-    fn preferred_session_capacity(&self) -> usize {
-        let min_replicas = self.storage_config.lock().unwrap().min_replicas.max(0) as usize;
-        min_replicas.saturating_mul(2).max(1)
-    }
-
-    /// Return peers ordered by the current proactive session-preparation
-    /// priority.
-    fn preferred_session_peers(&self) -> Result<Vec<String>, Status> {
+    /// Return storage-involved peers ordered by the current proactive
+    /// session-preparation priority.
+    fn durable_session_peers(&self) -> Result<Vec<String>, Status> {
         let mut inventory = self.peer_inventory()?;
         inventory.sort_by(|left, right| {
             preferred_session_group_rank(left)
@@ -2891,29 +2890,31 @@ impl Node {
         });
         Ok(inventory
             .into_iter()
+            .filter(peer_has_storage_involvement)
             .map(|entry| entry.onion_service_id)
             .collect())
     }
 
-    /// Proactively establish long-lived outer sessions for the highest-priority
+    /// Proactively establish long-lived outer sessions for storage-involved
     /// peers without waiting for user traffic.
-    pub async fn prepare_preferred_peer_sessions(&self) -> Result<(), Status> {
+    pub async fn prepare_peer_sessions(&self) -> Result<(), Status> {
         let connector = self
             .peer_connector
             .lock()
             .unwrap()
             .clone()
             .ok_or_else(|| Status::failed_precondition("peer connector is not configured"))?;
-        let capacity = self.preferred_session_capacity();
-        connector.set_session_capacity(&self.ed25519_keypair.secret, capacity);
-        let preferred_peers = self
-            .preferred_session_peers()?
+        connector.set_opportunistic_session_capacity(
+            &self.ed25519_keypair.secret,
+            DEFAULT_OPPORTUNISTIC_SESSION_CAPACITY,
+        );
+        let durable_peers = self
+            .durable_session_peers()?
             .into_iter()
             .filter(|peer_onion| !self.is_our_onion(peer_onion))
-            .take(capacity)
             .collect::<Vec<_>>();
-        connector.set_preferred_sessions(&self.ed25519_keypair.secret, &preferred_peers);
-        for peer_onion in preferred_peers {
+        connector.set_durable_session_peers(&self.ed25519_keypair.secret, &durable_peers);
+        for peer_onion in durable_peers {
             if self.is_our_onion(&peer_onion) {
                 continue;
             }
@@ -6616,22 +6617,22 @@ mod tests {
             self.delegate.session_nonce(peer_onion, client_private_key)
         }
 
-        fn set_session_capacity(
+        fn set_opportunistic_session_capacity(
             &self,
             client_private_key: &ed25519_dalek::SecretKey,
             capacity: usize,
         ) {
             self.delegate
-                .set_session_capacity(client_private_key, capacity);
+                .set_opportunistic_session_capacity(client_private_key, capacity);
         }
 
-        fn set_preferred_sessions(
+        fn set_durable_session_peers(
             &self,
             client_private_key: &ed25519_dalek::SecretKey,
-            preferred_peers: &[String],
+            durable_peers: &[String],
         ) {
             self.delegate
-                .set_preferred_sessions(client_private_key, preferred_peers);
+                .set_durable_session_peers(client_private_key, durable_peers);
         }
     }
 
@@ -7875,8 +7876,8 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn preferred_session_preparation_marks_peer_connected_without_rpc() -> anyhow::Result<()>
-    {
+    async fn storage_involved_session_preparation_marks_peer_connected_without_rpc(
+    ) -> anyhow::Result<()> {
         let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let local_node = Arc::new(Node::with_local_storage(
             "preferred-session-local",
@@ -7894,9 +7895,19 @@ mod tests {
         peer_node.add_known_peer(local_node.address())?;
         let peer_server =
             spawn_registered_p2p_server(peer_node.clone(), connector.as_ref()).await?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer_node.address())?;
+        local_node.with_store(|store| {
+            store.set_peer_content_state(
+                peer_public_key.as_bytes(),
+                Some(b"cached"),
+                Some(13),
+                Some(b"cached"),
+                Some(13),
+            )
+        })?;
 
         assert!(!connector.connected(peer_node.address(), &local_node.ed25519_keypair.secret));
-        local_node.prepare_preferred_peer_sessions().await?;
+        local_node.prepare_peer_sessions().await?;
         assert!(connector.connected(peer_node.address(), &local_node.ed25519_keypair.secret));
 
         let peer_entry = local_node
@@ -7930,14 +7941,12 @@ mod tests {
         let peer_server =
             spawn_registered_p2p_server(peer_node.clone(), connector.as_ref()).await?;
 
-        local_node.prepare_preferred_peer_sessions().await?;
-        let first_nonce = connector
-            .session_nonce(&local_node.ed25519_keypair.secret, peer_node.address())
-            .ok_or_else(|| anyhow::anyhow!("missing first session nonce"))?;
-
         let mut client = local_node
             .connect_peer_client_with_timeout(peer_node.address(), transport::PEER_CONNECT_TIMEOUT)
             .await?;
+        let first_nonce = connector
+            .session_nonce(&local_node.ed25519_keypair.secret, peer_node.address())
+            .ok_or_else(|| anyhow::anyhow!("missing first session nonce"))?;
         client
             .health_check(bbrpc::HealthCheckRequest::default())
             .await?;
@@ -7962,14 +7971,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn preferred_session_preparation_evicts_low_priority_sessions_first() -> anyhow::Result<()>
-    {
+    async fn durable_sessions_survive_opportunistic_capacity_pressure() -> anyhow::Result<()> {
         let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let local_node = Arc::new(Node::with_local_storage(
             "session-eviction-local",
             local_filesystem,
         )?);
-        local_node.storage_config.lock().unwrap().min_replicas = 1;
         let connector = Arc::new(netmock::MockPeerConnector::new());
         local_node.set_peer_connector(connector.clone());
 
@@ -7988,39 +7995,54 @@ mod tests {
             peer_servers
                 .push(spawn_registered_p2p_server(peer_node.clone(), connector.as_ref()).await?);
         }
-        local_node.pin_peer(&peer_addresses[0])?;
 
-        let preferred_peers = local_node
-            .preferred_session_peers()?
-            .into_iter()
-            .filter(|peer_onion| !local_node.is_our_onion(peer_onion))
-            .take(2)
-            .collect::<Vec<_>>();
-        assert_eq!(preferred_peers.len(), 2);
-        let low_priority_peer = peer_addresses
-            .iter()
-            .find(|peer_onion| !preferred_peers.contains(peer_onion))
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("missing low-priority peer"))?;
+        let durable_peer = peer_addresses[0].clone();
+        let first_opportunistic_peer = peer_addresses[1].clone();
+        let second_opportunistic_peer = peer_addresses[2].clone();
+        let durable_public_key = keys::public_key_from_onion_hostname(&durable_peer)?;
+        local_node.with_store(|store| {
+            store.set_peer_content_state(
+                durable_public_key.as_bytes(),
+                Some(b"durable"),
+                Some(17),
+                Some(b"durable"),
+                Some(17),
+            )
+        })?;
 
-        local_node.prepare_preferred_peer_sessions().await?;
-        let _client = local_node
-            .connect_peer_client_with_timeout(&low_priority_peer, transport::PEER_CONNECT_TIMEOUT)
+        local_node.prepare_peer_sessions().await?;
+        connector.set_opportunistic_session_capacity(&local_node.ed25519_keypair.secret, 1);
+        let _first = local_node
+            .connect_peer_client_with_timeout(
+                &first_opportunistic_peer,
+                transport::PEER_CONNECT_TIMEOUT,
+            )
+            .await?;
+        let _second = local_node
+            .connect_peer_client_with_timeout(
+                &second_opportunistic_peer,
+                transport::PEER_CONNECT_TIMEOUT,
+            )
             .await?;
 
         wait_for_condition(Duration::from_secs(2), || {
             let connector = connector.clone();
             let local_node = local_node.clone();
-            let preferred_peers = preferred_peers.clone();
-            let low_priority_peer = low_priority_peer.clone();
+            let durable_peer = durable_peer.clone();
+            let first_opportunistic_peer = first_opportunistic_peer.clone();
+            let second_opportunistic_peer = second_opportunistic_peer.clone();
             async move {
                 Ok(
                     connector.connected_peer_count(&local_node.ed25519_keypair.secret) == 2
-                        && preferred_peers.iter().all(|peer_onion| {
-                            connector.connected(peer_onion, &local_node.ed25519_keypair.secret)
-                        })
-                        && !connector
-                            .connected(&low_priority_peer, &local_node.ed25519_keypair.secret),
+                        && connector.connected(&durable_peer, &local_node.ed25519_keypair.secret)
+                        && !connector.connected(
+                            &first_opportunistic_peer,
+                            &local_node.ed25519_keypair.secret,
+                        )
+                        && connector.connected(
+                            &second_opportunistic_peer,
+                            &local_node.ed25519_keypair.secret,
+                        ),
                 )
             }
         })
@@ -8052,8 +8074,14 @@ mod tests {
             spawn_registered_p2p_server(right_node.clone(), connector.as_ref()).await?;
 
         let (left_result, right_result) = tokio::join!(
-            left_node.prepare_preferred_peer_sessions(),
-            right_node.prepare_preferred_peer_sessions(),
+            left_node.connect_peer_client_with_timeout(
+                right_node.address(),
+                transport::PEER_CONNECT_TIMEOUT,
+            ),
+            right_node.connect_peer_client_with_timeout(
+                left_node.address(),
+                transport::PEER_CONNECT_TIMEOUT,
+            ),
         );
         left_result?;
         right_result?;

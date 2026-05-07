@@ -159,12 +159,13 @@ pub trait PeerConnector: Send + Sync {
     /// if one exists.
     fn session_nonce(&self, peer_onion: &str, client_private_key: &SecretKey) -> Option<u64>;
 
-    /// Set the outer-session capacity for the local node using this connector.
-    fn set_session_capacity(&self, client_private_key: &SecretKey, capacity: usize);
+    /// Set the bounded capacity for opportunistic peer sessions that do not
+    /// currently have any real storage involvement.
+    fn set_opportunistic_session_capacity(&self, client_private_key: &SecretKey, capacity: usize);
 
-    /// Set the preferred peer-session retention order for the local node using
-    /// this connector.
-    fn set_preferred_sessions(&self, client_private_key: &SecretKey, preferred_peers: &[String]);
+    /// Set the peers that should keep durable outer sessions because real
+    /// storage is currently involved in at least one direction.
+    fn set_durable_session_peers(&self, client_private_key: &SecretKey, durable_peers: &[String]);
 }
 
 #[cfg(test)]

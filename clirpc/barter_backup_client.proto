@@ -727,9 +727,9 @@ message ResourcePolicy {
     // peer metadata.
     int64 max_tracked_peers = 8;
 
-    // max_cached_peer_clients is the maximum number of cached outbound peer
-    // gRPC clients the daemon keeps in memory.
-    int64 max_cached_peer_clients = 9;
+    // opportunistic_session_capacity is the maximum number of peer sessions
+    // without real storage involvement that the daemon keeps in memory.
+    int64 opportunistic_session_capacity = 9;
 
     // chunking_supported reports whether the daemon can transfer one peer
     // revision in multiple chunks instead of as one whole blob.
