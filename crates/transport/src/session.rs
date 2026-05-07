@@ -133,6 +133,7 @@ impl PeerSessionRegistry {
                 local_onion,
                 next_session_nonce: AtomicU64::new(1),
                 capacity: AtomicUsize::new(32),
+                preferred_ranks: Mutex::new(BTreeMap::new()),
                 slots: Mutex::new(BTreeMap::new()),
                 incoming_tx,
                 incoming_rx: Mutex::new(Some(incoming_rx)),
@@ -145,6 +146,25 @@ impl PeerSessionRegistry {
         self.inner
             .capacity
             .store(capacity.max(1), Ordering::Relaxed);
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            inner.enforce_capacity().await;
+        });
+    }
+
+    /// Set the preferred peer-session retention order for this registry.
+    pub fn set_preferred_peers(&self, preferred_peers: &[String]) {
+        let mut preferred_ranks = self.inner.preferred_ranks.lock().unwrap();
+        preferred_ranks.clear();
+        for (rank, peer_onion) in preferred_peers.iter().enumerate() {
+            preferred_ranks.insert(peer_onion.clone(), rank);
+        }
+        drop(preferred_ranks);
+
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            inner.enforce_capacity().await;
+        });
     }
 
     /// Take the shared tonic incoming stream for inbound peer lanes.
@@ -263,6 +283,7 @@ struct PeerSessionRegistryInner {
     local_onion: String,
     next_session_nonce: AtomicU64,
     capacity: AtomicUsize,
+    preferred_ranks: Mutex<BTreeMap<String, usize>>,
     slots: Mutex<BTreeMap<String, Arc<PeerSessionSlot>>>,
     incoming_tx: mpsc::Sender<PeerSessionServerIo>,
     incoming_rx: Mutex<Option<mpsc::Receiver<PeerSessionServerIo>>>,
@@ -288,6 +309,7 @@ impl PeerSessionRegistryInner {
         let session_nonce = self.next_session_nonce.fetch_add(1, Ordering::Relaxed);
         let (command_tx, command_rx) = mpsc::channel(16);
         let session = Arc::new(PeerOuterSession {
+            peer_onion: peer_onion.clone(),
             session_nonce,
             initiated_by_us,
             live: AtomicBool::new(true),
@@ -318,16 +340,28 @@ impl PeerSessionRegistryInner {
             .unwrap()
             .values()
             .cloned()
-            .filter_map(|slot| slot.current_session())
+            .filter_map(|slot| {
+                slot.current_session().map(|session| {
+                    let rank = self
+                        .preferred_ranks
+                        .lock()
+                        .unwrap()
+                        .get(&session.peer_onion)
+                        .copied()
+                        .unwrap_or(usize::MAX);
+                    (rank, session.session_nonce, session)
+                })
+            })
             .collect::<Vec<_>>();
         if eviction_candidates.len() <= capacity {
             return;
         }
 
-        eviction_candidates.sort_by_key(|session| session.session_nonce);
+        eviction_candidates.sort_by_key(|(rank, session_nonce, _)| (*rank, *session_nonce));
         let excess = eviction_candidates.len().saturating_sub(capacity);
-        for session in eviction_candidates.into_iter().take(excess) {
+        for (_, _, session) in eviction_candidates.into_iter().rev().take(excess) {
             info!(
+                peer = %session.peer_onion,
                 session_nonce = session.session_nonce,
                 "evicting outer peer session because the registry is over capacity"
             );
@@ -448,6 +482,7 @@ impl PeerSessionSlot {
 }
 
 struct PeerOuterSession {
+    peer_onion: String,
     session_nonce: u64,
     initiated_by_us: bool,
     live: AtomicBool,

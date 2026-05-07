@@ -272,6 +272,11 @@ impl PeerConnector for MockPeerConnector {
         self.local_sessions(client_private_key)
             .set_capacity(capacity);
     }
+
+    fn set_preferred_sessions(&self, client_private_key: &SecretKey, preferred_peers: &[String]) {
+        self.local_sessions(client_private_key)
+            .set_preferred_peers(preferred_peers);
+    }
 }
 
 /// Extract the authenticated peer public key from one completed rustls session.

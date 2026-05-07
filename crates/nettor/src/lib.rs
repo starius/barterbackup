@@ -361,6 +361,12 @@ impl PeerConnector for TorTransport {
             sessions.set_capacity(capacity);
         }
     }
+
+    fn set_preferred_sessions(&self, client_private_key: &SecretKey, preferred_peers: &[String]) {
+        if let Ok(sessions) = self.session_registry(client_private_key) {
+            sessions.set_preferred_peers(preferred_peers);
+        }
+    }
 }
 
 /// TorPeerListener owns the published onion service and its accepted streams.

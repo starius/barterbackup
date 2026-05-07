@@ -2979,7 +2979,14 @@ impl Node {
             .ok_or_else(|| Status::failed_precondition("peer connector is not configured"))?;
         let capacity = self.preferred_session_capacity();
         connector.set_session_capacity(&self.ed25519_keypair.secret, capacity);
-        for peer_onion in self.preferred_session_peers()?.into_iter().take(capacity) {
+        let preferred_peers = self
+            .preferred_session_peers()?
+            .into_iter()
+            .filter(|peer_onion| !self.is_our_onion(peer_onion))
+            .take(capacity)
+            .collect::<Vec<_>>();
+        connector.set_preferred_sessions(&self.ed25519_keypair.secret, &preferred_peers);
+        for peer_onion in preferred_peers {
             if self.is_our_onion(&peer_onion) {
                 continue;
             }
@@ -6741,6 +6748,15 @@ mod tests {
         fn session_backed(&self) -> bool {
             self.delegate.session_backed()
         }
+
+        fn set_preferred_sessions(
+            &self,
+            client_private_key: &ed25519_dalek::SecretKey,
+            preferred_peers: &[String],
+        ) {
+            self.delegate
+                .set_preferred_sessions(client_private_key, preferred_peers);
+        }
     }
 
     /// TransientSetAckState tracks one peer's requester-content state for
@@ -8112,6 +8128,77 @@ mod tests {
         );
 
         peer_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preferred_session_preparation_evicts_low_priority_sessions_first() -> anyhow::Result<()>
+    {
+        let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let local_node = Arc::new(Node::with_local_storage(
+            "session-eviction-local",
+            local_filesystem,
+        )?);
+        local_node.storage_config.lock().unwrap().min_replicas = 1;
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        local_node.set_peer_connector(connector.clone());
+
+        let mut peer_addresses = Vec::new();
+        let mut peer_servers = Vec::new();
+        for index in 0..3 {
+            let peer_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+            let peer_node = Arc::new(Node::with_local_storage(
+                &format!("session-eviction-peer-{index}"),
+                peer_filesystem,
+            )?);
+            peer_node.set_peer_connector(connector.clone());
+            local_node.add_known_peer(peer_node.address())?;
+            peer_node.add_known_peer(local_node.address())?;
+            peer_addresses.push(peer_node.address().to_string());
+            peer_servers
+                .push(spawn_registered_p2p_server(peer_node.clone(), connector.as_ref()).await?);
+        }
+        local_node.pin_peer(&peer_addresses[0])?;
+
+        let preferred_peers = local_node
+            .preferred_session_peers()?
+            .into_iter()
+            .filter(|peer_onion| !local_node.is_our_onion(peer_onion))
+            .take(2)
+            .collect::<Vec<_>>();
+        assert_eq!(preferred_peers.len(), 2);
+        let low_priority_peer = peer_addresses
+            .iter()
+            .find(|peer_onion| !preferred_peers.contains(peer_onion))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing low-priority peer"))?;
+
+        local_node.prepare_preferred_peer_sessions().await?;
+        let _client = local_node
+            .connect_peer_client_with_timeout(&low_priority_peer, transport::PEER_CONNECT_TIMEOUT)
+            .await?;
+
+        wait_for_condition(Duration::from_secs(2), || {
+            let connector = connector.clone();
+            let local_node = local_node.clone();
+            let preferred_peers = preferred_peers.clone();
+            let low_priority_peer = low_priority_peer.clone();
+            async move {
+                Ok(
+                    connector.connected_peer_count(&local_node.ed25519_keypair.secret) == 2
+                        && preferred_peers.iter().all(|peer_onion| {
+                            connector.connected(peer_onion, &local_node.ed25519_keypair.secret)
+                        })
+                        && !connector
+                            .connected(&low_priority_peer, &local_node.ed25519_keypair.secret),
+                )
+            }
+        })
+        .await?;
+
+        for peer_server in peer_servers {
+            peer_server.abort();
+        }
         Ok(())
     }
 

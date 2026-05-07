@@ -165,6 +165,11 @@ pub trait PeerConnector: Send + Sync {
 
     /// Set the outer-session capacity for the local node using this connector.
     fn set_session_capacity(&self, _client_private_key: &SecretKey, _capacity: usize) {}
+
+    /// Set the preferred peer-session retention order for the local node using
+    /// this connector.
+    fn set_preferred_sessions(&self, _client_private_key: &SecretKey, _preferred_peers: &[String]) {
+    }
 }
 
 #[cfg(test)]
