@@ -3029,6 +3029,36 @@ mod tests {
             std::future::pending::<()>().await;
             unreachable!("hanging peer dial should never complete")
         }
+
+        fn connected(
+            &self,
+            _peer_onion: &str,
+            _client_private_key: &ed25519_dalek::SecretKey,
+        ) -> bool {
+            false
+        }
+
+        fn session_nonce(
+            &self,
+            _peer_onion: &str,
+            _client_private_key: &ed25519_dalek::SecretKey,
+        ) -> Option<u64> {
+            None
+        }
+
+        fn set_session_capacity(
+            &self,
+            _client_private_key: &ed25519_dalek::SecretKey,
+            _capacity: usize,
+        ) {
+        }
+
+        fn set_preferred_sessions(
+            &self,
+            _client_private_key: &ed25519_dalek::SecretKey,
+            _preferred_peers: &[String],
+        ) {
+        }
     }
 
     /// HangingPeerRuntimeFactory injects a peer connector that never finishes dials.
@@ -3063,6 +3093,36 @@ mod tests {
             _client_private_key: &ed25519_dalek::SecretKey,
         ) -> anyhow::Result<transport::PeerClient> {
             bail!("timed out waiting for peer rendezvous");
+        }
+
+        fn connected(
+            &self,
+            _peer_onion: &str,
+            _client_private_key: &ed25519_dalek::SecretKey,
+        ) -> bool {
+            false
+        }
+
+        fn session_nonce(
+            &self,
+            _peer_onion: &str,
+            _client_private_key: &ed25519_dalek::SecretKey,
+        ) -> Option<u64> {
+            None
+        }
+
+        fn set_session_capacity(
+            &self,
+            _client_private_key: &ed25519_dalek::SecretKey,
+            _capacity: usize,
+        ) {
+        }
+
+        fn set_preferred_sessions(
+            &self,
+            _client_private_key: &ed25519_dalek::SecretKey,
+            _preferred_peers: &[String],
+        ) {
         }
     }
 

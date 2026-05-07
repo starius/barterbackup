@@ -232,6 +232,20 @@ impl PeerSessionRegistry {
             .map(|session| session.initiated_by_us)
     }
 
+    /// Shut down the current outer session for `peer_onion`, if one exists.
+    pub async fn shutdown_peer(&self, peer_onion: &str) {
+        let session = self
+            .inner
+            .slots
+            .lock()
+            .unwrap()
+            .get(peer_onion)
+            .and_then(|slot| slot.current_session());
+        if let Some(session) = session {
+            session.shutdown().await;
+        }
+    }
+
     /// Register one outbound outer session that we initiated.
     pub async fn register_outbound_session(
         &self,

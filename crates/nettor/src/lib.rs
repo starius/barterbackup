@@ -352,8 +352,12 @@ impl PeerConnector for TorTransport {
             .is_some_and(|sessions| sessions.connected(peer_onion))
     }
 
-    fn session_backed(&self) -> bool {
-        true
+    fn session_nonce(&self, peer_onion: &str, _client_private_key: &SecretKey) -> Option<u64> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|sessions| sessions.session_nonce(peer_onion))
     }
 
     fn set_session_capacity(&self, client_private_key: &SecretKey, capacity: usize) {

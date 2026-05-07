@@ -159,16 +159,6 @@ pub async fn bind_peer_listener(server_priv: &SecretKey) -> Result<MockPeerListe
     })
 }
 
-/// Connect to a mock peer server while pinning its expected onion hostname.
-pub async fn connect_peer_channel(
-    endpoint: &str,
-    expected_server_onion: &str,
-    client_priv: &SecretKey,
-) -> Result<tonic::transport::Channel> {
-    let client_tls = tlsutil::build_peer_client_tls(expected_server_onion, client_priv)?;
-    tlsutil::connect_channel(endpoint, client_tls).await
-}
-
 /// MockPeerConnector resolves onion hostnames to localhost mock endpoints.
 #[derive(Debug, Default)]
 pub struct MockPeerConnector {
@@ -222,6 +212,13 @@ impl MockPeerConnector {
         self.local_sessions(client_private_key)
             .session_initiated_by_us(peer_onion)
     }
+
+    /// Shut down the current outer session for `peer_onion`, if one exists.
+    pub async fn shutdown_peer_session(&self, client_private_key: &SecretKey, peer_onion: &str) {
+        self.local_sessions(client_private_key)
+            .shutdown_peer(peer_onion)
+            .await;
+    }
 }
 
 #[async_trait]
@@ -264,8 +261,9 @@ impl PeerConnector for MockPeerConnector {
             .connected(peer_onion)
     }
 
-    fn session_backed(&self) -> bool {
-        true
+    fn session_nonce(&self, peer_onion: &str, client_private_key: &SecretKey) -> Option<u64> {
+        self.local_sessions(client_private_key)
+            .session_nonce(peer_onion)
     }
 
     fn set_session_capacity(&self, client_private_key: &SecretKey, capacity: usize) {

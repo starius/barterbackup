@@ -74,9 +74,6 @@ pub struct Node {
     storage_config: Mutex<clirpc::StorageConfig>,
     /// peer_connector dials other nodes when peer sync is enabled.
     peer_connector: Mutex<Option<Arc<dyn PeerConnector>>>,
-    /// peer_client_cache reuses recent outbound peer clients across operations
-    /// for connectors that are not session-backed.
-    peer_client_cache: Mutex<BTreeMap<String, CachedPeerClient>>,
     /// peer_exchange_last_attempt records the last in-memory peer exchange attempt.
     peer_exchange_last_attempt: Mutex<BTreeMap<String, i64>>,
     /// peer_live_recovery_probe_state tracks whether one live-contact recovery
@@ -90,6 +87,9 @@ pub struct Node {
 /// best-effort live-contact recovery probe for the current in-memory session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LiveRecoveryProbeState {
+    /// session_nonce identifies the outer peer session this probe state
+    /// belongs to when the connector exposes session identity.
+    session_nonce: Option<u64>,
     /// last_contact_at_secs is when the peer most recently had one live
     /// contact that refreshed this in-memory session state.
     last_contact_at_secs: i64,
@@ -189,16 +189,16 @@ const DEFAULT_MIN_REPLICAS: i64 = 100;
 /// MAX_TRACKED_PEERS is the maximum number of peers kept in metadata.
 const MAX_TRACKED_PEERS: usize = 1024;
 
-/// MAX_CACHED_PEER_CLIENTS bounds the in-memory outbound peer client cache for
-/// non-session-backed connectors.
-const MAX_CACHED_PEER_CLIENTS: usize = 32;
-
-/// PEER_CLIENT_CACHE_IDLE_TTL_SECS expires idle cached peer clients for
-/// non-session-backed connectors.
-const PEER_CLIENT_CACHE_IDLE_TTL_SECS: i64 = 5 * 60;
+/// DEFAULT_OPPORTUNISTIC_SESSION_CAPACITY is the current bounded size for
+/// non-storage peer sessions.
+const DEFAULT_OPPORTUNISTIC_SESSION_CAPACITY: usize = 32;
 
 /// PEER_EXCHANGE_COOLDOWN_SECS limits how often one peer exchange runs per peer.
 const PEER_EXCHANGE_COOLDOWN_SECS: i64 = 5 * 60;
+
+/// LIVE_RECOVERY_PROBE_STATE_IDLE_TTL_SECS expires in-memory live-contact
+/// probe state after the peer has been idle for a while.
+const LIVE_RECOVERY_PROBE_STATE_IDLE_TTL_SECS: i64 = 5 * 60;
 
 /// Convert one duration to a saturated millisecond count for local RPC output.
 fn duration_to_millis_i64(duration: Duration) -> i64 {
@@ -292,19 +292,10 @@ enum SyncPeerContentResult {
     SidecarOnly,
 }
 
-/// CachedPeerClient keeps one reusable outbound peer client with its last use time.
-#[derive(Clone)]
-struct CachedPeerClient {
-    /// client is the configured outbound gRPC peer client.
-    client: transport::PeerClient,
-    /// last_used_at_secs is the node clock second when this client was last reused.
-    last_used_at_secs: i64,
-}
-
 /// PeerInventoryStatus reports the local daemon's current view of one peer.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum PeerInventoryStatus {
-    /// Connected means a live peer session or cached outbound client exists.
+    /// Connected means a live authenticated outer peer session exists.
     Connected,
     /// Online means the last completed transport interaction succeeded.
     Online,
@@ -749,7 +740,8 @@ pub fn resource_policy() -> clirpc::ResourcePolicy {
         peer_retry_initial_backoff_ms: duration_to_millis_i64(retry_policy.initial_backoff),
         peer_retry_max_backoff_ms: duration_to_millis_i64(retry_policy.max_backoff),
         max_tracked_peers: i64::try_from(MAX_TRACKED_PEERS).unwrap_or(i64::MAX),
-        max_cached_peer_clients: i64::try_from(MAX_CACHED_PEER_CLIENTS).unwrap_or(i64::MAX),
+        max_cached_peer_clients: i64::try_from(DEFAULT_OPPORTUNISTIC_SESSION_CAPACITY)
+            .unwrap_or(i64::MAX),
         chunking_supported: false,
     }
 }
@@ -1690,7 +1682,6 @@ impl Node {
             known_peers: Mutex::new(BTreeSet::new()),
             storage_config: Mutex::new(default_storage_config()),
             peer_connector: Mutex::new(None),
-            peer_client_cache: Mutex::new(BTreeMap::new()),
             peer_exchange_last_attempt: Mutex::new(BTreeMap::new()),
             peer_live_recovery_probe_state: Mutex::new(BTreeMap::new()),
             recent_peer_failures: Mutex::new(BTreeMap::new()),
@@ -1822,14 +1813,6 @@ impl Node {
             .find(|peer| peer.onion_pubkey.as_slice() == peer_public_key.as_bytes())
             .map(|peer| peer.pinned_by_us)
             .unwrap_or(false))
-    }
-
-    /// Return whether the local operator currently pins the peer onion.
-    fn is_peer_onion_pinned_by_us(&self, peer_onion: &str) -> bool {
-        let Ok(peer_public_key) = keys::public_key_from_onion_hostname(peer_onion) else {
-            return false;
-        };
-        self.is_peer_pinned_by_us(&peer_public_key).unwrap_or(false)
     }
 
     /// Replace the cached known-peer list with what is currently persisted plus built-ins.
@@ -2057,14 +2040,14 @@ impl Node {
         *self.peer_connector.lock().unwrap() = Some(peer_connector);
     }
 
-    /// Drop the active outbound peer connector and every cached peer session.
+    /// Drop the active outbound peer connector and every in-memory peer-runtime
+    /// hint tied to it.
     ///
     /// The daemon uses this before replacing a live peer runtime so stale
     /// cached channels and their transport state cannot outlive the runtime
     /// they were created from.
     pub fn clear_peer_runtime_transport(&self) {
         *self.peer_connector.lock().unwrap() = None;
-        self.peer_client_cache.lock().unwrap().clear();
         self.peer_exchange_last_attempt.lock().unwrap().clear();
         self.peer_live_recovery_probe_state.lock().unwrap().clear();
     }
@@ -2074,11 +2057,8 @@ impl Node {
         i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX)
     }
 
-    /// Drop expired outbound peer clients and stale peer-exchange cooldown entries.
+    /// Drop stale in-memory peer-runtime bookkeeping entries.
     fn prune_peer_runtime_state(&self, now_secs: i64) {
-        self.peer_client_cache.lock().unwrap().retain(|_, entry| {
-            now_secs.saturating_sub(entry.last_used_at_secs) <= PEER_CLIENT_CACHE_IDLE_TTL_SECS
-        });
         self.peer_exchange_last_attempt
             .lock()
             .unwrap()
@@ -2091,7 +2071,7 @@ impl Node {
             .retain(|_, state| {
                 state.probe_in_progress
                     || now_secs.saturating_sub(state.last_contact_at_secs)
-                        <= PEER_CLIENT_CACHE_IDLE_TTL_SECS
+                        <= LIVE_RECOVERY_PROBE_STATE_IDLE_TTL_SECS
             });
     }
 
@@ -2103,15 +2083,29 @@ impl Node {
         }
 
         let now_secs = self.cache_now_secs();
+        let current_session_nonce =
+            self.peer_connector
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|connector| {
+                    connector.session_nonce(peer_onion, &self.ed25519_keypair.secret)
+                });
         self.prune_peer_runtime_state(now_secs);
         let mut state_by_peer = self.peer_live_recovery_probe_state.lock().unwrap();
         let state = state_by_peer
             .entry(peer_onion.to_string())
             .or_insert(LiveRecoveryProbeState {
+                session_nonce: current_session_nonce,
                 last_contact_at_secs: now_secs,
                 probe_in_progress: false,
                 probe_completed: false,
             });
+        if state.session_nonce != current_session_nonce {
+            state.session_nonce = current_session_nonce;
+            state.probe_in_progress = false;
+            state.probe_completed = false;
+        }
         state.last_contact_at_secs = now_secs;
         if state.probe_in_progress || state.probe_completed {
             return false;
@@ -2280,72 +2274,14 @@ impl Node {
         self.update_peer_score(&peer_public_key, false).ok()
     }
 
-    /// Return one cached outbound peer client when it is still inside the idle
-    /// TTL for non-session-backed connectors.
-    fn cached_peer_client(&self, peer_onion: &str) -> Option<transport::PeerClient> {
-        let now_secs = self.cache_now_secs();
-        self.prune_peer_runtime_state(now_secs);
-
-        let mut cache = self.peer_client_cache.lock().unwrap();
-        let entry = cache.get_mut(peer_onion)?;
-        entry.last_used_at_secs = now_secs;
-        Some(entry.client.clone())
-    }
-
-    /// Report whether one live peer session or cached outbound peer client is
-    /// currently open.
-    fn has_cached_peer_client(&self, peer_onion: &str) -> bool {
-        if let Some(connector) = self.peer_connector.lock().unwrap().as_ref() {
-            if connector.session_backed() {
-                return connector.connected(peer_onion, &self.ed25519_keypair.secret);
-            }
-        }
-
-        let now_secs = self.cache_now_secs();
-        self.prune_peer_runtime_state(now_secs);
-        self.peer_client_cache
+    /// Report whether one live authenticated outer peer session is currently
+    /// open.
+    fn has_connected_peer_session(&self, peer_onion: &str) -> bool {
+        self.peer_connector
             .lock()
             .unwrap()
-            .contains_key(peer_onion)
-    }
-
-    /// Remember one outbound peer client in the bounded in-memory cache for
-    /// non-session-backed connectors.
-    fn remember_peer_client(&self, peer_onion: &str, client: &transport::PeerClient) {
-        let now_secs = self.cache_now_secs();
-        self.prune_peer_runtime_state(now_secs);
-
-        let mut cache = self.peer_client_cache.lock().unwrap();
-        cache.insert(
-            peer_onion.to_string(),
-            CachedPeerClient {
-                client: client.clone(),
-                last_used_at_secs: now_secs,
-            },
-        );
-        while cache.len() > MAX_CACHED_PEER_CLIENTS {
-            let oldest_non_pinned = cache
-                .iter()
-                .filter(|(cached_peer_onion, _)| {
-                    !self.is_peer_onion_pinned_by_us(cached_peer_onion)
-                })
-                .min_by_key(|(_, entry)| entry.last_used_at_secs)
-                .map(|(peer_onion, _)| peer_onion.clone());
-            let Some(oldest_key) = oldest_non_pinned.or_else(|| {
-                cache
-                    .iter()
-                    .min_by_key(|(_, entry)| entry.last_used_at_secs)
-                    .map(|(peer_onion, _)| peer_onion.clone())
-            }) else {
-                break;
-            };
-            cache.remove(&oldest_key);
-        }
-    }
-
-    /// Evict one cached outbound peer client immediately.
-    fn evict_cached_peer_client(&self, peer_onion: &str) {
-        self.peer_client_cache.lock().unwrap().remove(peer_onion);
+            .as_ref()
+            .is_some_and(|connector| connector.connected(peer_onion, &self.ed25519_keypair.secret))
     }
 
     /// Persist a successful live transport interaction with one peer.
@@ -2905,12 +2841,6 @@ impl Node {
             .unwrap()
             .clone()
             .ok_or_else(|| Status::failed_precondition("peer connector is not configured"))?;
-        let session_backed = connector.session_backed();
-        if track_peer && !session_backed {
-            if let Some(client) = self.cached_peer_client(peer_onion) {
-                return Ok(client);
-            }
-        }
         let client = tokio::time::timeout(
             connect_timeout,
             connector.connect(peer_onion, &self.ed25519_keypair.secret),
@@ -2930,9 +2860,6 @@ impl Node {
         }
 
         let client = transport::configure_peer_client(client);
-        if track_peer && !session_backed {
-            self.remember_peer_client(peer_onion, &client);
-        }
         Ok(client)
     }
 
@@ -3036,22 +2963,15 @@ impl Node {
             Ok(Ok(response)) => Ok(response.into_inner()),
             Ok(Err(error)) => {
                 let message = format!("{operation} from {peer_onion}: {}", error.message());
-                let status = if error.details().is_empty() {
+                Err(if error.details().is_empty() {
                     Status::new(error.code(), message)
                 } else {
                     Status::with_details(error.code(), message, error.details().to_vec().into())
-                };
-                if transport::is_retryable_peer_status(&status) {
-                    self.evict_cached_peer_client(peer_onion);
-                }
-                Err(status)
+                })
             }
-            Err(_) => {
-                self.evict_cached_peer_client(peer_onion);
-                Err(Status::deadline_exceeded(format!(
-                    "{operation} from {peer_onion} timed out"
-                )))
-            }
+            Err(_) => Err(Status::deadline_exceeded(format!(
+                "{operation} from {peer_onion} timed out"
+            ))),
         }
     }
 
@@ -4130,7 +4050,7 @@ impl Node {
             }
 
             let tracked_peer = local_peers.get(&peer_onion);
-            let connected = self.has_cached_peer_client(&peer_onion);
+            let connected = self.has_connected_peer_session(&peer_onion);
             let status = if connected {
                 PeerInventoryStatus::Connected
             } else if tracked_peer
@@ -6355,9 +6275,8 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex, RwLock};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use tokio_stream::wrappers::TcpListenerStream;
     use tonic::transport::Endpoint;
     use tonic::{Request, Response};
     use transport::PeerConnector;
@@ -6637,62 +6556,6 @@ mod tests {
         }
     }
 
-    /// PlainPeerConnector resolves peers to local h2c test servers.
-    #[derive(Debug, Default)]
-    struct PlainPeerConnector {
-        /// endpoints maps onion hostnames to plain HTTP endpoints.
-        endpoints: RwLock<BTreeMap<String, String>>,
-    }
-
-    impl PlainPeerConnector {
-        /// Create an empty plain connector.
-        fn new() -> Self {
-            Self::default()
-        }
-
-        /// Register one peer endpoint.
-        fn register_peer(&self, peer_onion: &str, endpoint: &str) {
-            self.endpoints
-                .write()
-                .unwrap()
-                .insert(peer_onion.to_string(), endpoint.to_string());
-        }
-    }
-
-    #[async_trait]
-    impl PeerConnector for PlainPeerConnector {
-        async fn connect(
-            &self,
-            peer_onion: &str,
-            _client_private_key: &ed25519_dalek::SecretKey,
-        ) -> anyhow::Result<transport::PeerClient> {
-            let endpoint = self
-                .endpoints
-                .read()
-                .unwrap()
-                .get(peer_onion)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("unknown peer onion: {peer_onion}"))?;
-            let channel = Endpoint::from_shared(endpoint)?.connect().await?;
-
-            Ok(transport::configure_peer_client(
-                transport::PeerClient::new(channel),
-            ))
-        }
-
-        fn connected(
-            &self,
-            _peer_onion: &str,
-            _client_private_key: &ed25519_dalek::SecretKey,
-        ) -> bool {
-            false
-        }
-
-        fn session_backed(&self) -> bool {
-            false
-        }
-    }
-
     /// FlakyPeerConnector fails the first few dials before delegating to a real
     /// connector.
     struct FlakyPeerConnector {
@@ -6745,8 +6608,21 @@ mod tests {
             self.delegate.connected(peer_onion, client_private_key)
         }
 
-        fn session_backed(&self) -> bool {
-            self.delegate.session_backed()
+        fn session_nonce(
+            &self,
+            peer_onion: &str,
+            client_private_key: &ed25519_dalek::SecretKey,
+        ) -> Option<u64> {
+            self.delegate.session_nonce(peer_onion, client_private_key)
+        }
+
+        fn set_session_capacity(
+            &self,
+            client_private_key: &ed25519_dalek::SecretKey,
+            capacity: usize,
+        ) {
+            self.delegate
+                .set_session_capacity(client_private_key, capacity);
         }
 
         fn set_preferred_sessions(
@@ -7128,54 +7004,6 @@ mod tests {
         }
     }
 
-    /// UnavailableHealthPeerService returns a retryable health-check failure.
-    #[derive(Clone, Default)]
-    struct UnavailableHealthPeerService;
-
-    #[tonic::async_trait]
-    impl bbrpc::barter_backup_server_server::BarterBackupServer for UnavailableHealthPeerService {
-        async fn health_check(
-            &self,
-            _request: Request<bbrpc::HealthCheckRequest>,
-        ) -> std::result::Result<Response<bbrpc::HealthCheckResponse>, Status> {
-            Err(Status::unavailable("peer health unavailable"))
-        }
-
-        async fn peer_exchange(
-            &self,
-            _request: Request<bbrpc::PeerExchangeRequest>,
-        ) -> std::result::Result<Response<bbrpc::PeerExchangeResponse>, Status> {
-            Err(Status::unimplemented(
-                "peer exchange is not used in this test",
-            ))
-        }
-
-        async fn get_content_revision(
-            &self,
-            _request: Request<bbrpc::GetContentRevisionRequest>,
-        ) -> std::result::Result<Response<bbrpc::GetContentRevisionResponse>, Status> {
-            Err(Status::unimplemented(
-                "get content revision is not used in this test",
-            ))
-        }
-
-        async fn set_content_revision(
-            &self,
-            _request: Request<bbrpc::SetContentRevisionRequest>,
-        ) -> std::result::Result<Response<bbrpc::SetContentRevisionResponse>, Status> {
-            Err(Status::unimplemented(
-                "set content revision is not used in this test",
-            ))
-        }
-
-        async fn download(
-            &self,
-            _request: Request<bbrpc::DownloadRequest>,
-        ) -> std::result::Result<Response<bbrpc::DownloadResponse>, Status> {
-            Err(Status::unimplemented("download is not used in this test"))
-        }
-    }
-
     /// CountingRevisionPeerService tracks revision-probe calls and can fail a
     /// configured number of initial requests.
     #[derive(Clone)]
@@ -7367,29 +7195,30 @@ mod tests {
         }
     }
 
-    /// Spawn a plain h2c peer server for adversarial tests.
-    async fn spawn_plain_peer_server<S>(
+    /// Spawn a session-backed peer server for one custom peer service and
+    /// register its mock endpoint.
+    async fn spawn_registered_mock_peer_server<S>(
+        peer_onion: &str,
+        peer_secret: &ed25519_dalek::SecretKey,
         service: S,
-    ) -> anyhow::Result<(
-        String,
-        tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
-    )>
+        connector: &netmock::MockPeerConnector,
+    ) -> anyhow::Result<tokio::task::JoinHandle<Result<(), tonic::transport::Error>>>
     where
         S: bbrpc::barter_backup_server_server::BarterBackupServer + Send + Sync + 'static,
     {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?;
-        let handle = tokio::spawn(
-            tonic::transport::Server::builder()
-                .add_service(
-                    BarterBackupServerServer::new(service)
-                        .max_decoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES)
-                        .max_encoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES),
-                )
-                .serve_with_incoming(TcpListenerStream::new(listener)),
-        );
-
-        Ok((format!("http://{address}"), handle))
+        let listener = netmock::bind_peer_listener(peer_secret).await?;
+        let endpoint = listener.endpoint().to_string();
+        let router = tonic::transport::Server::builder()
+            .http2_keepalive_interval(Some(transport::PEER_GRPC_KEEPALIVE_INTERVAL))
+            .http2_keepalive_timeout(Some(transport::PEER_GRPC_KEEPALIVE_TIMEOUT))
+            .add_service(
+                BarterBackupServerServer::new(service)
+                    .max_decoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES)
+                    .max_encoding_message_size(transport::PEER_GRPC_MESSAGE_LIMIT_BYTES),
+            );
+        let handle = tokio::spawn(router.serve_with_incoming(listener.into_incoming()));
+        connector.register_peer(peer_onion, &endpoint);
+        Ok(handle)
     }
 
     /// Spawn a p2p server and register its endpoint in the shared mock connector.
@@ -8010,11 +7839,12 @@ mod tests {
     async fn p2p_healthcheck_reports_authenticated_onions() -> anyhow::Result<()> {
         let server_node = Arc::new(Node::new("server-password")?);
         let client_node = Arc::new(Node::new("client-password")?);
-        let (endpoint, server) = spawn_p2p_server(server_node.clone()).await?;
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        let server = spawn_registered_p2p_server(server_node.clone(), connector.as_ref()).await?;
         let client_secret = &client_node.ed25519_keypair().secret;
-        let channel =
-            netmock::connect_peer_channel(&endpoint, server_node.address(), client_secret).await?;
-        let mut client = BarterBackupServerClient::new(channel);
+        let mut client = connector
+            .connect(server_node.address(), client_secret)
+            .await?;
 
         let response = client
             .health_check(bbrpc::HealthCheckRequest {})
@@ -8228,7 +8058,7 @@ mod tests {
         left_result?;
         right_result?;
 
-        wait_for_condition(Duration::from_secs(2), || {
+        wait_for_condition(Duration::from_secs(5), || {
             let connector = connector.clone();
             let left_node = left_node.clone();
             let right_node = right_node.clone();
@@ -9373,14 +9203,19 @@ mod tests {
         for case in cases {
             let node = Arc::new(Node::new("download-client")?);
             let peer_identity = Node::new(case.name)?;
-            let connector = Arc::new(PlainPeerConnector::new());
+            let connector = Arc::new(netmock::MockPeerConnector::new());
             node.set_peer_connector(connector.clone());
             let static_service = StaticPeerService::new(
                 bbrpc::GetContentRevisionResponse::default(),
                 DownloadBehavior::Response(case.response),
             );
-            let (endpoint, server) = spawn_plain_peer_server(static_service).await?;
-            connector.register_peer(peer_identity.address(), &endpoint);
+            let server = spawn_registered_mock_peer_server(
+                peer_identity.address(),
+                &peer_identity.ed25519_keypair().secret,
+                static_service,
+                connector.as_ref(),
+            )
+            .await?;
 
             let content_id = vec![0x44; CONTENT_ID_LEN];
             let error = node
@@ -10016,111 +9851,28 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn peer_client_cache_reuses_recent_dials() -> anyhow::Result<()> {
-        let node = Arc::new(Node::new("cache-reuse-owner")?);
-        let peer_identity = Node::new("cache-reuse-peer")?;
-        let base_connector = Arc::new(PlainPeerConnector::new());
-        let counting_connector = Arc::new(FlakyPeerConnector::new(base_connector.clone(), 0));
-        node.set_peer_connector(counting_connector.clone());
+    async fn clearing_peer_runtime_transport_unconfigures_peer_dials() -> anyhow::Result<()> {
+        let node = Arc::new(Node::new("runtime-clear-owner")?);
+        let peer_identity = Node::new("runtime-clear-peer")?;
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        node.set_peer_connector(connector.clone());
 
-        let (endpoint, server) = spawn_plain_peer_server(StaticPeerService::new(
-            bbrpc::GetContentRevisionResponse::default(),
-            DownloadBehavior::Response(bbrpc::DownloadResponse::default()),
-        ))
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            StaticPeerService::new(
+                bbrpc::GetContentRevisionResponse::default(),
+                DownloadBehavior::Response(bbrpc::DownloadResponse::default()),
+            ),
+            connector.as_ref(),
+        )
         .await?;
-        base_connector.register_peer(peer_identity.address(), &endpoint);
-
-        let _first = node.connect_peer_client(peer_identity.address()).await?;
-        let _second = node.connect_peer_client(peer_identity.address()).await?;
-
-        assert_eq!(counting_connector.dial_count(), 1);
-        server.abort();
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn peer_client_cache_expires_after_idle_ttl() -> anyhow::Result<()> {
-        let clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
-        let node = Arc::new(Node::with_local_storage_and_clock(
-            "cache-expire-owner",
-            Arc::new(storage::MemoryFilesystem::new()),
-            clock.clone(),
-        )?);
-        let peer_identity = Node::new("cache-expire-peer")?;
-        let base_connector = Arc::new(PlainPeerConnector::new());
-        let counting_connector = Arc::new(FlakyPeerConnector::new(base_connector.clone(), 0));
-        node.set_peer_connector(counting_connector.clone());
-
-        let (endpoint, server) = spawn_plain_peer_server(StaticPeerService::new(
-            bbrpc::GetContentRevisionResponse::default(),
-            DownloadBehavior::Response(bbrpc::DownloadResponse::default()),
-        ))
-        .await?;
-        base_connector.register_peer(peer_identity.address(), &endpoint);
-
-        let _first = node.connect_peer_client(peer_identity.address()).await?;
-        clock.advance(Duration::from_secs(
-            u64::try_from(PEER_CLIENT_CACHE_IDLE_TTL_SECS + 1).unwrap_or(u64::MAX),
-        ));
-        let _second = node.connect_peer_client(peer_identity.address()).await?;
-
-        assert_eq!(counting_connector.dial_count(), 2);
-        server.abort();
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn retryable_peer_rpc_failure_evicts_cached_client() -> anyhow::Result<()> {
-        let node = Arc::new(Node::new("cache-evict-owner")?);
-        let peer_identity = Node::new("cache-evict-peer")?;
-        let base_connector = Arc::new(PlainPeerConnector::new());
-        let counting_connector = Arc::new(FlakyPeerConnector::new(base_connector.clone(), 0));
-        node.set_peer_connector(counting_connector.clone());
-
-        let (endpoint, server) = spawn_plain_peer_server(UnavailableHealthPeerService).await?;
-        base_connector.register_peer(peer_identity.address(), &endpoint);
-
-        let _first = node.connect_peer_client(peer_identity.address()).await?;
-        let mut cached_client = node.connect_peer_client(peer_identity.address()).await?;
-        let error = node
-            .peer_rpc(
-                peer_identity.address(),
-                "health check",
-                cached_client.health_check(bbrpc::HealthCheckRequest {}),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), Code::Unavailable);
-
-        let _redialed = node.connect_peer_client(peer_identity.address()).await?;
-        assert_eq!(counting_connector.dial_count(), 2);
-
-        server.abort();
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn clearing_peer_runtime_transport_drops_cached_clients() -> anyhow::Result<()> {
-        let node = Arc::new(Node::new("cache-clear-owner")?);
-        let peer_identity = Node::new("cache-clear-peer")?;
-        let base_connector = Arc::new(PlainPeerConnector::new());
-        let counting_connector = Arc::new(FlakyPeerConnector::new(base_connector.clone(), 0));
-        node.set_peer_connector(counting_connector.clone());
-
-        let (endpoint, server) = spawn_plain_peer_server(StaticPeerService::new(
-            bbrpc::GetContentRevisionResponse::default(),
-            DownloadBehavior::Response(bbrpc::DownloadResponse::default()),
-        ))
-        .await?;
-        base_connector.register_peer(peer_identity.address(), &endpoint);
 
         let _client = node.connect_peer_client(peer_identity.address()).await?;
-        assert_eq!(node.peer_client_cache.lock().unwrap().len(), 1);
         assert!(node.peer_connector.lock().unwrap().is_some());
 
         node.clear_peer_runtime_transport();
 
-        assert!(node.peer_client_cache.lock().unwrap().is_empty());
         assert!(node.peer_connector.lock().unwrap().is_none());
         let error = node
             .connect_peer_client(peer_identity.address())
@@ -10133,72 +9885,52 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn peer_client_cache_stays_bounded() -> anyhow::Result<()> {
-        let node = Arc::new(Node::new("cache-bound-owner")?);
-        let base_connector = Arc::new(PlainPeerConnector::new());
-        let counting_connector = Arc::new(FlakyPeerConnector::new(base_connector.clone(), 0));
-        node.set_peer_connector(counting_connector.clone());
-
-        let (endpoint, server) = spawn_plain_peer_server(StaticPeerService::new(
-            bbrpc::GetContentRevisionResponse::default(),
-            DownloadBehavior::Response(bbrpc::DownloadResponse::default()),
-        ))
-        .await?;
-
-        let mut peer_onions = Vec::new();
-        for index in 0..(MAX_CACHED_PEER_CLIENTS + 2) {
-            let peer_identity = Node::new(&format!("cache-bound-peer-{index}"))?;
-            base_connector.register_peer(peer_identity.address(), &endpoint);
-            peer_onions.push(peer_identity.address().to_string());
-            let _client = node.connect_peer_client(peer_identity.address()).await?;
-        }
-
-        assert_eq!(
-            node.peer_client_cache.lock().unwrap().len(),
-            MAX_CACHED_PEER_CLIENTS
-        );
-
-        let _redialed = node.connect_peer_client(&peer_onions[0]).await?;
-        assert_eq!(counting_connector.dial_count(), MAX_CACHED_PEER_CLIENTS + 3);
-
-        server.abort();
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn live_recovery_probe_runs_once_per_cached_peer_session() -> anyhow::Result<()> {
-        let clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+    async fn live_recovery_probe_runs_once_per_connected_peer_session() -> anyhow::Result<()> {
         let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
-        let node = Arc::new(Node::with_local_storage_and_clock(
+        let node = Arc::new(Node::with_local_storage(
             "live-probe-session-owner",
             filesystem,
-            clock.clone(),
         )?);
         node.initialize_lineage((100, 0), false)?;
         let peer_identity = Node::new("live-probe-session-peer")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         node.set_peer_connector(connector.clone());
 
         let service_state = Arc::new(CountingRevisionPeerServiceState::new(
             bbrpc::GetContentRevisionResponse::default(),
             0,
         ));
-        let (endpoint, server) =
-            spawn_plain_peer_server(CountingRevisionPeerService::new(service_state.clone()))
-                .await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
+        let first_server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            CountingRevisionPeerService::new(service_state.clone()),
+            connector.as_ref(),
+        )
+        .await?;
 
         let _first = node.connect_peer_client(peer_identity.address()).await?;
         let _second = node.connect_peer_client(peer_identity.address()).await?;
         assert_eq!(service_state.get_content_revision_call_count(), 1);
 
-        clock.advance(Duration::from_secs(
-            u64::try_from(PEER_CLIENT_CACHE_IDLE_TTL_SECS + 1).unwrap_or(u64::MAX),
-        ));
+        connector
+            .shutdown_peer_session(&node.ed25519_keypair.secret, peer_identity.address())
+            .await;
+        wait_until(|| !connector.connected(peer_identity.address(), &node.ed25519_keypair.secret))
+            .await;
+        first_server.abort();
+
+        let second_server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            CountingRevisionPeerService::new(service_state.clone()),
+            connector.as_ref(),
+        )
+        .await?;
+
         let _third = node.connect_peer_client(peer_identity.address()).await?;
         assert_eq!(service_state.get_content_revision_call_count(), 2);
 
-        server.abort();
+        second_server.abort();
         Ok(())
     }
 
@@ -10212,17 +9944,20 @@ mod tests {
         )?);
         node.initialize_lineage((1, 0), false)?;
         let peer_identity = Node::new("live-probe-retry-peer")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         node.set_peer_connector(connector.clone());
 
         let service_state = Arc::new(CountingRevisionPeerServiceState::new(
             bbrpc::GetContentRevisionResponse::default(),
             1,
         ));
-        let (endpoint, server) =
-            spawn_plain_peer_server(CountingRevisionPeerService::new(service_state.clone()))
-                .await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            CountingRevisionPeerService::new(service_state.clone()),
+            connector.as_ref(),
+        )
+        .await?;
 
         let _first = node.connect_peer_client(peer_identity.address()).await?;
         assert_eq!(service_state.get_content_revision_call_count(), 1);
@@ -10242,17 +9977,20 @@ mod tests {
         )?);
         node.initialize_lineage((1, 0), false)?;
         let peer_identity = Node::new("cli-connect-live-peer")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         node.set_peer_connector(connector.clone());
 
         let service_state = Arc::new(CountingRevisionPeerServiceState::new(
             bbrpc::GetContentRevisionResponse::default(),
             0,
         ));
-        let (endpoint, server) =
-            spawn_plain_peer_server(CountingRevisionPeerService::new(service_state.clone()))
-                .await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            CountingRevisionPeerService::new(service_state.clone()),
+            connector.as_ref(),
+        )
+        .await?;
 
         let cli = CliService::new(node.clone());
         cli.connect_peer(tonic::Request::new(clirpc::ConnectPeerRequest {
@@ -10283,7 +10021,7 @@ mod tests {
         )?);
         node.initialize_lineage((1, 0), false)?;
         let peer_identity = Node::new("live-probe-score-peer")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         node.set_peer_connector(connector.clone());
         node.add_known_peer(peer_identity.address())?;
 
@@ -10296,9 +10034,13 @@ mod tests {
             )
         })?;
 
-        let (endpoint, server) =
-            spawn_plain_peer_server(RetryableRevisionFailurePeerService).await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            RetryableRevisionFailurePeerService,
+            connector.as_ref(),
+        )
+        .await?;
 
         clock.advance(Duration::from_secs(1_200));
         let _client = node.connect_peer_client(peer_identity.address()).await?;
@@ -10322,7 +10064,7 @@ mod tests {
         )?);
         node.initialize_lineage((1, 0), false)?;
         let peer_identity = Node::new("recovery-pass-score-peer")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         node.set_peer_connector(connector.clone());
         node.add_known_peer(peer_identity.address())?;
 
@@ -10335,9 +10077,13 @@ mod tests {
             )
         })?;
 
-        let (endpoint, server) =
-            spawn_plain_peer_server(RetryableRevisionFailurePeerService).await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            RetryableRevisionFailurePeerService,
+            connector.as_ref(),
+        )
+        .await?;
 
         clock.advance(Duration::from_secs(1_800));
         let summary = node.run_recovery_pass().await?;
@@ -10346,67 +10092,6 @@ mod tests {
             peer_score_seconds(node.as_ref(), peer_identity.address())?,
             -1_800
         );
-
-        server.abort();
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn pinned_peer_client_survives_cache_pressure() -> anyhow::Result<()> {
-        let clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
-        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
-        let node = Arc::new(Node::with_local_storage_and_clock(
-            "cache-pin-owner",
-            filesystem,
-            clock.clone(),
-        )?);
-        let base_connector = Arc::new(PlainPeerConnector::new());
-        let counting_connector = Arc::new(FlakyPeerConnector::new(base_connector.clone(), 0));
-        node.set_peer_connector(counting_connector.clone());
-
-        let (endpoint, server) = spawn_plain_peer_server(StaticPeerService::new(
-            bbrpc::GetContentRevisionResponse::default(),
-            DownloadBehavior::Response(bbrpc::DownloadResponse::default()),
-        ))
-        .await?;
-
-        let mut peer_onions = Vec::new();
-        for index in 0..(MAX_CACHED_PEER_CLIENTS + 2) {
-            let peer_identity = Node::new(&format!("cache-pin-peer-{index}"))?;
-            base_connector.register_peer(peer_identity.address(), &endpoint);
-            node.add_known_peer(peer_identity.address())?;
-            peer_onions.push(peer_identity.address().to_string());
-        }
-        node.pin_peer(&peer_onions[0])?;
-
-        for peer_onion in &peer_onions {
-            let mut last_timeout = None;
-            let mut connected = false;
-            for _attempt in 0..3 {
-                match node.connect_peer_client(peer_onion).await {
-                    Ok(_client) => {
-                        connected = true;
-                        break;
-                    }
-                    Err(status) if status.code() == Code::DeadlineExceeded => {
-                        last_timeout = Some(status);
-                        tokio::task::yield_now().await;
-                    }
-                    Err(status) => return Err(status.into()),
-                }
-            }
-            if !connected {
-                return Err(last_timeout.expect("timeout status is recorded").into());
-            }
-            clock.advance(Duration::from_secs(1));
-        }
-
-        assert!(node.has_cached_peer_client(&peer_onions[0]));
-        let cached_unpinned = peer_onions[1..]
-            .iter()
-            .filter(|peer_onion| node.has_cached_peer_client(peer_onion))
-            .count();
-        assert_eq!(cached_unpinned, MAX_CACHED_PEER_CLIENTS - 1);
 
         server.abort();
         Ok(())
@@ -10564,11 +10249,15 @@ mod tests {
             replacement_filesystem,
         )?);
         let peer_identity = Node::new("peer-no-clear")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         let service_state = Arc::new(TransientSetAckState::new());
-        let (endpoint, server) =
-            spawn_plain_peer_server(TransientSetAckPeerService::new(service_state.clone())).await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            TransientSetAckPeerService::new(service_state.clone()),
+            connector.as_ref(),
+        )
+        .await?;
         owner_node.set_peer_connector(connector.clone());
         replacement_node.set_peer_connector(connector.clone());
         owner_node.add_known_peer(peer_identity.address())?;
@@ -11076,7 +10765,7 @@ mod tests {
     async fn peer_message_limit_rejects_oversized_download_message() -> anyhow::Result<()> {
         let node = Arc::new(Node::new("download-limit-client")?);
         let peer_identity = Node::new("download-limit-peer")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         node.set_peer_connector(connector.clone());
         let oversized = vec![0u8; transport::PEER_GRPC_MESSAGE_LIMIT_BYTES + 1];
         let static_service = StaticPeerService::new(
@@ -11089,8 +10778,13 @@ mod tests {
                 )),
             }),
         );
-        let (endpoint, server) = spawn_plain_peer_server(static_service).await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            static_service,
+            connector.as_ref(),
+        )
+        .await?;
 
         let content_id = vec![0x66; CONTENT_ID_LEN];
         let error = node
@@ -12052,7 +11746,10 @@ mod tests {
         );
 
         protected_server.abort();
-        local_node.evict_cached_peer_client(protected_node.address());
+        wait_until(|| {
+            !connector.connected(protected_node.address(), &local_node.ed25519_keypair.secret)
+        })
+        .await;
 
         let pinned_inventory = peer_inventory_entry(local_node.as_ref(), pinned_node.address())?
             .ok_or_else(|| anyhow::anyhow!("missing pinned peer inventory entry"))?;
@@ -13033,7 +12730,7 @@ mod tests {
             requester_clock.clone(),
         )?);
         let peer_identity = Node::new("check-retry-peer")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         requester_node.set_peer_connector(connector.clone());
         requester_node.add_known_peer(peer_identity.address())?;
 
@@ -13054,10 +12751,13 @@ mod tests {
             requester_content.clone(),
             requester_blob,
         ));
-        let (endpoint, server) =
-            spawn_plain_peer_server(TransientDownloadPeerService::new(service_state.clone()))
-                .await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            TransientDownloadPeerService::new(service_state.clone()),
+            connector.as_ref(),
+        )
+        .await?;
 
         let peer_public_key = keys::public_key_from_onion_hostname(peer_identity.address())?;
         requester_node.with_store(|store| {
@@ -13157,7 +12857,7 @@ mod tests {
             requester_clock.clone(),
         )?);
         let peer_identity = Node::new("check-revision-failure-peer")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         requester_node.set_peer_connector(connector.clone());
         requester_node.add_known_peer(peer_identity.address())?;
 
@@ -13181,9 +12881,13 @@ mod tests {
             )
         })?;
 
-        let (endpoint, server) =
-            spawn_plain_peer_server(RetryableRevisionFailurePeerService).await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            RetryableRevisionFailurePeerService,
+            connector.as_ref(),
+        )
+        .await?;
 
         requester_clock.advance(Duration::from_secs(1_800));
         let updates = requester_node
@@ -13216,7 +12920,7 @@ mod tests {
             requester_clock.clone(),
         )?);
         let peer_identity = Node::new("check-download-timeout-peer")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         requester_node.set_peer_connector(connector.clone());
         requester_node.add_known_peer(peer_identity.address())?;
 
@@ -13242,12 +12946,13 @@ mod tests {
             )
         })?;
 
-        let (endpoint, server) = spawn_plain_peer_server(TimeoutDownloadPeerService::new(
-            requester_content,
-            requester_blob,
-        ))
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            TimeoutDownloadPeerService::new(requester_content, requester_blob),
+            connector.as_ref(),
+        )
         .await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
 
         requester_clock.advance(Duration::from_secs(900));
         let updates = requester_node
@@ -13377,7 +13082,7 @@ mod tests {
             clock.clone(),
         )?);
         let peer_identity = Node::new("malicious-contract-peer")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         node.set_peer_connector(connector.clone());
         node.add_known_peer(peer_identity.address())?;
 
@@ -13413,8 +13118,13 @@ mod tests {
                 )),
             }),
         );
-        let (endpoint, server) = spawn_plain_peer_server(static_service).await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            static_service,
+            connector.as_ref(),
+        )
+        .await?;
 
         clock.advance(Duration::from_secs(90));
         let updates = node
@@ -13444,7 +13154,7 @@ mod tests {
         )?);
         let peer_identity = Node::new("proposal-exchange-peer")?;
         let learned_peer = Node::new("proposal-exchange-learned")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         node.set_peer_connector(connector.clone());
         node.add_known_peer(peer_identity.address())?;
 
@@ -13475,9 +13185,13 @@ mod tests {
                 },
             ],
         ));
-        let (endpoint, server) =
-            spawn_plain_peer_server(PeerExchangePeerService::new(exchange_state.clone())).await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            PeerExchangePeerService::new(exchange_state.clone()),
+            connector.as_ref(),
+        )
+        .await?;
 
         let first = node
             .publish_to_peer_updates(peer_identity.address())
@@ -13516,7 +13230,7 @@ mod tests {
         )?);
         let peer_identity = Node::new("recovery-exchange-peer")?;
         let learned_peer = Node::new("recovery-exchange-learned")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         node.set_peer_connector(connector.clone());
         node.add_known_peer(peer_identity.address())?;
 
@@ -13526,9 +13240,13 @@ mod tests {
                 onion_pubkey: learned_peer.ed25519_keypair().public.to_bytes().to_vec(),
             }],
         ));
-        let (endpoint, server) =
-            spawn_plain_peer_server(PeerExchangePeerService::new(exchange_state.clone())).await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            PeerExchangePeerService::new(exchange_state.clone()),
+            connector.as_ref(),
+        )
+        .await?;
 
         let update = node.run_recovery_pass().await?;
         assert_eq!(update.applied_versions, 0);
@@ -13688,7 +13406,7 @@ mod tests {
         let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let node = Arc::new(Node::with_local_storage("proposal-refresh", filesystem)?);
         let peer_identity = Node::new("proposal-refresh-peer")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         node.set_peer_connector(connector.clone());
 
         let cli = CliService::new(node.clone());
@@ -13702,9 +13420,13 @@ mod tests {
         .await?;
 
         let service_state = Arc::new(TransientSetAckState::new());
-        let (endpoint, server) =
-            spawn_plain_peer_server(TransientSetAckPeerService::new(service_state.clone())).await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            TransientSetAckPeerService::new(service_state.clone()),
+            connector.as_ref(),
+        )
+        .await?;
 
         let updates = node
             .publish_to_peer_updates(peer_identity.address())
@@ -13801,7 +13523,7 @@ mod tests {
         )?);
         recovered_node.initialize_lineage((i64::MAX, 0), false)?;
         let peer_identity = Node::new("recover-download-peer")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         recovered_node.set_peer_connector(connector.clone());
         recovered_node.add_known_peer(peer_identity.address())?;
 
@@ -13822,10 +13544,13 @@ mod tests {
             owner_content.clone(),
             owner_blob,
         ));
-        let (endpoint, server) =
-            spawn_plain_peer_server(TransientDownloadPeerService::new(service_state.clone()))
-                .await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            TransientDownloadPeerService::new(service_state.clone()),
+            connector.as_ref(),
+        )
+        .await?;
 
         let update = recovered_node.run_recovery_pass().await?;
         assert_eq!(update.applied_versions, 1);
@@ -13923,7 +13648,7 @@ mod tests {
         )?);
         recovered_node.initialize_lineage((250, 0), true)?;
         let peer_identity = Arc::new(Node::new("inbound-contact-recovery-peer")?);
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         recovered_node.set_peer_connector(connector.clone());
 
         CliService::new(owner_node.clone())
@@ -13936,35 +13661,38 @@ mod tests {
             }))
             .await?;
         let (content_info, blob) = current_content_snapshot(owner_node.as_ref())?;
-        let (peer_endpoint, peer_server) = spawn_plain_peer_server(StaticPeerService::new(
-            bbrpc::GetContentRevisionResponse {
-                requester_latest_stored_content: Some(content_info.clone()),
-                requester_remaining_seconds: 0,
-                requester_latest_known_content: Some(content_info.clone()),
-                requester_pinned: false,
-            },
-            DownloadBehavior::Response(bbrpc::DownloadResponse {
-                total_length: i64::try_from(blob.len()).unwrap_or(i64::MAX),
-                sha256: Sha256::digest(&blob).to_vec(),
-                section: Some(bbrpc::download_response::Section::RawBytes(
-                    bbrpc::RawBytes {
-                        value: blob.clone(),
-                    },
-                )),
-            }),
-        ))
-        .await?;
-        connector.register_peer(peer_identity.address(), &peer_endpoint);
-
-        let (recovered_endpoint, recovered_server) =
-            spawn_p2p_server(recovered_node.clone()).await?;
-        let channel = netmock::connect_peer_channel(
-            &recovered_endpoint,
-            recovered_node.address(),
+        let peer_server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
             &peer_identity.ed25519_keypair().secret,
+            StaticPeerService::new(
+                bbrpc::GetContentRevisionResponse {
+                    requester_latest_stored_content: Some(content_info.clone()),
+                    requester_remaining_seconds: 0,
+                    requester_latest_known_content: Some(content_info.clone()),
+                    requester_pinned: false,
+                },
+                DownloadBehavior::Response(bbrpc::DownloadResponse {
+                    total_length: i64::try_from(blob.len()).unwrap_or(i64::MAX),
+                    sha256: Sha256::digest(&blob).to_vec(),
+                    section: Some(bbrpc::download_response::Section::RawBytes(
+                        bbrpc::RawBytes {
+                            value: blob.clone(),
+                        },
+                    )),
+                }),
+            ),
+            connector.as_ref(),
         )
         .await?;
-        let mut peer_to_recovered = BarterBackupServerClient::new(channel);
+
+        let recovered_server =
+            spawn_registered_p2p_server(recovered_node.clone(), connector.as_ref()).await?;
+        let mut peer_to_recovered = connector
+            .connect(
+                recovered_node.address(),
+                &peer_identity.ed25519_keypair().secret,
+            )
+            .await?;
         let _response = peer_to_recovered
             .health_check(bbrpc::HealthCheckRequest {})
             .await?;
@@ -13991,7 +13719,7 @@ mod tests {
             local_filesystem.clone(),
         )?);
         let peer_identity = Node::new("recover-current-peer")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         local_node.set_peer_connector(connector.clone());
         local_node.add_known_peer(peer_identity.address())?;
 
@@ -14020,25 +13748,29 @@ mod tests {
         assert!(missing_blob);
         assert!(local_node.current_content_needs_restore_from_peer(&content_info.content_id)?);
 
-        let (endpoint, server) = spawn_plain_peer_server(StaticPeerService::new(
-            bbrpc::GetContentRevisionResponse {
-                requester_latest_stored_content: Some(content_info.clone()),
-                requester_remaining_seconds: 0,
-                requester_latest_known_content: Some(content_info.clone()),
-                requester_pinned: false,
-            },
-            DownloadBehavior::Response(bbrpc::DownloadResponse {
-                total_length: i64::try_from(blob.len()).unwrap_or(i64::MAX),
-                sha256: Sha256::digest(&blob).to_vec(),
-                section: Some(bbrpc::download_response::Section::RawBytes(
-                    bbrpc::RawBytes {
-                        value: blob.clone(),
-                    },
-                )),
-            }),
-        ))
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            StaticPeerService::new(
+                bbrpc::GetContentRevisionResponse {
+                    requester_latest_stored_content: Some(content_info.clone()),
+                    requester_remaining_seconds: 0,
+                    requester_latest_known_content: Some(content_info.clone()),
+                    requester_pinned: false,
+                },
+                DownloadBehavior::Response(bbrpc::DownloadResponse {
+                    total_length: i64::try_from(blob.len()).unwrap_or(i64::MAX),
+                    sha256: Sha256::digest(&blob).to_vec(),
+                    section: Some(bbrpc::download_response::Section::RawBytes(
+                        bbrpc::RawBytes {
+                            value: blob.clone(),
+                        },
+                    )),
+                }),
+            ),
+            connector.as_ref(),
+        )
         .await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
 
         let update = local_node.run_recovery_pass().await?;
         assert_eq!(update.total_versions_found, 1);
@@ -14080,7 +13812,7 @@ mod tests {
         )?);
         recovered_node.initialize_lineage((300, 0), false)?;
         let stale_peer_identity = Node::new("fallback-stale-peer")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         recovered_node.set_peer_connector(connector.clone());
         recovered_node.add_known_peer(stale_peer_identity.address())?;
 
@@ -14125,8 +13857,13 @@ mod tests {
                 )),
             }),
         );
-        let (endpoint, server) = spawn_plain_peer_server(stale_service).await?;
-        connector.register_peer(stale_peer_identity.address(), &endpoint);
+        let server = spawn_registered_mock_peer_server(
+            stale_peer_identity.address(),
+            &stale_peer_identity.ed25519_keypair().secret,
+            stale_service,
+            connector.as_ref(),
+        )
+        .await?;
 
         let update = recovered_node.run_recovery_pass().await?;
         assert_eq!(update.total_versions_found, 2);
@@ -14168,7 +13905,7 @@ mod tests {
         recovered_node.initialize_lineage((300, 0), false)?;
         let peer_a_identity = Node::new("merge-peer-a")?;
         let peer_b_identity = Node::new("merge-peer-b")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         recovered_node.set_peer_connector(connector.clone());
         recovered_node.add_known_peer(peer_a_identity.address())?;
         recovered_node.add_known_peer(peer_b_identity.address())?;
@@ -14194,44 +13931,52 @@ mod tests {
         let (version_a, blob_a) = current_content_snapshot(branch_a_node.as_ref())?;
         let (version_b, blob_b) = current_content_snapshot(branch_b_node.as_ref())?;
 
-        let (endpoint_a, server_a) = spawn_plain_peer_server(StaticPeerService::new(
-            bbrpc::GetContentRevisionResponse {
-                requester_latest_stored_content: Some(version_a.clone()),
-                requester_remaining_seconds: 0,
-                requester_latest_known_content: Some(version_a.clone()),
-                requester_pinned: false,
-            },
-            DownloadBehavior::Response(bbrpc::DownloadResponse {
-                total_length: i64::try_from(blob_a.len()).unwrap_or(i64::MAX),
-                sha256: Sha256::digest(&blob_a).to_vec(),
-                section: Some(bbrpc::download_response::Section::RawBytes(
-                    bbrpc::RawBytes {
-                        value: blob_a.clone(),
-                    },
-                )),
-            }),
-        ))
+        let server_a = spawn_registered_mock_peer_server(
+            peer_a_identity.address(),
+            &peer_a_identity.ed25519_keypair().secret,
+            StaticPeerService::new(
+                bbrpc::GetContentRevisionResponse {
+                    requester_latest_stored_content: Some(version_a.clone()),
+                    requester_remaining_seconds: 0,
+                    requester_latest_known_content: Some(version_a.clone()),
+                    requester_pinned: false,
+                },
+                DownloadBehavior::Response(bbrpc::DownloadResponse {
+                    total_length: i64::try_from(blob_a.len()).unwrap_or(i64::MAX),
+                    sha256: Sha256::digest(&blob_a).to_vec(),
+                    section: Some(bbrpc::download_response::Section::RawBytes(
+                        bbrpc::RawBytes {
+                            value: blob_a.clone(),
+                        },
+                    )),
+                }),
+            ),
+            connector.as_ref(),
+        )
         .await?;
-        let (endpoint_b, server_b) = spawn_plain_peer_server(StaticPeerService::new(
-            bbrpc::GetContentRevisionResponse {
-                requester_latest_stored_content: Some(version_b.clone()),
-                requester_remaining_seconds: 0,
-                requester_latest_known_content: Some(version_b.clone()),
-                requester_pinned: false,
-            },
-            DownloadBehavior::Response(bbrpc::DownloadResponse {
-                total_length: i64::try_from(blob_b.len()).unwrap_or(i64::MAX),
-                sha256: Sha256::digest(&blob_b).to_vec(),
-                section: Some(bbrpc::download_response::Section::RawBytes(
-                    bbrpc::RawBytes {
-                        value: blob_b.clone(),
-                    },
-                )),
-            }),
-        ))
+        let server_b = spawn_registered_mock_peer_server(
+            peer_b_identity.address(),
+            &peer_b_identity.ed25519_keypair().secret,
+            StaticPeerService::new(
+                bbrpc::GetContentRevisionResponse {
+                    requester_latest_stored_content: Some(version_b.clone()),
+                    requester_remaining_seconds: 0,
+                    requester_latest_known_content: Some(version_b.clone()),
+                    requester_pinned: false,
+                },
+                DownloadBehavior::Response(bbrpc::DownloadResponse {
+                    total_length: i64::try_from(blob_b.len()).unwrap_or(i64::MAX),
+                    sha256: Sha256::digest(&blob_b).to_vec(),
+                    section: Some(bbrpc::download_response::Section::RawBytes(
+                        bbrpc::RawBytes {
+                            value: blob_b.clone(),
+                        },
+                    )),
+                }),
+            ),
+            connector.as_ref(),
+        )
         .await?;
-        connector.register_peer(peer_a_identity.address(), &endpoint_a);
-        connector.register_peer(peer_b_identity.address(), &endpoint_b);
 
         let update = recovered_node.run_recovery_pass().await?;
         assert_eq!(update.applied_versions, 2);
@@ -14280,7 +14025,7 @@ mod tests {
         )?);
         recovered_node.initialize_lineage((300, 0), false)?;
         let peer_identity = Node::new("watermark-peer")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         recovered_node.set_peer_connector(connector.clone());
         CliService::new(owner_node.clone())
             .set_file(tonic::Request::new(clirpc::SetFileRequest {
@@ -14293,25 +14038,29 @@ mod tests {
             .await?;
         let (version_1, blob_1) = current_content_snapshot(owner_node.as_ref())?;
 
-        let (endpoint, server) = spawn_plain_peer_server(StaticPeerService::new(
-            bbrpc::GetContentRevisionResponse {
-                requester_latest_stored_content: Some(version_1.clone()),
-                requester_remaining_seconds: 0,
-                requester_latest_known_content: Some(version_1.clone()),
-                requester_pinned: false,
-            },
-            DownloadBehavior::Response(bbrpc::DownloadResponse {
-                total_length: i64::try_from(blob_1.len()).unwrap_or(i64::MAX),
-                sha256: Sha256::digest(&blob_1).to_vec(),
-                section: Some(bbrpc::download_response::Section::RawBytes(
-                    bbrpc::RawBytes {
-                        value: blob_1.clone(),
-                    },
-                )),
-            }),
-        ))
+        let server = spawn_registered_mock_peer_server(
+            peer_identity.address(),
+            &peer_identity.ed25519_keypair().secret,
+            StaticPeerService::new(
+                bbrpc::GetContentRevisionResponse {
+                    requester_latest_stored_content: Some(version_1.clone()),
+                    requester_remaining_seconds: 0,
+                    requester_latest_known_content: Some(version_1.clone()),
+                    requester_pinned: false,
+                },
+                DownloadBehavior::Response(bbrpc::DownloadResponse {
+                    total_length: i64::try_from(blob_1.len()).unwrap_or(i64::MAX),
+                    sha256: Sha256::digest(&blob_1).to_vec(),
+                    section: Some(bbrpc::download_response::Section::RawBytes(
+                        bbrpc::RawBytes {
+                            value: blob_1.clone(),
+                        },
+                    )),
+                }),
+            ),
+            connector.as_ref(),
+        )
         .await?;
-        connector.register_peer(peer_identity.address(), &endpoint);
         recovered_node.add_known_peer(peer_identity.address())?;
 
         let initial_update = recovered_node.run_recovery_pass().await?;
@@ -14347,7 +14096,7 @@ mod tests {
         recovered_node.initialize_lineage((i64::MAX, 0), false)?;
         let bad_peer_identity = Node::new("recover-bad-peer")?;
         let good_peer_identity = Node::new("recover-good-peer")?;
-        let connector = Arc::new(PlainPeerConnector::new());
+        let connector = Arc::new(netmock::MockPeerConnector::new());
         recovered_node.set_peer_connector(connector.clone());
         recovered_node
             .known_peers
@@ -14404,10 +14153,20 @@ mod tests {
                 )),
             }),
         );
-        let (bad_endpoint, bad_server) = spawn_plain_peer_server(bad_service).await?;
-        let (good_endpoint, good_server) = spawn_plain_peer_server(good_service).await?;
-        connector.register_peer(bad_peer_identity.address(), &bad_endpoint);
-        connector.register_peer(good_peer_identity.address(), &good_endpoint);
+        let bad_server = spawn_registered_mock_peer_server(
+            bad_peer_identity.address(),
+            &bad_peer_identity.ed25519_keypair().secret,
+            bad_service,
+            connector.as_ref(),
+        )
+        .await?;
+        let good_server = spawn_registered_mock_peer_server(
+            good_peer_identity.address(),
+            &good_peer_identity.ed25519_keypair().secret,
+            good_service,
+            connector.as_ref(),
+        )
+        .await?;
 
         let update = recovered_node.run_recovery_pass().await?;
         assert_eq!(update.total_versions_found, 1);
@@ -14487,7 +14246,8 @@ mod tests {
             .await
             .context("seed peer with the old owner revision")?;
         old_owner_server.abort();
-        peer_node.evict_cached_peer_client(old_owner.address());
+        wait_until(|| !connector.connected(old_owner.address(), &peer_node.ed25519_keypair.secret))
+            .await;
 
         let recovered_server =
             spawn_registered_p2p_server(recovered_node.clone(), connector.as_ref()).await?;

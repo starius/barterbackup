@@ -153,23 +153,18 @@ pub trait PeerConnector: Send + Sync {
 
     /// Return whether `peer_onion` currently has a live authenticated outer
     /// session.
-    fn connected(&self, _peer_onion: &str, _client_private_key: &SecretKey) -> bool {
-        false
-    }
+    fn connected(&self, peer_onion: &str, client_private_key: &SecretKey) -> bool;
 
-    /// Report whether this connector uses long-lived outer peer sessions as
-    /// its primary connection model.
-    fn session_backed(&self) -> bool {
-        false
-    }
+    /// Return the current authenticated outer-session nonce for `peer_onion`,
+    /// if one exists.
+    fn session_nonce(&self, peer_onion: &str, client_private_key: &SecretKey) -> Option<u64>;
 
     /// Set the outer-session capacity for the local node using this connector.
-    fn set_session_capacity(&self, _client_private_key: &SecretKey, _capacity: usize) {}
+    fn set_session_capacity(&self, client_private_key: &SecretKey, capacity: usize);
 
     /// Set the preferred peer-session retention order for the local node using
     /// this connector.
-    fn set_preferred_sessions(&self, _client_private_key: &SecretKey, _preferred_peers: &[String]) {
-    }
+    fn set_preferred_sessions(&self, client_private_key: &SecretKey, preferred_peers: &[String]);
 }
 
 #[cfg(test)]
