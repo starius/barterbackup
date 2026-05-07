@@ -16,6 +16,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::CommonState;
@@ -200,6 +201,27 @@ impl MockPeerConnector {
     pub fn session_nonce(&self, client_private_key: &SecretKey, peer_onion: &str) -> Option<u64> {
         self.local_sessions(client_private_key)
             .session_nonce(peer_onion)
+    }
+
+    /// Return whether `peer_onion` currently has one cached outbound gRPC
+    /// lane on this local node.
+    pub fn has_outbound_lane(&self, client_private_key: &SecretKey, peer_onion: &str) -> bool {
+        self.local_sessions(client_private_key)
+            .has_outbound_lane(peer_onion)
+    }
+
+    /// Return how many inbound gRPC lanes `peer_onion` has opened against this
+    /// local node.
+    pub fn inbound_lane_count(&self, client_private_key: &SecretKey, peer_onion: &str) -> u64 {
+        self.local_sessions(client_private_key)
+            .inbound_lane_count(peer_onion)
+    }
+
+    /// Set how long this local node should keep one idle cached outbound lane
+    /// before dropping it.
+    pub fn set_outbound_lane_idle_ttl(&self, client_private_key: &SecretKey, ttl: Duration) {
+        self.local_sessions(client_private_key)
+            .set_outbound_lane_idle_ttl(ttl);
     }
 
     /// Return whether the live outer session for `peer_onion` was initiated by

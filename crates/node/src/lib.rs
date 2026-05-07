@@ -7971,6 +7971,81 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn idle_outbound_lane_reopens_inside_the_same_outer_session() -> anyhow::Result<()> {
+        let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let local_node = Arc::new(Node::with_local_storage(
+            "idle-lane-local",
+            local_filesystem,
+        )?);
+        let peer_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer_node = Arc::new(Node::with_local_storage("idle-lane-peer", peer_filesystem)?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        local_node.set_peer_connector(connector.clone());
+        peer_node.set_peer_connector(connector.clone());
+        connector.set_outbound_lane_idle_ttl(
+            &local_node.ed25519_keypair.secret,
+            Duration::from_millis(500),
+        );
+        local_node.add_known_peer(peer_node.address())?;
+        peer_node.add_known_peer(local_node.address())?;
+        let peer_server =
+            spawn_registered_p2p_server(peer_node.clone(), connector.as_ref()).await?;
+
+        let mut client = local_node
+            .connect_peer_client_with_timeout(peer_node.address(), transport::PEER_CONNECT_TIMEOUT)
+            .await?;
+        client
+            .health_check(bbrpc::HealthCheckRequest::default())
+            .await?;
+        drop(client);
+
+        let session_nonce = connector
+            .session_nonce(&local_node.ed25519_keypair.secret, peer_node.address())
+            .ok_or_else(|| anyhow::anyhow!("missing outer session nonce"))?;
+        assert!(
+            connector.has_outbound_lane(&local_node.ed25519_keypair.secret, peer_node.address(),)
+        );
+        assert_eq!(
+            connector.inbound_lane_count(&peer_node.ed25519_keypair.secret, local_node.address()),
+            1,
+        );
+
+        tokio::time::sleep(Duration::from_millis(750)).await;
+
+        assert!(connector.connected(peer_node.address(), &local_node.ed25519_keypair.secret));
+        assert_eq!(
+            connector.session_nonce(&local_node.ed25519_keypair.secret, peer_node.address()),
+            Some(session_nonce),
+        );
+        assert!(
+            !connector.has_outbound_lane(&local_node.ed25519_keypair.secret, peer_node.address(),)
+        );
+
+        let mut second_client = local_node
+            .connect_peer_client_with_timeout(peer_node.address(), transport::PEER_CONNECT_TIMEOUT)
+            .await?;
+        second_client
+            .health_check(bbrpc::HealthCheckRequest::default())
+            .await?;
+        drop(second_client);
+
+        assert_eq!(
+            connector.session_nonce(&local_node.ed25519_keypair.secret, peer_node.address()),
+            Some(session_nonce),
+        );
+        assert!(
+            connector.has_outbound_lane(&local_node.ed25519_keypair.secret, peer_node.address(),)
+        );
+        assert_eq!(
+            connector.inbound_lane_count(&peer_node.ed25519_keypair.secret, local_node.address()),
+            2,
+        );
+
+        peer_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn durable_sessions_survive_opportunistic_capacity_pressure() -> anyhow::Result<()> {
         let local_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let local_node = Arc::new(Node::with_local_storage(

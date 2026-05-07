@@ -5,7 +5,7 @@
 //! inbound yamux streams are forwarded into tonic as accepted peer
 //! connections.
 
-use crate::{configure_peer_client, PeerClient};
+use crate::{configure_peer_client, PeerClient, PEER_GRPC_LANE_IDLE_TTL};
 use anyhow::{anyhow, Result};
 use ed25519_dalek::PublicKey;
 use futures_util::Stream;
@@ -18,6 +18,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -118,8 +119,8 @@ impl AsyncWrite for PeerSessionServerIo {
     }
 }
 
-/// PeerSessionRegistry tracks long-lived outer sessions and stable per-peer
-/// outbound clients.
+/// PeerSessionRegistry tracks long-lived outer sessions and bounded per-peer
+/// outbound lane clients.
 #[derive(Clone)]
 pub struct PeerSessionRegistry {
     inner: Arc<PeerSessionRegistryInner>,
@@ -134,6 +135,9 @@ impl PeerSessionRegistry {
                 local_onion,
                 next_session_nonce: AtomicU64::new(1),
                 opportunistic_capacity: AtomicUsize::new(32),
+                outbound_lane_idle_ttl_ms: AtomicU64::new(
+                    PEER_GRPC_LANE_IDLE_TTL.as_millis() as u64
+                ),
                 durable_peers: Mutex::new(BTreeSet::new()),
                 slots: Mutex::new(BTreeMap::new()),
                 incoming_tx,
@@ -164,6 +168,15 @@ impl PeerSessionRegistry {
         tokio::spawn(async move {
             inner.enforce_capacity().await;
         });
+    }
+
+    /// Set how long one cached outbound gRPC lane may stay idle before this
+    /// registry drops it while keeping the outer session alive.
+    pub fn set_outbound_lane_idle_ttl(&self, ttl: Duration) {
+        let ttl_ms = ttl.as_millis().clamp(1, u64::MAX as u128) as u64;
+        self.inner
+            .outbound_lane_idle_ttl_ms
+            .store(ttl_ms, Ordering::Relaxed);
     }
 
     /// Take the shared tonic incoming stream for inbound peer lanes.
@@ -217,6 +230,28 @@ impl PeerSessionRegistry {
             .get(peer_onion)
             .and_then(|slot| slot.current_session())
             .map(|session| session.session_nonce)
+    }
+
+    /// Return whether `peer_onion` currently has one cached outbound gRPC lane
+    /// client inside its live outer session.
+    pub fn has_outbound_lane(&self, peer_onion: &str) -> bool {
+        self.inner
+            .slots
+            .lock()
+            .unwrap()
+            .get(peer_onion)
+            .is_some_and(|slot| slot.has_outbound_lane())
+    }
+
+    /// Return how many inbound gRPC lanes `peer_onion` has opened against this
+    /// registry since the current process started.
+    pub fn inbound_lane_count(&self, peer_onion: &str) -> u64 {
+        self.inner
+            .slots
+            .lock()
+            .unwrap()
+            .get(peer_onion)
+            .map_or(0, |slot| slot.inbound_lane_count())
     }
 
     /// Return whether the live outer session for `peer_onion` was initiated by
@@ -296,6 +331,7 @@ struct PeerSessionRegistryInner {
     local_onion: String,
     next_session_nonce: AtomicU64,
     opportunistic_capacity: AtomicUsize,
+    outbound_lane_idle_ttl_ms: AtomicU64,
     durable_peers: Mutex<BTreeSet<String>>,
     slots: Mutex<BTreeMap<String, Arc<PeerSessionSlot>>>,
     incoming_tx: mpsc::Sender<PeerSessionServerIo>,
@@ -303,6 +339,14 @@ struct PeerSessionRegistryInner {
 }
 
 impl PeerSessionRegistryInner {
+    fn outbound_lane_idle_ttl(&self) -> Duration {
+        Duration::from_millis(
+            self.outbound_lane_idle_ttl_ms
+                .load(Ordering::Relaxed)
+                .max(1),
+        )
+    }
+
     fn slot_for_peer(self: &Arc<Self>, peer_onion: &str) -> Arc<PeerSessionSlot> {
         let mut slots = self.slots.lock().unwrap();
         slots
@@ -382,23 +426,100 @@ struct PeerSessionSlot {
     peer_onion: String,
     registry: Weak<PeerSessionRegistryInner>,
     current_session: Mutex<Option<Arc<PeerOuterSession>>>,
+    cached_outbound_lane: Mutex<Option<CachedOutboundLane>>,
+    next_outbound_lane_generation: AtomicU64,
+    inbound_lane_count: AtomicU64,
+}
+
+struct CachedOutboundLane {
+    generation: u64,
     client: PeerClient,
 }
 
 impl PeerSessionSlot {
     fn new(peer_onion: String, registry: Weak<PeerSessionRegistryInner>) -> Arc<Self> {
-        Arc::new_cyclic(|weak| Self {
+        Arc::new_cyclic(|_| Self {
             peer_onion,
             registry,
             current_session: Mutex::new(None),
-            client: configure_peer_client(PeerClient::new(build_session_backed_channel(
-                weak.clone(),
-            ))),
+            cached_outbound_lane: Mutex::new(None),
+            next_outbound_lane_generation: AtomicU64::new(1),
+            inbound_lane_count: AtomicU64::new(0),
         })
     }
 
-    fn client(&self) -> PeerClient {
-        self.client.clone()
+    fn client(self: &Arc<Self>) -> PeerClient {
+        let generation = self
+            .next_outbound_lane_generation
+            .fetch_add(1, Ordering::Relaxed);
+        let client = {
+            let mut cached_lane = self.cached_outbound_lane.lock().unwrap();
+            match cached_lane.as_mut() {
+                Some(cached_lane) => {
+                    cached_lane.generation = generation;
+                    cached_lane.client.clone()
+                }
+                None => {
+                    let client = configure_peer_client(PeerClient::new(
+                        build_session_backed_channel(Arc::downgrade(self)),
+                    ));
+                    *cached_lane = Some(CachedOutboundLane {
+                        generation,
+                        client: client.clone(),
+                    });
+                    client
+                }
+            }
+        };
+        self.schedule_outbound_lane_cleanup(generation);
+        client
+    }
+
+    fn has_outbound_lane(&self) -> bool {
+        self.cached_outbound_lane.lock().unwrap().is_some()
+    }
+
+    fn inbound_lane_count(&self) -> u64 {
+        self.inbound_lane_count.load(Ordering::Relaxed)
+    }
+
+    fn note_inbound_lane_opened(&self) {
+        self.inbound_lane_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn schedule_outbound_lane_cleanup(self: &Arc<Self>, generation: u64) {
+        let slot = Arc::downgrade(self);
+        let ttl = self
+            .registry
+            .upgrade()
+            .map_or(PEER_GRPC_LANE_IDLE_TTL, |registry| {
+                registry.outbound_lane_idle_ttl()
+            });
+        tokio::spawn(async move {
+            tokio::time::sleep(ttl).await;
+            let Some(slot) = slot.upgrade() else {
+                return;
+            };
+            slot.clear_idle_outbound_lane(generation);
+        });
+    }
+
+    fn clear_idle_outbound_lane(&self, generation: u64) {
+        let mut cached_lane = self.cached_outbound_lane.lock().unwrap();
+        if cached_lane
+            .as_ref()
+            .is_some_and(|cached_lane| cached_lane.generation == generation)
+        {
+            debug!(
+                peer = %self.peer_onion,
+                "closing idle outbound peer gRPC lane"
+            );
+            cached_lane.take();
+        }
+    }
+
+    fn clear_outbound_lane(&self) {
+        self.cached_outbound_lane.lock().unwrap().take();
     }
 
     fn connected(&self) -> bool {
@@ -438,6 +559,7 @@ impl PeerSessionSlot {
                     replacement_session_nonce = candidate.session_nonce,
                     "replacing duplicate outer peer session"
                 );
+                self.clear_outbound_lane();
                 let old = current.replace(candidate);
                 old.filter(|session| session.is_live())
             }
@@ -462,6 +584,7 @@ impl PeerSessionSlot {
             current.take();
         }
         drop(current);
+        self.clear_outbound_lane();
 
         let Some(registry) = self.registry.upgrade() else {
             return;
@@ -533,7 +656,6 @@ fn build_session_backed_channel(slot: Weak<PeerSessionSlot>) -> Channel {
     Endpoint::from_static("http://peer-session.invalid")
         .http2_keep_alive_interval(crate::PEER_GRPC_KEEPALIVE_INTERVAL)
         .keep_alive_timeout(crate::PEER_GRPC_KEEPALIVE_TIMEOUT)
-        .keep_alive_while_idle(true)
         .connect_with_connector_lazy(service_fn(move |_| {
             let slot = slot.clone();
             async move {
@@ -609,6 +731,9 @@ async fn run_outer_session(
                             session_nonce = session.session_nonce,
                             "accepted inbound gRPC lane on outer peer session"
                         );
+                        if let Some(slot) = slot.upgrade() {
+                            slot.note_inbound_lane_opened();
+                        }
                         let info = PeerSessionConnectInfo {
                             public_key: peer_public_key,
                         };

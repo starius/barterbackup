@@ -43,6 +43,10 @@ pub const PEER_GRPC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
 /// unacknowledged before the lane is dropped.
 pub const PEER_GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// PEER_GRPC_LANE_IDLE_TTL bounds how long one cached inner peer gRPC lane may
+/// remain unused before it is dropped while the outer session stays alive.
+pub const PEER_GRPC_LANE_IDLE_TTL: Duration = Duration::from_secs(60);
+
 /// PEER_RETRY_INITIAL_BACKOFF is the base pause before a second attempt.
 pub const PEER_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 
