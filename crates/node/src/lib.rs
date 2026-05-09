@@ -3651,7 +3651,11 @@ impl Node {
         }
         let (score_seconds, measured_at) = self.peer_score_state(peer_public_key)?;
         let now_secs = i64::try_from(self.clock.now().secs).unwrap_or(i64::MAX);
-        let elapsed = self.observed_peer_score_elapsed_secs(measured_at, now_secs);
+        let elapsed = if passed {
+            self.full_peer_score_elapsed_secs(measured_at, now_secs)
+        } else {
+            self.observed_peer_score_elapsed_secs(measured_at, now_secs)
+        };
         let new_score = if passed {
             score_seconds.saturating_add(elapsed)
         } else {
@@ -3662,6 +3666,14 @@ impl Node {
         };
         batcher.set_peer_score(peer_public_key.as_bytes(), new_score, now_secs)?;
         Ok(new_score)
+    }
+
+    /// Return the full elapsed interval since the peer score was last measured.
+    fn full_peer_score_elapsed_secs(&self, measured_at: i64, now_secs: i64) -> i64 {
+        if measured_at <= 0 {
+            return 0;
+        }
+        now_secs.saturating_sub(measured_at)
     }
 
     /// Adjust the persisted score state for a peer by one direct delta.
@@ -9854,7 +9866,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn peer_score_update_clamps_to_startup_observation_window() -> anyhow::Result<()> {
+    async fn peer_score_update_adds_full_elapsed_time_across_startup_gaps() -> anyhow::Result<()> {
         let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let clock = Arc::new(ManualClock::new(Timestamp::new(1_000, 0).unwrap()));
         let node = Node::with_local_storage_and_clock(
@@ -9869,12 +9881,30 @@ mod tests {
         node.with_store(|store| store.set_peer_score(peer_public_key.as_bytes(), 10, 100))?;
 
         clock.advance(Duration::from_secs(10));
-        assert_eq!(node.update_peer_score(&peer_public_key, true)?, 20);
+        assert_eq!(node.update_peer_score(&peer_public_key, true)?, 920);
         Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn peer_score_update_clamps_to_resumed_observation_window() -> anyhow::Result<()> {
+    async fn peer_score_update_clamps_penalties_to_startup_observation_window() -> anyhow::Result<()>
+    {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let clock = Arc::new(ManualClock::new(Timestamp::new(1_000, 0).unwrap()));
+        let node =
+            Node::with_local_storage_and_clock("startup-penalty-owner", filesystem, clock.clone())?;
+        let peer = Node::new("startup-penalty-peer")?;
+        let peer_public_key = keys::public_key_from_onion_hostname(peer.address())?;
+
+        node.add_known_peer(peer.address())?;
+        node.with_store(|store| store.set_peer_score(peer_public_key.as_bytes(), 10, 100))?;
+
+        clock.advance(Duration::from_secs(10));
+        assert_eq!(node.update_peer_score(&peer_public_key, false)?, 0);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_score_update_adds_full_elapsed_time_across_offline_gaps() -> anyhow::Result<()> {
         let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let clock = Arc::new(ManualClock::new(Timestamp::new(10, 0).unwrap()));
         let node = Node::with_local_storage_and_clock(
@@ -9894,7 +9924,7 @@ mod tests {
         node.start_peer_score_observation_window();
         clock.advance(Duration::from_secs(15));
 
-        assert_eq!(node.update_peer_score(&peer_public_key, true)?, 25);
+        assert_eq!(node.update_peer_score(&peer_public_key, true)?, 885);
         Ok(())
     }
 
