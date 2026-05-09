@@ -85,7 +85,7 @@
             inherit version;
 
             src = self;
-            cargoHash = "sha256-dVe3d3y8a5frjGQklibDxgxBjhYvFZtQdFV2l4W+w3A=";
+            cargoHash = "sha256-B+l3D1KG6v+kbdsCLvAskuhreeTYGrm8lluI52keqko=";
 
             cargoBuildTarget = staticTarget;
             doCheck = false;
