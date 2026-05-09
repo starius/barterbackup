@@ -756,6 +756,13 @@ mod tests {
         {
             Err(Status::unimplemented(""))
         }
+        async fn ping_peer(
+            &self,
+            _: Request<protos::clirpc::PingPeerRequest>,
+        ) -> std::result::Result<tonic::Response<protos::clirpc::PingPeerResponse>, Status>
+        {
+            Err(Status::unimplemented(""))
+        }
         async fn peers(
             &self,
             _: Request<protos::clirpc::PeersRequest>,

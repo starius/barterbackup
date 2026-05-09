@@ -23,8 +23,9 @@ use protos::clirpc::{
     ConnectPeerRequest, DeleteFileRequest, ExportBuiltInPeersRequest, File, FileInfo,
     GetFileRequest, GetPeerStorageRequest, GetStorageConfigRequest, InitCompleteRequest,
     InitRequest, ListFilesRequest, PeerInfo, PeerStatus, PeersRequest, PeersResponse,
-    PinPeerRequest, PublishToPeerRequest, SetStorageConfigRequest, StateRequest, StateResponse,
-    StopRequest, StorageConfig, UnlockRequest, UnpinPeerRequest, VerifyPeerStorageRequest,
+    PinPeerRequest, PingPeerRequest, PingPeerResponse, PublishToPeerRequest,
+    SetStorageConfigRequest, StateRequest, StateResponse, StopRequest, StorageConfig,
+    UnlockRequest, UnpinPeerRequest, VerifyPeerStorageRequest,
 };
 use time::{Month, OffsetDateTime, UtcOffset};
 use tlsutil::{connect_pinned_channel, read_keys};
@@ -265,6 +266,12 @@ enum InitCommand {
 enum PeerCommand {
     /// Add a peer onion identifier to the daemon's known peer list.
     Connect {
+        /// onion_service_id is the peer onion service identifier.
+        onion_service_id: String,
+    },
+
+    /// Validate that one peer onion service answers HealthCheck live.
+    Ping {
         /// onion_service_id is the peer onion service identifier.
         onion_service_id: String,
     },
@@ -523,6 +530,7 @@ async fn run_parsed(args: Args) -> Result<()> {
             PeerCommand::Connect { onion_service_id } => {
                 connect_peer(&target, &onion_service_id).await
             }
+            PeerCommand::Ping { onion_service_id } => ping_peer(&target, &onion_service_id).await,
             PeerCommand::Pin { onion_service_id } => pin_peer(&target, &onion_service_id).await,
             PeerCommand::Unpin { onion_service_id } => unpin_peer(&target, &onion_service_id).await,
             PeerCommand::List {
@@ -1653,6 +1661,15 @@ async fn delete_file(target: &LocalCliTarget, name: &str) -> Result<()> {
 async fn connect_peer(target: &LocalCliTarget, onion_service_id: &str) -> Result<()> {
     let mut client = connect_client(target).await?;
     connect_peer_with_client(&mut client, onion_service_id).await
+}
+
+/// Ping one peer through the daemon and print the validated onion identities.
+async fn ping_peer(target: &LocalCliTarget, onion_service_id: &str) -> Result<()> {
+    let mut client = connect_client(target).await?;
+    let response = ping_peer_with_client(&mut client, onion_service_id).await?;
+    println!("client_onion: {}", response.client_onion);
+    println!("server_onion: {}", response.server_onion);
+    Ok(())
 }
 
 /// Pin one tracked peer on the daemon.
@@ -2794,6 +2811,21 @@ pub async fn connect_peer_with_client(
     Ok(())
 }
 
+/// Ping one peer through an already connected local CLI client.
+pub async fn ping_peer_with_client(
+    client: &mut BarterBackupClientClient<Channel>,
+    onion_service_id: &str,
+) -> Result<PingPeerResponse> {
+    Ok(client
+        .ping_peer(PingPeerRequest {
+            peer: Some(protos::clirpc::Peer {
+                onion_service_id: onion_service_id.to_string(),
+            }),
+        })
+        .await?
+        .into_inner())
+}
+
 /// Pin one tracked peer through an already connected client.
 pub async fn pin_peer_with_client(
     client: &mut BarterBackupClientClient<Channel>,
@@ -3812,6 +3844,14 @@ mod tests {
             args.cmd,
             Command::Peer {
                 cmd: PeerCommand::Connect { .. }
+            }
+        ));
+
+        let args = Args::parse_from(["bbcli", "peer", "ping", "peer.onion"]);
+        assert!(matches!(
+            args.cmd,
+            Command::Peer {
+                cmd: PeerCommand::Ping { .. }
             }
         ));
 

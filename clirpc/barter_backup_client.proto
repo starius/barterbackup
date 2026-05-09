@@ -43,6 +43,10 @@ service BarterBackupClient {
     // try to connect to it.
     rpc ConnectPeer(ConnectPeerRequest) returns (ConnectPeerResponse);
 
+    // PingPeer validates that a peer onion service responds to HealthCheck
+    // without adding it to the tracked peer set.
+    rpc PingPeer(PingPeerRequest) returns (PingPeerResponse);
+
     // PinPeer marks a peer as operator-pinned so it keeps the highest
     // priority in local peer policy.
     rpc PinPeer(PinPeerRequest) returns (PinPeerResponse);
@@ -395,6 +399,19 @@ message ConnectPeerRequest {
 }
 
 message ConnectPeerResponse {}
+
+message PingPeerRequest {
+    // peer is the peer onion service to probe live.
+    Peer peer = 1;
+}
+
+message PingPeerResponse {
+    // client_onion is the peer-visible onion hostname of the caller.
+    string client_onion = 1;
+
+    // server_onion is the onion hostname asserted by the responder.
+    string server_onion = 2;
+}
 
 message PinPeerRequest {
     // peer is the peer whose operator pin state should be enabled.

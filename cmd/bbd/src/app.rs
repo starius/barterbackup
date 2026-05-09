@@ -1677,6 +1677,15 @@ impl BarterBackupClient for DaemonService {
         Ok(response)
     }
 
+    async fn ping_peer(
+        &self,
+        request: tonic::Request<clirpc::PingPeerRequest>,
+    ) -> Result<Response<clirpc::PingPeerResponse>, Status> {
+        CliService::new(self.unlocked_node().await?)
+            .ping_peer(request)
+            .await
+    }
+
     async fn pin_peer(
         &self,
         request: tonic::Request<clirpc::PinPeerRequest>,
@@ -1895,6 +1904,14 @@ impl BarterBackupClient for DaemonRpcService {
     ) -> Result<Response<clirpc::ConnectPeerResponse>, Status> {
         let disconnect = local_cli_disconnect_token(&request);
         run_local_cli_rpc(disconnect, self.daemon.connect_peer(request)).await
+    }
+
+    async fn ping_peer(
+        &self,
+        request: tonic::Request<clirpc::PingPeerRequest>,
+    ) -> Result<Response<clirpc::PingPeerResponse>, Status> {
+        let disconnect = local_cli_disconnect_token(&request);
+        run_local_cli_rpc(disconnect, self.daemon.ping_peer(request)).await
     }
 
     async fn pin_peer(

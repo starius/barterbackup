@@ -2416,6 +2416,37 @@ impl Node {
         .await
     }
 
+    /// Run a live health check against one peer without tracking unknown peers.
+    pub async fn ping_peer(&self, peer_onion: &str) -> Result<bbrpc::HealthCheckResponse, Status> {
+        if self.is_our_onion(peer_onion) {
+            return self.self_peer_health_check().await;
+        }
+
+        let track_live_contact = self.known_peers().iter().any(|known| known == peer_onion);
+        let policy =
+            transport::PeerRetryPolicy::for_operation(transport::PeerOperation::HealthCheck);
+        let response = self
+            .retry_peer_operation(peer_onion, policy, || async move {
+                let mut client = self
+                    .probe_peer_client_with_timeout(peer_onion, policy.connect_timeout)
+                    .await?;
+                let response = self
+                    .peer_rpc(
+                        peer_onion,
+                        "peer health check",
+                        client.health_check(bbrpc::HealthCheckRequest {}),
+                    )
+                    .await?;
+                validate_peer_health_check_response(&response, self.address(), peer_onion)?;
+                Ok(response)
+            })
+            .await?;
+        if track_live_contact {
+            self.note_peer_live(peer_onion)?;
+        }
+        Ok(response)
+    }
+
     /// Add a peer onion hostname to the configured peer set with an explicit origin.
     fn add_known_peer_with_origin(&self, peer_onion: &str, origin: i32) -> Result<(), Status> {
         if self.is_our_onion(peer_onion) {
@@ -3018,12 +3049,15 @@ impl Node {
     /// Run a peer health check against the node's own public onion address.
     pub async fn self_peer_health_check(&self) -> Result<bbrpc::HealthCheckResponse, Status> {
         let mut client = self.connect_peer_client(self.address()).await?;
-        self.peer_rpc(
-            self.address(),
-            "self peer health check",
-            client.health_check(bbrpc::HealthCheckRequest {}),
-        )
-        .await
+        let response = self
+            .peer_rpc(
+                self.address(),
+                "self peer health check",
+                client.health_check(bbrpc::HealthCheckRequest {}),
+            )
+            .await?;
+        validate_peer_health_check_response(&response, self.address(), self.address())?;
+        Ok(response)
     }
 
     /// Probe one peer for recovery metadata with reconnect-and-retry.
@@ -5557,6 +5591,27 @@ impl Node {
     }
 }
 
+/// Validate the echoed identities returned from one peer health check.
+fn validate_peer_health_check_response(
+    response: &bbrpc::HealthCheckResponse,
+    expected_client_onion: &str,
+    expected_server_onion: &str,
+) -> Result<(), Status> {
+    if response.client_onion != expected_client_onion {
+        return Err(Status::internal(format!(
+            "peer health check returned an unexpected client onion: expected {expected_client_onion}, got {}",
+            response.client_onion
+        )));
+    }
+    if response.server_onion != expected_server_onion {
+        return Err(Status::internal(format!(
+            "peer health check returned an unexpected server onion: expected {expected_server_onion}, got {}",
+            response.server_onion
+        )));
+    }
+    Ok(())
+}
+
 /// Read one streamed local file upload into memory.
 async fn collect_set_file_upload(
     mut stream: tonic::Streaming<clirpc::SetFileChunk>,
@@ -5782,6 +5837,25 @@ impl clirpc::barter_backup_client_server::BarterBackupClient for CliService {
 
         self.node.connect_known_peer(&peer.onion_service_id).await?;
         Ok(Response::new(clirpc::ConnectPeerResponse {}))
+    }
+
+    async fn ping_peer(
+        &self,
+        request: tonic::Request<clirpc::PingPeerRequest>,
+    ) -> Result<tonic::Response<clirpc::PingPeerResponse>, tonic::Status> {
+        let request = request.into_inner();
+        let peer = request
+            .peer
+            .ok_or_else(|| Status::invalid_argument("peer is required"))?;
+        if peer.onion_service_id.is_empty() {
+            return Err(Status::invalid_argument("peer onion is required"));
+        }
+
+        let response = self.node.ping_peer(&peer.onion_service_id).await?;
+        Ok(Response::new(clirpc::PingPeerResponse {
+            client_onion: response.client_onion,
+            server_onion: response.server_onion,
+        }))
     }
 
     async fn pin_peer(
@@ -6509,6 +6583,64 @@ mod tests {
                 revision_response,
                 download_behavior,
             }
+        }
+    }
+
+    /// FixedHealthCheckPeerService returns one configured health-check payload.
+    #[derive(Clone)]
+    struct FixedHealthCheckPeerService {
+        /// response is returned from HealthCheck.
+        response: bbrpc::HealthCheckResponse,
+    }
+
+    impl FixedHealthCheckPeerService {
+        /// Create a health-check service with one fixed response.
+        fn new(response: bbrpc::HealthCheckResponse) -> Self {
+            Self { response }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl bbrpc::barter_backup_server_server::BarterBackupServer for FixedHealthCheckPeerService {
+        async fn health_check(
+            &self,
+            _request: Request<bbrpc::HealthCheckRequest>,
+        ) -> std::result::Result<Response<bbrpc::HealthCheckResponse>, Status> {
+            Ok(Response::new(self.response.clone()))
+        }
+
+        async fn peer_exchange(
+            &self,
+            _request: Request<bbrpc::PeerExchangeRequest>,
+        ) -> std::result::Result<Response<bbrpc::PeerExchangeResponse>, Status> {
+            Err(Status::unimplemented(
+                "peer exchange is not used in this test",
+            ))
+        }
+
+        async fn get_content_revision(
+            &self,
+            _request: Request<bbrpc::GetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::GetContentRevisionResponse>, Status> {
+            Err(Status::unimplemented(
+                "content revision is not used in this test",
+            ))
+        }
+
+        async fn set_content_revision(
+            &self,
+            _request: Request<bbrpc::SetContentRevisionRequest>,
+        ) -> std::result::Result<Response<bbrpc::SetContentRevisionResponse>, Status> {
+            Err(Status::unimplemented(
+                "set content revision is not used in this test",
+            ))
+        }
+
+        async fn download(
+            &self,
+            _request: Request<bbrpc::DownloadRequest>,
+        ) -> std::result::Result<Response<bbrpc::DownloadResponse>, Status> {
+            Err(Status::unimplemented("download is not used in this test"))
         }
     }
 
@@ -10107,6 +10239,76 @@ mod tests {
         let peer = peer_entry(node.as_ref(), peer_identity.address())?
             .context("peer was not tracked after connect")?;
         assert!(peer.last_live_at > 0);
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cli_ping_peer_returns_validated_health_check_without_tracking() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage("cli-ping-owner", filesystem)?);
+        node.initialize_lineage((1, 0), false)?;
+        let peer_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer_node = Arc::new(Node::with_local_storage("cli-ping-peer", peer_filesystem)?);
+        peer_node.initialize_lineage((1, 0), false)?;
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        node.set_peer_connector(connector.clone());
+
+        let server = spawn_registered_p2p_server(peer_node.clone(), connector.as_ref()).await?;
+
+        let cli = CliService::new(node.clone());
+        let response = cli
+            .ping_peer(tonic::Request::new(clirpc::PingPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: peer_node.address().to_string(),
+                }),
+            }))
+            .await?
+            .into_inner();
+
+        assert_eq!(response.client_onion, node.address());
+        assert_eq!(response.server_onion, peer_node.address());
+        assert!(peer_entry(node.as_ref(), peer_node.address())?.is_none());
+
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cli_ping_peer_rejects_unexpected_health_check_identity() -> anyhow::Result<()> {
+        let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let node = Arc::new(Node::with_local_storage(
+            "cli-ping-invalid-owner",
+            filesystem,
+        )?);
+        node.initialize_lineage((1, 0), false)?;
+        let bad_peer = Node::new("cli-ping-invalid-peer")?;
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        node.set_peer_connector(connector.clone());
+
+        let server = spawn_registered_mock_peer_server(
+            bad_peer.address(),
+            &bad_peer.ed25519_keypair().secret,
+            FixedHealthCheckPeerService::new(bbrpc::HealthCheckResponse {
+                client_onion: node.address().to_string(),
+                server_onion: "wrong.onion".to_string(),
+            }),
+            connector.as_ref(),
+        )
+        .await?;
+
+        let cli = CliService::new(node);
+        let error = cli
+            .ping_peer(tonic::Request::new(clirpc::PingPeerRequest {
+                peer: Some(clirpc::Peer {
+                    onion_service_id: bad_peer.address().to_string(),
+                }),
+            }))
+            .await
+            .expect_err("ping should reject mismatched health check responses");
+        assert_eq!(error.code(), Code::Internal);
+        assert!(error.message().contains("unexpected server onion"));
 
         server.abort();
         Ok(())

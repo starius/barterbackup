@@ -85,6 +85,7 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('connect', 'connect', [CompletionResultType]::ParameterValue, 'Add a peer onion identifier to the daemon''s known peer list')
+            [CompletionResult]::new('ping', 'ping', [CompletionResultType]::ParameterValue, 'Validate that one peer onion service answers HealthCheck live')
             [CompletionResult]::new('pin', 'pin', [CompletionResultType]::ParameterValue, 'Pin a tracked peer so local policy treats it as operator-protected')
             [CompletionResult]::new('unpin', 'unpin', [CompletionResultType]::ParameterValue, 'Remove an existing operator pin from a tracked peer')
             [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print the daemon''s current peer inventory')
@@ -93,6 +94,11 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             break
         }
         'bbcli;peer;connect' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'bbcli;peer;ping' {
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -122,6 +128,7 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
         }
         'bbcli;peer;help' {
             [CompletionResult]::new('connect', 'connect', [CompletionResultType]::ParameterValue, 'Add a peer onion identifier to the daemon''s known peer list')
+            [CompletionResult]::new('ping', 'ping', [CompletionResultType]::ParameterValue, 'Validate that one peer onion service answers HealthCheck live')
             [CompletionResult]::new('pin', 'pin', [CompletionResultType]::ParameterValue, 'Pin a tracked peer so local policy treats it as operator-protected')
             [CompletionResult]::new('unpin', 'unpin', [CompletionResultType]::ParameterValue, 'Remove an existing operator pin from a tracked peer')
             [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print the daemon''s current peer inventory')
@@ -130,6 +137,9 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             break
         }
         'bbcli;peer;help;connect' {
+            break
+        }
+        'bbcli;peer;help;ping' {
             break
         }
         'bbcli;peer;help;pin' {
@@ -267,6 +277,7 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
         }
         'bbcli;help;peer' {
             [CompletionResult]::new('connect', 'connect', [CompletionResultType]::ParameterValue, 'Add a peer onion identifier to the daemon''s known peer list')
+            [CompletionResult]::new('ping', 'ping', [CompletionResultType]::ParameterValue, 'Validate that one peer onion service answers HealthCheck live')
             [CompletionResult]::new('pin', 'pin', [CompletionResultType]::ParameterValue, 'Pin a tracked peer so local policy treats it as operator-protected')
             [CompletionResult]::new('unpin', 'unpin', [CompletionResultType]::ParameterValue, 'Remove an existing operator pin from a tracked peer')
             [CompletionResult]::new('list', 'list', [CompletionResultType]::ParameterValue, 'Print the daemon''s current peer inventory')
@@ -274,6 +285,9 @@ Register-ArgumentCompleter -Native -CommandName 'bbcli' -ScriptBlock {
             break
         }
         'bbcli;help;peer;connect' {
+            break
+        }
+        'bbcli;help;peer;ping' {
             break
         }
         'bbcli;help;peer;pin' {

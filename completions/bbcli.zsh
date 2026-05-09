@@ -125,6 +125,13 @@ _arguments "${_arguments_options[@]}" : \
 ':onion_service_id -- onion_service_id is the peer onion service identifier:_default' \
 && ret=0
 ;;
+(ping)
+_arguments "${_arguments_options[@]}" : \
+'-h[Print help]' \
+'--help[Print help]' \
+':onion_service_id -- onion_service_id is the peer onion service identifier:_default' \
+&& ret=0
+;;
 (pin)
 _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
@@ -170,6 +177,10 @@ _arguments "${_arguments_options[@]}" : \
         curcontext="${curcontext%:*:*}:bbcli-peer-help-command-$line[1]:"
         case $line[1] in
             (connect)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(ping)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -404,6 +415,10 @@ _arguments "${_arguments_options[@]}" : \
         curcontext="${curcontext%:*:*}:bbcli-help-peer-command-$line[1]:"
         case $line[1] in
             (connect)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(ping)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -703,6 +718,7 @@ _bbcli__subcmd__help__subcmd__init__subcmd__complete_commands() {
 _bbcli__subcmd__help__subcmd__peer_commands() {
     local commands; commands=(
 'connect:Add a peer onion identifier to the daemon'\''s known peer list' \
+'ping:Validate that one peer onion service answers HealthCheck live' \
 'pin:Pin a tracked peer so local policy treats it as operator-protected' \
 'unpin:Remove an existing operator pin from a tracked peer' \
 'list:Print the daemon'\''s current peer inventory' \
@@ -729,6 +745,11 @@ _bbcli__subcmd__help__subcmd__peer__subcmd__list_commands() {
 _bbcli__subcmd__help__subcmd__peer__subcmd__pin_commands() {
     local commands; commands=()
     _describe -t commands 'bbcli help peer pin commands' commands "$@"
+}
+(( $+functions[_bbcli__subcmd__help__subcmd__peer__subcmd__ping_commands] )) ||
+_bbcli__subcmd__help__subcmd__peer__subcmd__ping_commands() {
+    local commands; commands=()
+    _describe -t commands 'bbcli help peer ping commands' commands "$@"
 }
 (( $+functions[_bbcli__subcmd__help__subcmd__peer__subcmd__unpin_commands] )) ||
 _bbcli__subcmd__help__subcmd__peer__subcmd__unpin_commands() {
@@ -785,6 +806,7 @@ _bbcli__subcmd__init__subcmd__help__subcmd__help_commands() {
 _bbcli__subcmd__peer_commands() {
     local commands; commands=(
 'connect:Add a peer onion identifier to the daemon'\''s known peer list' \
+'ping:Validate that one peer onion service answers HealthCheck live' \
 'pin:Pin a tracked peer so local policy treats it as operator-protected' \
 'unpin:Remove an existing operator pin from a tracked peer' \
 'list:Print the daemon'\''s current peer inventory' \
@@ -807,6 +829,7 @@ _bbcli__subcmd__peer__subcmd__connect_commands() {
 _bbcli__subcmd__peer__subcmd__help_commands() {
     local commands; commands=(
 'connect:Add a peer onion identifier to the daemon'\''s known peer list' \
+'ping:Validate that one peer onion service answers HealthCheck live' \
 'pin:Pin a tracked peer so local policy treats it as operator-protected' \
 'unpin:Remove an existing operator pin from a tracked peer' \
 'list:Print the daemon'\''s current peer inventory' \
@@ -840,6 +863,11 @@ _bbcli__subcmd__peer__subcmd__help__subcmd__pin_commands() {
     local commands; commands=()
     _describe -t commands 'bbcli peer help pin commands' commands "$@"
 }
+(( $+functions[_bbcli__subcmd__peer__subcmd__help__subcmd__ping_commands] )) ||
+_bbcli__subcmd__peer__subcmd__help__subcmd__ping_commands() {
+    local commands; commands=()
+    _describe -t commands 'bbcli peer help ping commands' commands "$@"
+}
 (( $+functions[_bbcli__subcmd__peer__subcmd__help__subcmd__unpin_commands] )) ||
 _bbcli__subcmd__peer__subcmd__help__subcmd__unpin_commands() {
     local commands; commands=()
@@ -854,6 +882,11 @@ _bbcli__subcmd__peer__subcmd__list_commands() {
 _bbcli__subcmd__peer__subcmd__pin_commands() {
     local commands; commands=()
     _describe -t commands 'bbcli peer pin commands' commands "$@"
+}
+(( $+functions[_bbcli__subcmd__peer__subcmd__ping_commands] )) ||
+_bbcli__subcmd__peer__subcmd__ping_commands() {
+    local commands; commands=()
+    _describe -t commands 'bbcli peer ping commands' commands "$@"
 }
 (( $+functions[_bbcli__subcmd__peer__subcmd__unpin_commands] )) ||
 _bbcli__subcmd__peer__subcmd__unpin_commands() {

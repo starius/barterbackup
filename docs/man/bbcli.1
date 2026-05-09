@@ -134,6 +134,9 @@ Usage: bbcli peer <COMMAND>
 .B "bbcli peer connect"
 Add a peer onion identifier to the daemon's known peer list
 .TP
+.B "bbcli peer ping"
+Validate that one peer onion service answers HealthCheck live
+.TP
 .B "bbcli peer pin"
 Pin a tracked peer so local policy treats it as operator\-protected
 .TP
@@ -151,6 +154,18 @@ Add a peer onion identifier to the daemon's known peer list
 .nf
 .B Usage:
 Usage: bbcli peer connect <ONION_SERVICE_ID>
+.fi
+.PP
+.B Options
+.TP
+.B "onion_service_id <ONION_SERVICE_ID>"
+onion_service_id is the peer onion service identifier
+.SS "bbcli peer ping"
+Validate that one peer onion service answers HealthCheck live
+.PP
+.nf
+.B Usage:
+Usage: bbcli peer ping <ONION_SERVICE_ID>
 .fi
 .PP
 .B Options

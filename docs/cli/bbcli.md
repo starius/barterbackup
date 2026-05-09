@@ -105,6 +105,7 @@ Usage: bbcli peer <COMMAND>
 ### Subcommands
 
 - `connect`: Add a peer onion identifier to the daemon's known peer list
+- `ping`: Validate that one peer onion service answers HealthCheck live
 - `pin`: Pin a tracked peer so local policy treats it as operator-protected
 - `unpin`: Remove an existing operator pin from a tracked peer
 - `list`: Print the daemon's current peer inventory
@@ -118,6 +119,20 @@ Add a peer onion identifier to the daemon's known peer list
 
 ```text
 Usage: bbcli peer connect <ONION_SERVICE_ID>
+```
+
+#### Options
+
+- `onion_service_id <ONION_SERVICE_ID>`: onion_service_id is the peer onion service identifier
+
+### `bbcli peer ping`
+
+Validate that one peer onion service answers HealthCheck live
+
+#### Usage
+
+```text
+Usage: bbcli peer ping <ONION_SERVICE_ID>
 ```
 
 #### Options
