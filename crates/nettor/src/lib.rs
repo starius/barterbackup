@@ -19,6 +19,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_rustls::rustls::pki_types::ServerName;
 use toml::Value as TomlValue;
@@ -26,7 +27,7 @@ use tonic::transport::server::Connected;
 use tor_config::sources::MustRead;
 use tor_config::{resolve as resolve_config, ConfigurationSource, ConfigurationSources};
 use tor_config_path::arti_client_base_resolver;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use transport::{PeerClient, PeerConnector};
 
 use tor_config::ExplicitOrAuto;
@@ -322,26 +323,48 @@ impl PeerConnector for TorTransport {
     ) -> Result<PeerClient> {
         let sessions = self.session_registry(client_private_key)?;
         if sessions.connected(peer_onion) {
+            debug!(peer = %peer_onion, "reusing connected outer peer session");
             return Ok(sessions.client_for_peer(peer_onion));
         }
 
+        let connect_started = Instant::now();
         let client_tls = tlsutil::build_peer_client_tls(peer_onion, client_private_key)?;
         let connector = tokio_rustls::TlsConnector::from(Arc::new(client_tls));
         let server_name = ServerName::try_from(peer_onion.to_string())
             .map_err(|err| anyhow!("invalid peer onion {peer_onion:?}: {err}"))?;
         let tor_client = self.client.clone();
+        let arti_dial_started = Instant::now();
         let stream: TorDataStream = tor_client
             .connect((peer_onion, 80))
             .await
             .context("dial peer onion through arti")?;
+        debug!(
+            peer = %peer_onion,
+            elapsed_ms = arti_dial_started.elapsed().as_millis(),
+            "peer onion dial through arti completed"
+        );
+        let tls_started = Instant::now();
         let tls_stream = connector
             .connect(server_name, OnionStream::new(stream))
             .await
             .context("complete peer TLS handshake")?;
+        debug!(
+            peer = %peer_onion,
+            elapsed_ms = tls_started.elapsed().as_millis(),
+            "peer TLS handshake completed"
+        );
         let peer_public_key = peer_public_key_from_common_state(tls_stream.get_ref().1)?;
-        sessions
+        let register_started = Instant::now();
+        let client = sessions
             .register_outbound_session(peer_onion, peer_public_key, Box::new(tls_stream))
-            .await
+            .await?;
+        debug!(
+            peer = %peer_onion,
+            register_elapsed_ms = register_started.elapsed().as_millis(),
+            total_elapsed_ms = connect_started.elapsed().as_millis(),
+            "outbound outer peer session established"
+        );
+        Ok(client)
     }
 
     fn connected(&self, peer_onion: &str, _client_private_key: &SecretKey) -> bool {

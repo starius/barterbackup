@@ -20,6 +20,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::time::Instant;
 use storage::{CurrentContent, Filesystem, MetadataRollupOutcome, StorageError, Store};
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
@@ -3048,7 +3049,14 @@ impl Node {
 
     /// Run a peer health check against the node's own public onion address.
     pub async fn self_peer_health_check(&self) -> Result<bbrpc::HealthCheckResponse, Status> {
+        let connect_started = Instant::now();
         let mut client = self.connect_peer_client(self.address()).await?;
+        debug!(
+            onion = %self.address(),
+            elapsed_ms = connect_started.elapsed().as_millis(),
+            "self-check connected to the local onion service"
+        );
+        let rpc_started = Instant::now();
         let response = self
             .peer_rpc(
                 self.address(),
@@ -3056,7 +3064,13 @@ impl Node {
                 client.health_check(bbrpc::HealthCheckRequest {}),
             )
             .await?;
+        debug!(
+            onion = %self.address(),
+            elapsed_ms = rpc_started.elapsed().as_millis(),
+            "self-check health-check RPC completed"
+        );
         validate_peer_health_check_response(&response, self.address(), self.address())?;
+        debug!(onion = %self.address(), "self-check response identities validated");
         Ok(response)
     }
 

@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
+use std::time::Instant;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -605,10 +606,19 @@ impl PeerSessionSlot {
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::NotConnected, "peer session is not live")
             })?;
-        session
+        let session_nonce = session.session_nonce;
+        let started = Instant::now();
+        let stream = session
             .open_outbound_stream()
             .await
-            .map(|stream| stream.compat())
+            .map(|stream| stream.compat())?;
+        debug!(
+            peer = %self.peer_onion,
+            session_nonce,
+            elapsed_ms = started.elapsed().as_millis(),
+            "opened outbound yamux stream for peer gRPC lane"
+        );
+        Ok(stream)
     }
 }
 
