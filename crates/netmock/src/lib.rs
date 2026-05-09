@@ -250,8 +250,11 @@ impl PeerConnector for MockPeerConnector {
         peer_onion: &str,
         client_private_key: &SecretKey,
     ) -> Result<PeerClient> {
+        let local_onion =
+            onion_hostname_from_public_key(&ed25519_dalek::PublicKey::from(client_private_key));
         let sessions = self.local_sessions(client_private_key);
-        if sessions.connected(peer_onion) {
+        let dialing_self = peer_onion == local_onion;
+        if !dialing_self && sessions.connected(peer_onion) {
             return Ok(sessions.client_for_peer(peer_onion));
         }
 
@@ -273,6 +276,13 @@ impl PeerConnector for MockPeerConnector {
             .await
             .map_err(io::Error::other)?;
         let peer_public_key = peer_public_key_from_common_state(tls_stream.get_ref().1)?;
+        if dialing_self {
+            return Ok(transport::build_ephemeral_peer_client(
+                peer_onion.to_string(),
+                peer_public_key,
+                Box::new(tls_stream),
+            ));
+        }
         sessions
             .register_outbound_session(peer_onion, peer_public_key, Box::new(tls_stream))
             .await

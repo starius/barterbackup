@@ -18,8 +18,8 @@ use tonic::Status;
 pub type PeerClient = BarterBackupServerClient<Channel>;
 
 pub use session::{
-    BoxedAsyncIo, PeerSessionConnectInfo, PeerSessionIncoming, PeerSessionRegistry,
-    PeerSessionServerIo, PEER_TRANSPORT_ALPN,
+    build_ephemeral_peer_client, BoxedAsyncIo, PeerSessionConnectInfo, PeerSessionIncoming,
+    PeerSessionRegistry, PeerSessionServerIo, PEER_TRANSPORT_ALPN,
 };
 
 /// MAX_PEER_CONTENT_BYTES is the largest encrypted blob the current peer RPC

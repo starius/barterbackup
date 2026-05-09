@@ -33,6 +33,8 @@ use yamux::{Config as YamuxConfig, Connection as YamuxConnection, Mode as YamuxM
 /// PEER_TRANSPORT_ALPN is the peer-to-peer outer transport ALPN.
 pub const PEER_TRANSPORT_ALPN: &[u8] = b"bb-peer-yamux/1";
 
+static NEXT_EPHEMERAL_SESSION_NONCE: AtomicU64 = AtomicU64::new(u64::MAX / 2);
+
 /// AsyncIo is the boxed tokio I/O bound accepted by the yamux session actor.
 pub trait AsyncIo: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
 
@@ -326,6 +328,49 @@ impl PeerSessionRegistry {
         self.inner.enforce_capacity().await;
         Ok(())
     }
+}
+
+/// Build one peer client backed by a single uncached outer session.
+///
+/// This is used for self-dials so the outbound side does not collide with the
+/// inbound listener session in the shared per-peer registry.
+pub fn build_ephemeral_peer_client(
+    peer_onion: String,
+    peer_public_key: PublicKey,
+    io: BoxedAsyncIo,
+) -> PeerClient {
+    let session = spawn_ephemeral_session(peer_onion, peer_public_key, io);
+    configure_peer_client(PeerClient::new(build_ephemeral_channel(session)))
+}
+
+fn spawn_ephemeral_session(
+    peer_onion: String,
+    peer_public_key: PublicKey,
+    io: BoxedAsyncIo,
+) -> Arc<PeerOuterSession> {
+    let session_nonce = NEXT_EPHEMERAL_SESSION_NONCE.fetch_add(1, Ordering::Relaxed);
+    let (command_tx, command_rx) = mpsc::channel(16);
+    let session = Arc::new(PeerOuterSession {
+        peer_onion: peer_onion.clone(),
+        session_nonce,
+        initiated_by_us: true,
+        live: AtomicBool::new(true),
+        command_tx,
+    });
+    let session_handle = session.clone();
+    tokio::spawn(async move {
+        run_outer_session(
+            Weak::new(),
+            Weak::new(),
+            session_handle,
+            peer_onion,
+            peer_public_key,
+            io,
+            command_rx,
+        )
+        .await;
+    });
+    session
 }
 
 struct PeerSessionRegistryInner {
@@ -676,6 +721,19 @@ fn build_session_backed_channel(slot: Weak<PeerSessionSlot>) -> Channel {
                     )
                 })?;
                 let stream = slot.open_outbound_stream().await?;
+                Ok::<_, io::Error>(TokioIo::new(stream))
+            }
+        }))
+}
+
+fn build_ephemeral_channel(session: Arc<PeerOuterSession>) -> Channel {
+    Endpoint::from_static("http://peer-session.invalid")
+        .http2_keep_alive_interval(crate::PEER_GRPC_KEEPALIVE_INTERVAL)
+        .keep_alive_timeout(crate::PEER_GRPC_KEEPALIVE_TIMEOUT)
+        .connect_with_connector_lazy(service_fn(move |_| {
+            let session = session.clone();
+            async move {
+                let stream = session.open_outbound_stream().await?.compat();
                 Ok::<_, io::Error>(TokioIo::new(stream))
             }
         }))
