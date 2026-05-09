@@ -14,7 +14,9 @@ use protos::storedpb;
 use rand::rngs::OsRng;
 use rand::{thread_rng, Rng, RngCore};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs::{self, File};
+use std::fs;
+#[cfg(unix)]
+use std::fs::File;
 use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -200,8 +202,11 @@ impl Filesystem for OsFilesystem {
         temp.persist(&target)
             .map_err(|err| StorageError::Io(err.error))?;
 
-        // Sync the directory entry so the rename survives power loss.
-        File::open(self.root.as_ref())?.sync_all()?;
+        // On Unix we fsync the directory entry so the rename survives power
+        // loss. Windows does not support opening directories this way, so the
+        // best cross-platform fallback is to keep the atomic rename and skip
+        // the extra directory sync there.
+        sync_directory_entry(self.root.as_ref())?;
         Ok(())
     }
 
@@ -226,6 +231,19 @@ impl Filesystem for OsFilesystem {
         names.sort();
         Ok(names)
     }
+}
+
+/// Sync the parent directory entry for one atomic replace when supported.
+fn sync_directory_entry(path: &Path) -> Result<(), StorageError> {
+    #[cfg(unix)]
+    {
+        File::open(path)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 /// CurrentContent summarizes the active encrypted content blob.
