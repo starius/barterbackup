@@ -109,6 +109,7 @@ pub async fn bind_peer_listener(server_priv: &SecretKey) -> Result<MockPeerListe
     let shutdown = CancellationToken::new();
     let shutdown_signal = shutdown.clone();
     let accept_sessions = sessions.clone();
+    let accept_local_onion = local_onion.clone();
 
     let accept_task = tokio::spawn(async move {
         loop {
@@ -124,6 +125,7 @@ pub async fn bind_peer_listener(server_priv: &SecretKey) -> Result<MockPeerListe
                     };
                     let acceptor = acceptor.clone();
                     let sessions = accept_sessions.clone();
+                    let local_onion = accept_local_onion.clone();
                     tokio::spawn(async move {
                         let result = async {
                             let tls_stream = acceptor.accept(socket).await.map_err(io::Error::other)?;
@@ -131,14 +133,23 @@ pub async fn bind_peer_listener(server_priv: &SecretKey) -> Result<MockPeerListe
                                 peer_public_key_from_common_state(tls_stream.get_ref().1)
                                     .map_err(io::Error::other)?;
                             let peer_onion = onion_hostname_from_public_key(&peer_public_key);
-                            sessions
-                                .register_inbound_session(
+                            if peer_onion == local_onion {
+                                sessions.register_ephemeral_inbound_session(
                                     &peer_onion,
                                     peer_public_key,
                                     Box::new(tls_stream),
-                                )
-                                .await
-                                .map_err(io::Error::other)
+                                );
+                                Ok(())
+                            } else {
+                                sessions
+                                    .register_inbound_session(
+                                        &peer_onion,
+                                        peer_public_key,
+                                        Box::new(tls_stream),
+                                    )
+                                    .await
+                                    .map_err(io::Error::other)
+                            }
                         }
                         .await;
                         if let Err(error) = result {

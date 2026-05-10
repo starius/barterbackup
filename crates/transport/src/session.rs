@@ -328,6 +328,42 @@ impl PeerSessionRegistry {
         self.inner.enforce_capacity().await;
         Ok(())
     }
+
+    /// Register one inbound outer session without storing it in the shared
+    /// per-peer session slot.
+    ///
+    /// This is used for self-dials so the accepted side can feed the tonic
+    /// server without colliding with durable per-peer session state.
+    pub fn register_ephemeral_inbound_session(
+        &self,
+        peer_onion: &str,
+        peer_public_key: PublicKey,
+        io: BoxedAsyncIo,
+    ) {
+        let registry = Arc::downgrade(&self.inner);
+        let peer_onion = peer_onion.to_string();
+        tokio::spawn(async move {
+            let session_nonce = NEXT_EPHEMERAL_SESSION_NONCE.fetch_add(1, Ordering::Relaxed);
+            let (command_tx, command_rx) = mpsc::channel(16);
+            let session = Arc::new(PeerOuterSession {
+                peer_onion: peer_onion.clone(),
+                session_nonce,
+                initiated_by_us: false,
+                live: AtomicBool::new(true),
+                command_tx,
+            });
+            run_outer_session(
+                registry,
+                Weak::new(),
+                session,
+                peer_onion,
+                peer_public_key,
+                io,
+                command_rx,
+            )
+            .await;
+        });
+    }
 }
 
 /// Build one peer client backed by a single uncached outer session.

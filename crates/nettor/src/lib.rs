@@ -97,11 +97,13 @@ impl TorTransport {
             tokio_rustls::TlsAcceptor::from(Arc::new(tlsutil::build_peer_server_tls(server_priv)?));
         let mut stream_requests = handle_rend_requests(rend_requests);
         let accept_sessions = sessions.clone();
+        let accept_local_onion = onion_address.clone();
 
         let accept_task = tokio::spawn(async move {
             while let Some(stream_request) = stream_requests.next().await {
                 let tls_acceptor = tls_acceptor.clone();
                 let sessions = accept_sessions.clone();
+                let local_onion = accept_local_onion.clone();
 
                 tokio::spawn(async move {
                     let result = async {
@@ -117,14 +119,23 @@ impl TorTransport {
                             peer_public_key_from_common_state(tls_stream.get_ref().1)
                                 .map_err(io::Error::other)?;
                         let peer_onion = keys::onion_hostname_from_public_key(&peer_public_key);
-                        sessions
-                            .register_inbound_session(
+                        if peer_onion == local_onion {
+                            sessions.register_ephemeral_inbound_session(
                                 &peer_onion,
                                 peer_public_key,
                                 Box::new(tls_stream),
-                            )
-                            .await
-                            .map_err(io::Error::other)
+                            );
+                            Ok(())
+                        } else {
+                            sessions
+                                .register_inbound_session(
+                                    &peer_onion,
+                                    peer_public_key,
+                                    Box::new(tls_stream),
+                                )
+                                .await
+                                .map_err(io::Error::other)
+                        }
                     }
                     .await;
                     if let Err(error) = result {
