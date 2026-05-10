@@ -2171,7 +2171,18 @@ impl Node {
                 timestamp_nanos = recoverable_revision.timestamp.1,
                 "running automatic recovery after a new live peer contact"
             );
-            let recovery_update = self.run_recovery_pass().await?;
+            let recovery_update = if let Some(update) = self
+                .recover_stored_requester_revision_from_live_client(
+                    peer_onion,
+                    client,
+                    &recoverable_revision,
+                )
+                .await?
+            {
+                update
+            } else {
+                self.run_recovery_pass().await?
+            };
             info!(
                 peer = %peer_onion,
                 applied_versions = recovery_update.applied_versions,
@@ -3145,6 +3156,21 @@ impl Node {
         content_id: &[u8],
         expected_length: i64,
     ) -> Result<Vec<u8>, Status> {
+        let mut client = self
+            .probe_peer_client_with_timeout(peer_onion, transport::PEER_CONNECT_TIMEOUT)
+            .await?;
+        self.download_peer_blob_with_client(peer_onion, &mut client, content_id, expected_length)
+            .await
+    }
+
+    /// Download one whole peer blob through one existing live client.
+    async fn download_peer_blob_with_client(
+        &self,
+        peer_onion: &str,
+        client: &mut transport::PeerClient,
+        content_id: &[u8],
+        expected_length: i64,
+    ) -> Result<Vec<u8>, Status> {
         validate_peer_content_id(content_id)?;
         if expected_length <= 0 {
             return Err(Status::invalid_argument(
@@ -3155,9 +3181,6 @@ impl Node {
             return Err(Status::invalid_argument("expected content is too large"));
         }
 
-        let mut client = self
-            .probe_peer_client_with_timeout(peer_onion, transport::PEER_CONNECT_TIMEOUT)
-            .await?;
         let response = self
             .peer_rpc(
                 peer_onion,
@@ -4812,7 +4835,18 @@ impl Node {
                 timestamp_nanos = recoverable_revision.timestamp.1,
                 "running automatic recovery before publishing to a peer"
             );
-            let recovery_update = self.run_recovery_pass().await?;
+            let recovery_update = if let Some(update) = self
+                .recover_stored_requester_revision_from_live_client(
+                    peer_onion,
+                    &mut client,
+                    &recoverable_revision,
+                )
+                .await?
+            {
+                update
+            } else {
+                self.run_recovery_pass().await?
+            };
             info!(
                 peer = %peer_onion,
                 applied_versions = recovery_update.applied_versions,
@@ -4952,7 +4986,18 @@ impl Node {
                             timestamp_nanos = recoverable_revision.timestamp.1,
                             "running automatic recovery after a publication compare-and-swap mismatch"
                         );
-                        let recovery_update = self.run_recovery_pass().await?;
+                        let recovery_update = if let Some(update) = self
+                            .recover_stored_requester_revision_from_live_client(
+                                peer_onion,
+                                &mut client,
+                                &recoverable_revision,
+                            )
+                            .await?
+                        {
+                            update
+                        } else {
+                            self.run_recovery_pass().await?
+                        };
                         info!(
                             peer = %peer_onion,
                             applied_versions = recovery_update.applied_versions,
@@ -5391,6 +5436,172 @@ impl Node {
         Ok((merge_outcome, downloaded_bytes))
     }
 
+    /// Recover one stored requester revision directly from the already live
+    /// peer that just proved it can serve the blob.
+    async fn recover_stored_requester_revision_from_live_client(
+        &self,
+        peer_onion: &str,
+        client: &mut transport::PeerClient,
+        recoverable_revision: &RecoverableRequesterRevision,
+    ) -> Result<Option<RecoveryPassSummary>, Status> {
+        if recoverable_revision.source != RecoverableRequesterRevisionSource::LatestStored {
+            return Ok(None);
+        }
+
+        let candidate = RecoveryCandidate {
+            key: self.revision_key(&recoverable_revision.content.content_id)?,
+            content_id: recoverable_revision.content.content_id.clone(),
+            content_length: recoverable_revision.content.content_length,
+            peers: vec![peer_onion.to_string()],
+        };
+        let current_matches_candidate = self.with_store(|store| {
+            Ok(store
+                .current_content()
+                .is_some_and(|current| current.content_id == candidate.content_id))
+        })?;
+        let current_blob_missing = if current_matches_candidate {
+            self.current_content_needs_restore_from_peer(&candidate.content_id)?
+        } else {
+            false
+        };
+        let restores_missing_current_blob = current_matches_candidate && current_blob_missing;
+        let (blob, downloaded_bytes, source_peer) =
+            if current_matches_candidate && !current_blob_missing {
+                (
+                    self.with_store(|store| store.current_blob())?,
+                    0,
+                    String::new(),
+                )
+            } else {
+                let blob = self
+                    .download_peer_blob_with_client(
+                        peer_onion,
+                        client,
+                        &candidate.content_id,
+                        candidate.content_length,
+                    )
+                    .await?;
+                let downloaded_bytes = i64::try_from(blob.len()).unwrap_or(i64::MAX);
+                (blob, downloaded_bytes, peer_onion.to_string())
+            };
+
+        let merge_outcome = if restores_missing_current_blob {
+            self.with_store(|store| store.restore_current_content_blob(&blob))?;
+            info!(
+                peer = %source_peer,
+                content_id = %content_id_hex(&candidate.content_id),
+                content_length = candidate.content_length,
+                downloaded_bytes,
+                "restored the missing active local content blob from a peer"
+            );
+            storage::RecoveryMergeOutcome::default()
+        } else {
+            let recovered_files = self.with_store(|store| store.decode_revision_files(&blob))?;
+            let recovered_timestamp = (
+                i64::try_from(candidate.key.1).unwrap_or(i64::MAX),
+                i64::from(candidate.key.2),
+            );
+            let merge_outcome = self.with_store(|store| {
+                store.merge_recovered_revision_files(
+                    recovered_files,
+                    recovered_timestamp,
+                    &candidate.content_id,
+                )
+            })?;
+            let recovered_created_at =
+                proto_timestamp_from_parts(recovered_timestamp.0, recovered_timestamp.1)?;
+            self.with_store(|store| {
+                store.record_recovered_revision(storedpb::RecoveredRevision {
+                    content_id: candidate.content_id.clone(),
+                    created_at: Some(recovered_created_at),
+                })
+            })?;
+            info!(
+                peer = %source_peer,
+                content_id = %content_id_hex(&candidate.content_id),
+                content_length = candidate.content_length,
+                downloaded_bytes,
+                added_files = merge_outcome.added_files,
+                renamed_files = merge_outcome.renamed_files,
+                unchanged_files = merge_outcome.unchanged_files,
+                "merged one recovered older-lineage revision into the local file set"
+            );
+            merge_outcome
+        };
+
+        let summary = RecoveryPassAccumulator {
+            total_versions_found: 1,
+            peers_with_any_versions: 1,
+            older_lineage_versions_found: 1,
+            older_lineage_recoverable_versions_found: 1,
+            applied_versions: 1,
+            downloaded_bytes,
+            added_files: merge_outcome.added_files,
+            renamed_files: merge_outcome.renamed_files,
+            unchanged_files: merge_outcome.unchanged_files,
+            newest_found: Some(candidate.clone()),
+            latest_applied: Some(candidate),
+            ..Default::default()
+        };
+        Ok(Some(self.finalize_recovery_summary(summary)?))
+    }
+
+    /// Finalize one accumulated recovery summary and report any remaining
+    /// publication block.
+    fn finalize_recovery_summary(
+        &self,
+        mut summary: RecoveryPassAccumulator,
+    ) -> Result<RecoveryPassSummary, Status> {
+        if let Some(reason) = self.publish_blocked_reason()? {
+            warn!(reason = %reason, "recovery left local publication blocked");
+            summary.publication_blocked_reason = Some(reason);
+        }
+
+        Ok(RecoveryPassSummary {
+            total_versions_found: summary.total_versions_found,
+            peers_with_any_versions: summary.peers_with_any_versions,
+            older_lineage_versions_found: summary.older_lineage_versions_found,
+            older_lineage_recoverable_versions_found: summary
+                .older_lineage_recoverable_versions_found,
+            applied_versions: summary.applied_versions,
+            downloaded_bytes: summary.downloaded_bytes,
+            added_files: summary.added_files,
+            renamed_files: summary.renamed_files,
+            unchanged_files: summary.unchanged_files,
+            newest_found_content_id: summary
+                .newest_found
+                .as_ref()
+                .map(|candidate| candidate.content_id.clone())
+                .unwrap_or_default(),
+            newest_found_ts: summary
+                .newest_found
+                .as_ref()
+                .map(|candidate| i64::try_from(candidate.key.1).unwrap_or(i64::MAX))
+                .unwrap_or(0),
+            newest_found_ts_ns: summary
+                .newest_found
+                .as_ref()
+                .map(|candidate| i64::from(candidate.key.2))
+                .unwrap_or(0),
+            latest_applied_content_id: summary
+                .latest_applied
+                .as_ref()
+                .map(|candidate| candidate.content_id.clone())
+                .unwrap_or_default(),
+            latest_applied_ts: summary
+                .latest_applied
+                .as_ref()
+                .map(|candidate| i64::try_from(candidate.key.1).unwrap_or(i64::MAX))
+                .unwrap_or(0),
+            latest_applied_ts_ns: summary
+                .latest_applied
+                .as_ref()
+                .map(|candidate| i64::from(candidate.key.2))
+                .unwrap_or(0),
+            publication_blocked_reason: summary.publication_blocked_reason.unwrap_or_default(),
+        })
+    }
+
     /// Scan known peers, restore the missing active blob when necessary, and
     /// merge every downloadable older-lineage revision in timestamp order.
     pub async fn run_recovery_pass(&self) -> Result<RecoveryPassSummary, Status> {
@@ -5585,54 +5796,7 @@ impl Node {
             }
         }
 
-        if let Some(reason) = self.publish_blocked_reason()? {
-            warn!(reason = %reason, "recovery left local publication blocked");
-            summary.publication_blocked_reason = Some(reason);
-        }
-
-        Ok(RecoveryPassSummary {
-            total_versions_found: summary.total_versions_found,
-            peers_with_any_versions: summary.peers_with_any_versions,
-            older_lineage_versions_found: summary.older_lineage_versions_found,
-            older_lineage_recoverable_versions_found: summary
-                .older_lineage_recoverable_versions_found,
-            applied_versions: summary.applied_versions,
-            downloaded_bytes: summary.downloaded_bytes,
-            added_files: summary.added_files,
-            renamed_files: summary.renamed_files,
-            unchanged_files: summary.unchanged_files,
-            newest_found_content_id: summary
-                .newest_found
-                .as_ref()
-                .map(|candidate| candidate.content_id.clone())
-                .unwrap_or_default(),
-            newest_found_ts: summary
-                .newest_found
-                .as_ref()
-                .map(|candidate| i64::try_from(candidate.key.1).unwrap_or(i64::MAX))
-                .unwrap_or(0),
-            newest_found_ts_ns: summary
-                .newest_found
-                .as_ref()
-                .map(|candidate| i64::from(candidate.key.2))
-                .unwrap_or(0),
-            latest_applied_content_id: summary
-                .latest_applied
-                .as_ref()
-                .map(|candidate| candidate.content_id.clone())
-                .unwrap_or_default(),
-            latest_applied_ts: summary
-                .latest_applied
-                .as_ref()
-                .map(|candidate| i64::try_from(candidate.key.1).unwrap_or(i64::MAX))
-                .unwrap_or(0),
-            latest_applied_ts_ns: summary
-                .latest_applied
-                .as_ref()
-                .map(|candidate| i64::from(candidate.key.2))
-                .unwrap_or(0),
-            publication_blocked_reason: summary.publication_blocked_reason.unwrap_or_default(),
-        })
+        self.finalize_recovery_summary(summary)
     }
 }
 
@@ -14176,6 +14340,96 @@ mod tests {
 
         owner_server.abort();
         peer_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn outbound_live_peer_contact_skips_stale_peer_scans_when_the_live_peer_can_serve_the_blob(
+    ) -> anyhow::Result<()> {
+        let owner_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner_node = Arc::new(Node::with_local_storage_and_clock(
+            "live-contact-direct-owner",
+            owner_filesystem,
+            owner_clock,
+        )?);
+        let recovered_clock = Arc::new(ManualClock::new(Timestamp::new(250, 0).unwrap()));
+        let recovered_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let recovered_node = Arc::new(Node::with_local_storage_and_clock(
+            "live-contact-direct-owner",
+            recovered_filesystem,
+            recovered_clock,
+        )?);
+        recovered_node.initialize_lineage((250, 0), true)?;
+        let stale_peer = Node::new("live-contact-direct-stale-peer")?;
+        let live_peer = Node::new("live-contact-direct-live-peer")?;
+        recovered_node.add_known_peer(stale_peer.address())?;
+
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        owner_node.set_peer_connector(connector.clone());
+        recovered_node.set_peer_connector(connector.clone());
+
+        CliService::new(owner_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+        let (content_info, blob) = current_content_snapshot(owner_node.as_ref())?;
+
+        let stale_state = Arc::new(CountingRevisionPeerServiceState::new(
+            bbrpc::GetContentRevisionResponse::default(),
+            0,
+        ));
+        let stale_server = spawn_registered_mock_peer_server(
+            stale_peer.address(),
+            &stale_peer.ed25519_keypair().secret,
+            CountingRevisionPeerService::new(stale_state.clone()),
+            connector.as_ref(),
+        )
+        .await?;
+        let live_server = spawn_registered_mock_peer_server(
+            live_peer.address(),
+            &live_peer.ed25519_keypair().secret,
+            StaticPeerService::new(
+                bbrpc::GetContentRevisionResponse {
+                    requester_latest_stored_content: Some(content_info.clone()),
+                    requester_remaining_seconds: 0,
+                    requester_latest_known_content: Some(content_info.clone()),
+                    requester_pinned: false,
+                },
+                DownloadBehavior::Response(bbrpc::DownloadResponse {
+                    total_length: i64::try_from(blob.len()).unwrap_or(i64::MAX),
+                    sha256: Sha256::digest(&blob).to_vec(),
+                    section: Some(bbrpc::download_response::Section::RawBytes(
+                        bbrpc::RawBytes {
+                            value: blob.clone(),
+                        },
+                    )),
+                }),
+            ),
+            connector.as_ref(),
+        )
+        .await?;
+
+        let _peer_client = recovered_node
+            .connect_peer_client(live_peer.address())
+            .await?;
+        assert_eq!(
+            recovered_node.with_store(|store| store.get_file("alpha.txt"))?,
+            b"alpha-body".to_vec()
+        );
+        assert_eq!(
+            stale_state.get_content_revision_call_count(),
+            0,
+            "direct live-peer recovery should not re-scan unrelated stale peers",
+        );
+
+        stale_server.abort();
+        live_server.abort();
         Ok(())
     }
 
