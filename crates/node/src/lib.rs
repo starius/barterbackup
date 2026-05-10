@@ -2160,7 +2160,8 @@ impl Node {
             .await?;
         self.record_remote_pin_claim(&peer_public_key, revision.requester_pinned)?;
         self.record_requester_revision_observation(&peer_public_key, &revision)?;
-        self.maybe_exchange_peers_with_client(peer_onion, client)
+        let discovered_new_peers = self
+            .maybe_exchange_peers_with_client(peer_onion, client)
             .await?;
         if let Some(recoverable_revision) = self.recoverable_requester_revision(&revision)? {
             info!(
@@ -2178,6 +2179,20 @@ impl Node {
                 older_lineage_recoverable_versions_found = recovery_update
                     .older_lineage_recoverable_versions_found,
                 "finished automatic recovery after a new live peer contact"
+            );
+        } else if discovered_new_peers {
+            info!(
+                peer = %peer_onion,
+                "running automatic recovery after peer exchange discovered new peers"
+            );
+            let recovery_update = self.run_recovery_pass().await?;
+            info!(
+                peer = %peer_onion,
+                applied_versions = recovery_update.applied_versions,
+                older_lineage_versions_found = recovery_update.older_lineage_versions_found,
+                older_lineage_recoverable_versions_found = recovery_update
+                    .older_lineage_recoverable_versions_found,
+                "finished automatic recovery after peer exchange discovered new peers"
             );
         }
 
@@ -2520,7 +2535,8 @@ impl Node {
     fn merge_peer_exchange_response(
         &self,
         response: bbrpc::PeerExchangeResponse,
-    ) -> Result<(), Status> {
+    ) -> Result<bool, Status> {
+        let mut discovered_new_peer = false;
         for peer in response.peers {
             let public_key = match ed25519_dalek::PublicKey::from_bytes(&peer.onion_pubkey) {
                 Ok(public_key) => public_key,
@@ -2530,14 +2546,17 @@ impl Node {
                 continue;
             }
             let peer_onion = keys::onion_hostname_from_public_key(&public_key);
+            let already_known = self.known_peers.lock().unwrap().contains(&peer_onion);
             if let Err(error) =
                 self.add_known_peer_with_origin(&peer_onion, peer_origin_code(false, false))
             {
                 debug!(peer = %peer_onion, %error, "skipped discovered peer during peer exchange");
+            } else if !already_known {
+                discovered_new_peer = true;
             }
         }
 
-        Ok(())
+        Ok(discovered_new_peer)
     }
 
     /// Run one best-effort peer exchange after a successful live contact.
@@ -2545,9 +2564,9 @@ impl Node {
         &self,
         peer_onion: &str,
         client: &mut transport::PeerClient,
-    ) -> Result<(), Status> {
+    ) -> Result<bool, Status> {
         if !self.peer_exchange_due(peer_onion) {
-            return Ok(());
+            return Ok(false);
         }
 
         let policy =
@@ -2563,7 +2582,7 @@ impl Node {
         {
             Ok(response) => {
                 self.note_peer_exchange_attempt(peer_onion);
-                self.merge_peer_exchange_response(response)?;
+                return self.merge_peer_exchange_response(response);
             }
             Err(error) if error.code() == Code::Unimplemented => {
                 self.note_peer_exchange_attempt(peer_onion);
@@ -2587,7 +2606,7 @@ impl Node {
             }
         }
 
-        Ok(())
+        Ok(false)
     }
 
     /// Render the full built-in peer source file from built-ins plus live peers.
@@ -14080,6 +14099,98 @@ mod tests {
 
         owner_server.abort();
         peer_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn outbound_live_peer_contact_recovers_after_peer_exchange_discovers_storage_peer(
+    ) -> anyhow::Result<()> {
+        let owner_clock = Arc::new(ManualClock::new(Timestamp::new(100, 0).unwrap()));
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner_node = Arc::new(Node::with_local_storage_and_clock(
+            "live-contact-exchange-owner",
+            owner_filesystem,
+            owner_clock,
+        )?);
+        let recovered_clock = Arc::new(ManualClock::new(Timestamp::new(250, 0).unwrap()));
+        let recovered_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let recovered_node = Arc::new(Node::with_local_storage_and_clock(
+            "live-contact-exchange-owner",
+            recovered_filesystem,
+            recovered_clock,
+        )?);
+        recovered_node.initialize_lineage((250, 0), true)?;
+        let broker_identity = Node::new("live-contact-exchange-broker")?;
+        let replica_identity = Node::new("live-contact-exchange-replica")?;
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        recovered_node.set_peer_connector(connector.clone());
+
+        CliService::new(owner_node.clone())
+            .set_file(tonic::Request::new(clirpc::SetFileRequest {
+                file: Some(clirpc::File {
+                    name: "alpha.txt".to_string(),
+                    data: b"alpha-body".to_vec(),
+                    ..Default::default()
+                }),
+            }))
+            .await?;
+        let (content_info, blob) = current_content_snapshot(owner_node.as_ref())?;
+
+        let broker_state = Arc::new(PeerExchangeState::new(
+            bbrpc::GetContentRevisionResponse::default(),
+            vec![bbrpc::Peer {
+                onion_pubkey: replica_identity
+                    .ed25519_keypair()
+                    .public
+                    .to_bytes()
+                    .to_vec(),
+            }],
+        ));
+        let broker_server = spawn_registered_mock_peer_server(
+            broker_identity.address(),
+            &broker_identity.ed25519_keypair().secret,
+            PeerExchangePeerService::new(broker_state.clone()),
+            connector.as_ref(),
+        )
+        .await?;
+        let replica_server = spawn_registered_mock_peer_server(
+            replica_identity.address(),
+            &replica_identity.ed25519_keypair().secret,
+            StaticPeerService::new(
+                bbrpc::GetContentRevisionResponse {
+                    requester_latest_stored_content: Some(content_info.clone()),
+                    requester_remaining_seconds: 0,
+                    requester_latest_known_content: Some(content_info.clone()),
+                    requester_pinned: false,
+                },
+                DownloadBehavior::Response(bbrpc::DownloadResponse {
+                    total_length: i64::try_from(blob.len()).unwrap_or(i64::MAX),
+                    sha256: Sha256::digest(&blob).to_vec(),
+                    section: Some(bbrpc::download_response::Section::RawBytes(
+                        bbrpc::RawBytes {
+                            value: blob.clone(),
+                        },
+                    )),
+                }),
+            ),
+            connector.as_ref(),
+        )
+        .await?;
+
+        let _peer_client = recovered_node
+            .connect_peer_client(broker_identity.address())
+            .await?;
+        assert_eq!(broker_state.peer_exchange_call_count(), 1);
+        assert!(recovered_node
+            .known_peers()
+            .contains(&replica_identity.address().to_string()));
+        assert_eq!(
+            recovered_node.with_store(|store| store.get_file("alpha.txt"))?,
+            b"alpha-body".to_vec()
+        );
+
+        broker_server.abort();
+        replica_server.abort();
         Ok(())
     }
 
