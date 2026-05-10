@@ -80,12 +80,38 @@
       }:
         let
           version = "0.1.0";
+          cleanedSource = lib.cleanSourceWith {
+            src = ./.;
+            filter = path: type:
+              let
+                root = toString ./. + "/";
+                relPath =
+                  if path == ./. then ""
+                  else lib.removePrefix root (toString path);
+                ignoredPrefixes = [
+                  "target/"
+                  "target-static/"
+                  "target-windows/"
+                  "target-sanitize/"
+                  "target-integration/"
+                  "fuzz/target/"
+                  "integration/docker/gen/"
+                  "profiles/"
+                ];
+                ignoredNames = [
+                  "result"
+                ];
+              in
+              lib.cleanSourceFilter path type
+              && !(builtins.elem relPath ignoredNames)
+              && !(lib.any (prefix: lib.hasPrefix prefix relPath) ignoredPrefixes);
+          };
           package = if staticTarget == null then null else rustPlatform.buildRustPackage {
             pname = "barterbackup";
             inherit version;
 
-            src = self;
-            cargoHash = "sha256-B+l3D1KG6v+kbdsCLvAskuhreeTYGrm8lluI52keqko=";
+            src = cleanedSource;
+            cargoHash = "sha256-yXe/mJVM/ZjO6KPJ2dWVdXOLQk1RLmElbZYvvR+R1Zc=";
 
             cargoBuildTarget = staticTarget;
             doCheck = false;

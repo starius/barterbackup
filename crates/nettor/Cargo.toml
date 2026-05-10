@@ -37,7 +37,7 @@ tor-config = { git = "https://gitlab.torproject.org/starius/arti.git", tag = "ar
 tor-proto = { git = "https://gitlab.torproject.org/starius/arti.git", tag = "arti-v2.2.0-fix-channel-build-task-disappeared" }
 tor-rtcompat = { git = "https://gitlab.torproject.org/starius/arti.git", tag = "arti-v2.2.0-fix-channel-build-task-disappeared" }
 futures = "0.3"
-safelog = "0.8.1"
+safelog = { git = "https://gitlab.torproject.org/starius/arti.git", tag = "arti-v2.2.0-fix-channel-build-task-disappeared" }
 tokio-rustls = "0.26"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tonic = { version = "0.14.5", features = ["transport"] }
