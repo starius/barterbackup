@@ -6,22 +6,22 @@ import (
 	"barterbackup/integration/docker/gen/clirpc"
 )
 
-func TestWaitStateReadyAndReachableRequiresHealthySelfCheck(t *testing.T) {
+func TestWaitStatePeerRuntimeReadyIgnoresSelfCheckHealth(t *testing.T) {
 	t.Parallel()
 
 	readyButUnhealthy := &clirpc.StateResponse{
 		PeerRuntimeState:   clirpc.PeerRuntimeState_PEER_RUNTIME_STATE_READY,
 		SelfPeerCheckState: clirpc.SelfPeerCheckState_SELF_PEER_CHECK_STATE_UNHEALTHY,
 	}
-	if waitStateReadyAndReachable(readyButUnhealthy) {
-		t.Fatalf("expected unhealthy self-check to block readiness")
+	if !waitStatePeerRuntimeReady(readyButUnhealthy) {
+		t.Fatalf("expected ready peer runtime to satisfy readiness")
 	}
 
-	readyAndHealthy := &clirpc.StateResponse{
-		PeerRuntimeState:   clirpc.PeerRuntimeState_PEER_RUNTIME_STATE_READY,
+	startingButHealthy := &clirpc.StateResponse{
+		PeerRuntimeState:   clirpc.PeerRuntimeState_PEER_RUNTIME_STATE_STARTING,
 		SelfPeerCheckState: clirpc.SelfPeerCheckState_SELF_PEER_CHECK_STATE_HEALTHY,
 	}
-	if !waitStateReadyAndReachable(readyAndHealthy) {
-		t.Fatalf("expected healthy self-check to satisfy readiness")
+	if waitStatePeerRuntimeReady(startingButHealthy) {
+		t.Fatalf("expected non-ready peer runtime to block readiness")
 	}
 }

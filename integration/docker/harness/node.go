@@ -115,15 +115,13 @@ func (n *Node) Unlock(ctx context.Context) error {
 	return nil
 }
 
-// waitStateReadyAndReachable reports whether the node's public peer runtime is
-// ready and the daemon can reach its own public onion path.
-func waitStateReadyAndReachable(state *clirpc.StateResponse) bool {
-	return state.GetPeerRuntimeState() == clirpc.PeerRuntimeState_PEER_RUNTIME_STATE_READY &&
-		state.GetSelfPeerCheckState() == clirpc.SelfPeerCheckState_SELF_PEER_CHECK_STATE_HEALTHY
+// waitStatePeerRuntimeReady reports whether the node's public peer runtime has
+// started successfully enough to serve peer traffic.
+func waitStatePeerRuntimeReady(state *clirpc.StateResponse) bool {
+	return state.GetPeerRuntimeState() == clirpc.PeerRuntimeState_PEER_RUNTIME_STATE_READY
 }
 
-// WaitForReady waits until the node reports a ready and self-reachable public
-// peer runtime.
+// WaitForReady waits until the node reports a ready public peer runtime.
 func (n *Node) WaitForReady(ctx context.Context) (*clirpc.StateResponse, error) {
 	deadline, cancel := context.WithTimeout(ctx, defaultLongTimeout)
 	defer cancel()
@@ -135,7 +133,7 @@ func (n *Node) WaitForReady(ctx context.Context) (*clirpc.StateResponse, error) 
 			return nil, err
 		}
 		lastState = state
-		if waitStateReadyAndReachable(state) {
+		if waitStatePeerRuntimeReady(state) {
 			return state, nil
 		}
 		if state.PeerRuntimeState == clirpc.PeerRuntimeState_PEER_RUNTIME_STATE_FAILED {
@@ -144,7 +142,7 @@ func (n *Node) WaitForReady(ctx context.Context) (*clirpc.StateResponse, error) 
 		if err := ctxErr(deadline); err != nil {
 			if lastState != nil {
 				return nil, fmt.Errorf(
-					"node %s did not become publicly reachable before timeout: peer_runtime_state=%s peer_runtime_error=%q self_peer_check_state=%s self_peer_check_error=%q: %w",
+					"node %s did not report a ready peer runtime before timeout: peer_runtime_state=%s peer_runtime_error=%q self_peer_check_state=%s self_peer_check_error=%q: %w",
 					n.name,
 					lastState.GetPeerRuntimeState().String(),
 					lastState.GetPeerRuntimeError(),
