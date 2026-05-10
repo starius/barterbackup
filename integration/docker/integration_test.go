@@ -815,7 +815,7 @@ func TestDockerOfflinePeerPenalizedOnCheck(t *testing.T) {
 		func(info *clirpc.PeerInfo) bool {
 			return info.GetLastErrorClass() == clirpc.PeerFailureClass_PEER_FAILURE_CLASS_TRANSPORT &&
 				info.GetLastFailureAt() > 0 &&
-				strings.Contains(info.GetLastErrorMessage(), "transport error")
+				strings.Contains(info.GetLastErrorMessage(), "connect peer")
 		},
 	)
 	if peerInfo.GetConsecutiveFailures() != 0 {
