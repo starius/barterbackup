@@ -3,6 +3,7 @@ package harness
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -19,6 +20,16 @@ import (
 const (
 	chutneyRepositoryURL = "https://gitlab.torproject.org/tpo/core/chutney.git"
 	chutneyPinnedRef     = "9ca2446f4837c1730d31cf9be8ebb7865ebe8fc3"
+
+	chutneyPortSpan             = 9
+	chutneySharedOrBase         = 5100
+	chutneySharedDirBase        = 7100
+	chutneySharedControlBase    = 8000
+	chutneyPersistentSlotCount  = 300
+	chutneyPersistentSlotStride = 100
+	chutneyPersistentBaseStart  = 10000
+	chutneyPersistentDirOffset  = 20
+	chutneyPersistentCtrlOffset = 40
 )
 
 // ChutneyNetwork manages one shared private Tor network for integration tests.
@@ -30,6 +41,13 @@ type ChutneyNetwork struct {
 	baseConfig   translatedArtiConfig
 	commandEnv   []string
 	chutneyEntry string
+	portLayout   chutneyPortLayout
+}
+
+type chutneyPortLayout struct {
+	OrBase      int
+	DirBase     int
+	ControlBase int
 }
 
 type rawChutneyConfig struct {
@@ -82,7 +100,13 @@ type fallbackCache struct {
 // PrepareChutneyNetwork ensures one pinned Chutney checkout exists, starts one
 // private hs-v3-arti network, and loads the translated Arti client template.
 func PrepareChutneyNetwork(ctx context.Context, workRoot string) (*ChutneyNetwork, error) {
-	return prepareChutneyNetwork(ctx, workRoot, filepath.Join(workRoot, "chutney-network"), true)
+	return prepareChutneyNetwork(
+		ctx,
+		workRoot,
+		filepath.Join(workRoot, "chutney-network"),
+		true,
+		sharedChutneyPortLayout(),
+	)
 }
 
 // PreparePersistentChutneyNetwork ensures one pinned Chutney checkout exists
@@ -93,7 +117,7 @@ func PreparePersistentChutneyNetwork(
 	workRoot string,
 	dataDir string,
 ) (*ChutneyNetwork, error) {
-	return prepareChutneyNetwork(ctx, workRoot, dataDir, false)
+	return prepareChutneyNetwork(ctx, workRoot, dataDir, false, persistentChutneyPortLayout(dataDir))
 }
 
 func prepareChutneyNetwork(
@@ -101,13 +125,14 @@ func prepareChutneyNetwork(
 	workRoot string,
 	dataDir string,
 	cleanStart bool,
+	portLayout chutneyPortLayout,
 ) (*ChutneyNetwork, error) {
-	network, err := openChutneyNetwork(workRoot, dataDir)
+	network, err := openChutneyNetwork(workRoot, dataDir, portLayout)
 	if err != nil {
 		return nil, err
 	}
 	if cleanStart {
-		_ = cleanupStaleChutneyListeners(ctx)
+		_ = cleanupStaleChutneyListeners(ctx, network.dataDir, network.portLayout)
 		_ = network.Close()
 		if err := os.MkdirAll(network.dataDir, 0o755); err != nil {
 			return nil, fmt.Errorf("create chutney data dir: %w", err)
@@ -125,7 +150,11 @@ func prepareChutneyNetwork(
 	return network, nil
 }
 
-func openChutneyNetwork(workRoot string, dataDir string) (*ChutneyNetwork, error) {
+func openChutneyNetwork(
+	workRoot string,
+	dataDir string,
+	portLayout chutneyPortLayout,
+) (*ChutneyNetwork, error) {
 	if err := os.MkdirAll(workRoot, 0o755); err != nil {
 		return nil, fmt.Errorf("create integration work root: %w", err)
 	}
@@ -152,6 +181,7 @@ func openChutneyNetwork(workRoot string, dataDir string) (*ChutneyNetwork, error
 		artiBinary:   artiBinary,
 		commandEnv:   []string{"CHUTNEY_DATA_DIR=" + dataDir, "CHUTNEY_ARTI=" + artiBinary},
 		chutneyEntry: filepath.Join(chutneyDir, "chutney"),
+		portLayout:   portLayout,
 	}, nil
 }
 
@@ -205,6 +235,9 @@ func (n *ChutneyNetwork) start(ctx context.Context) error {
 	if _, err := runCommand(ctx, n.repoDir, n.commandEnv, n.chutneyEntry, "configure"); err != nil {
 		return fmt.Errorf("configure chutney network: %w", err)
 	}
+	if err := rewriteChutneyGeneratedPorts(n.dataDir, n.portLayout); err != nil {
+		return fmt.Errorf("rewrite chutney network ports: %w", err)
+	}
 	if err := disableChutneyTorSandbox(n.dataDir); err != nil {
 		return fmt.Errorf("disable Tor sandbox in Chutney network: %w", err)
 	}
@@ -226,7 +259,7 @@ func (n *ChutneyNetwork) ensureStarted(ctx context.Context) error {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("stat chutney data dir: %w", err)
 		}
-		_ = cleanupStaleChutneyListeners(ctx)
+		_ = cleanupStaleChutneyListeners(ctx, n.dataDir, n.portLayout)
 		if err := os.MkdirAll(n.dataDir, 0o755); err != nil {
 			return fmt.Errorf("create chutney data dir: %w", err)
 		}
@@ -236,7 +269,7 @@ func (n *ChutneyNetwork) ensureStarted(ctx context.Context) error {
 		return n.loadTranslatedConfig()
 	}
 	_ = n.Close()
-	_ = cleanupStaleChutneyListeners(ctx)
+	_ = cleanupStaleChutneyListeners(ctx, n.dataDir, n.portLayout)
 	if err := os.MkdirAll(n.dataDir, 0o755); err != nil {
 		return fmt.Errorf("create chutney data dir: %w", err)
 	}
@@ -352,14 +385,21 @@ func translateChutneyConfig(raw rawChutneyConfig) translatedArtiConfig {
 	return translated
 }
 
-func cleanupStaleChutneyListeners(ctx context.Context) error {
+func cleanupStaleChutneyListeners(
+	ctx context.Context,
+	dataDir string,
+	portLayout chutneyPortLayout,
+) error {
 	pidPattern := regexp.MustCompile(`pid=(\d+)`)
 	pids := map[int]struct{}{}
 	if output, err := runCommand(ctx, "", nil, "ss", "-H", "-ltnp"); err == nil {
-		collectChutneyListenerPIDs(pids, pidPattern, output)
+		collectChutneyListenerPIDs(pids, pidPattern, output, portLayout)
 	}
-	if output, err := runCommand(ctx, "", nil, "pgrep", "-f", "/tmp/bbmc/.*/torrc"); err == nil {
-		collectPIDList(pids, output)
+	if dataDir != "" {
+		processPattern := regexp.QuoteMeta(dataDir) + `/.*torrc`
+		if output, err := runCommand(ctx, "", nil, "pgrep", "-f", processPattern); err == nil {
+			collectPIDList(pids, output)
+		}
 	}
 
 	if len(pids) == 0 {
@@ -380,16 +420,13 @@ func collectChutneyListenerPIDs(
 	pids map[int]struct{},
 	pidPattern *regexp.Regexp,
 	output []byte,
+	portLayout chutneyPortLayout,
 ) {
 	targetPorts := map[int]struct{}{}
-	for port := 5100; port <= 5108; port++ {
-		targetPorts[port] = struct{}{}
-	}
-	for port := 7100; port <= 7108; port++ {
-		targetPorts[port] = struct{}{}
-	}
-	for port := 8000; port <= 8008; port++ {
-		targetPorts[port] = struct{}{}
+	for offset := 0; offset < chutneyPortSpan; offset++ {
+		targetPorts[portLayout.OrBase+offset] = struct{}{}
+		targetPorts[portLayout.DirBase+offset] = struct{}{}
+		targetPorts[portLayout.ControlBase+offset] = struct{}{}
 	}
 
 	for _, line := range strings.Split(string(output), "\n") {
@@ -416,6 +453,117 @@ func collectChutneyListenerPIDs(
 			}
 		}
 	}
+}
+
+func sharedChutneyPortLayout() chutneyPortLayout {
+	return chutneyPortLayout{
+		OrBase:      chutneySharedOrBase,
+		DirBase:     chutneySharedDirBase,
+		ControlBase: chutneySharedControlBase,
+	}
+}
+
+func persistentChutneyPortLayout(dataDir string) chutneyPortLayout {
+	sum := sha256.Sum256([]byte(dataDir))
+	slot := int(sum[0])<<8 | int(sum[1])
+	slot %= chutneyPersistentSlotCount
+	base := chutneyPersistentBaseStart + slot*chutneyPersistentSlotStride
+	return chutneyPortLayout{
+		OrBase:      base,
+		DirBase:     base + chutneyPersistentDirOffset,
+		ControlBase: base + chutneyPersistentCtrlOffset,
+	}
+}
+
+func (l chutneyPortLayout) rewritePort(port int) (int, bool) {
+	switch {
+	case port >= chutneySharedOrBase && port < chutneySharedOrBase+chutneyPortSpan:
+		return l.OrBase + (port - chutneySharedOrBase), true
+	case port >= chutneySharedDirBase && port < chutneySharedDirBase+chutneyPortSpan:
+		return l.DirBase + (port - chutneySharedDirBase), true
+	case port >= chutneySharedControlBase && port < chutneySharedControlBase+chutneyPortSpan:
+		return l.ControlBase + (port - chutneySharedControlBase), true
+	default:
+		return 0, false
+	}
+}
+
+func rewriteChutneyGeneratedPorts(dataDir string, portLayout chutneyPortLayout) error {
+	patterns := []string{
+		filepath.Join(dataDir, "nodes.*", "*", "torrc"),
+		filepath.Join(dataDir, "nodes.*", "arti.toml"),
+	}
+	for _, pattern := range patterns {
+		paths, err := filepath.Glob(pattern)
+		if err != nil {
+			return fmt.Errorf("glob Chutney config files: %w", err)
+		}
+		for _, path := range paths {
+			if err := rewriteChutneyConfigFilePorts(path, portLayout); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func rewriteChutneyConfigFilePorts(path string, portLayout chutneyPortLayout) error {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+
+	updated := rewriteLoopbackPorts(contents, portLayout)
+	updated = rewriteTaggedPorts(updated, regexp.MustCompile(`\borport=(\d+)\b`), "orport=", portLayout)
+	updated = rewriteTaggedPorts(updated, regexp.MustCompile(`(?m)^DirPort (\d+)$`), "DirPort ", portLayout)
+
+	if bytes.Equal(updated, contents) {
+		return nil
+	}
+	if err := os.WriteFile(path, updated, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+func rewriteLoopbackPorts(contents []byte, portLayout chutneyPortLayout) []byte {
+	loopbackPortPattern := regexp.MustCompile(`(?:127\.0\.0\.1|\[::1\]):\d+`)
+	return loopbackPortPattern.ReplaceAllFunc(contents, func(match []byte) []byte {
+		text := string(match)
+		portIndex := strings.LastIndex(text, ":")
+		if portIndex < 0 {
+			return match
+		}
+		portValue, err := strconv.Atoi(text[portIndex+1:])
+		if err != nil {
+			return match
+		}
+		rewritten, ok := portLayout.rewritePort(portValue)
+		if !ok {
+			return match
+		}
+		return []byte(text[:portIndex+1] + strconv.Itoa(rewritten))
+	})
+}
+
+func rewriteTaggedPorts(
+	contents []byte,
+	pattern *regexp.Regexp,
+	prefix string,
+	portLayout chutneyPortLayout,
+) []byte {
+	return pattern.ReplaceAllFunc(contents, func(match []byte) []byte {
+		text := string(match)
+		portValue, err := strconv.Atoi(strings.TrimPrefix(text, prefix))
+		if err != nil {
+			return match
+		}
+		rewritten, ok := portLayout.rewritePort(portValue)
+		if !ok {
+			return match
+		}
+		return []byte(prefix + strconv.Itoa(rewritten))
+	})
 }
 
 func collectPIDList(pids map[int]struct{}, output []byte) {

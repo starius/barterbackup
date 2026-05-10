@@ -618,7 +618,11 @@ func (e *Environment) ensureNetwork(ctx context.Context) error {
 }
 
 func (e *Environment) chutneyHealthy(ctx context.Context) (bool, error) {
-	network, err := openChutneyNetwork(e.suite.workRoot, e.manifest.ChutneyDataDir)
+	network, err := openChutneyNetwork(
+		e.suite.workRoot,
+		e.manifest.ChutneyDataDir,
+		persistentChutneyPortLayout(e.manifest.ChutneyDataDir),
+	)
 	if err != nil {
 		return false, err
 	}
@@ -629,7 +633,11 @@ func (e *Environment) chutneyHealthy(ctx context.Context) (bool, error) {
 }
 
 func (e *Environment) closePersistentNetwork() error {
-	network, err := openChutneyNetwork(e.suite.workRoot, e.manifest.ChutneyDataDir)
+	network, err := openChutneyNetwork(
+		e.suite.workRoot,
+		e.manifest.ChutneyDataDir,
+		persistentChutneyPortLayout(e.manifest.ChutneyDataDir),
+	)
 	if err != nil {
 		return err
 	}

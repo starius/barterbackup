@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,6 +58,27 @@ func TestTranslateChutneyConfig(t *testing.T) {
 	}
 	if !regexp.MustCompile(`(?m)^\s*\[path_rules\]`).Match(rendered) {
 		t.Fatalf("translated config unexpectedly dropped path_rules:\n%s", string(rendered))
+	}
+}
+
+func TestPersistentChutneyPortLayoutUsesStableAlternateRanges(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "bbmc", "owner")
+
+	first := persistentChutneyPortLayout(dataDir)
+	second := persistentChutneyPortLayout(dataDir)
+	shared := sharedChutneyPortLayout()
+
+	if first != second {
+		t.Fatalf("persistent layout was not stable: first=%+v second=%+v", first, second)
+	}
+	if first == shared {
+		t.Fatalf("persistent layout unexpectedly matched shared layout: %+v", first)
+	}
+	if first.DirBase-first.OrBase != chutneyPersistentDirOffset {
+		t.Fatalf("unexpected dir offset: %+v", first)
+	}
+	if first.ControlBase-first.OrBase != chutneyPersistentCtrlOffset {
+		t.Fatalf("unexpected control offset: %+v", first)
 	}
 }
 
@@ -225,6 +247,82 @@ func TestDisableChutneyTorSandboxLeavesMissingDirectiveUnchanged(t *testing.T) {
 	}
 }
 
+func TestRewriteChutneyGeneratedPortsRewritesTorrcAndArtiFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	nodesDir := filepath.Join(tempDir, "nodes.123")
+	nodeDir := filepath.Join(nodesDir, "000a")
+	if err := os.MkdirAll(nodeDir, 0o755); err != nil {
+		t.Fatalf("create node dir: %v", err)
+	}
+
+	torrcPath := filepath.Join(nodeDir, "torrc")
+	torrc := []byte(strings.Join([]string{
+		"ControlPort 127.0.0.1:8000",
+		"ControlPort [::1]:8000",
+		"OrPort 127.0.0.1:5100",
+		"DirAuthority test000a no-v2 orport=5100 v3ident=ID 127.0.0.1:7100 FINGERPRINT",
+		"DirPort 7100",
+		"",
+	}, "\n"))
+	if err := os.WriteFile(torrcPath, torrc, 0o600); err != nil {
+		t.Fatalf("write torrc: %v", err)
+	}
+
+	artiPath := filepath.Join(nodesDir, "arti.toml")
+	arti := []byte(strings.Join([]string{
+		"[[tor_network.fallback_caches]]",
+		`orports = ["127.0.0.1:5100"]`,
+		"",
+		"[tor_network.authorities]",
+		`uploads = [["127.0.0.1:7100"]]`,
+		"",
+	}, "\n"))
+	if err := os.WriteFile(artiPath, arti, 0o600); err != nil {
+		t.Fatalf("write arti.toml: %v", err)
+	}
+
+	layout := chutneyPortLayout{
+		OrBase:      15000,
+		DirBase:     15020,
+		ControlBase: 15040,
+	}
+	if err := rewriteChutneyGeneratedPorts(tempDir, layout); err != nil {
+		t.Fatalf("rewriteChutneyGeneratedPorts returned error: %v", err)
+	}
+
+	rewrittenTorrc, err := os.ReadFile(torrcPath)
+	if err != nil {
+		t.Fatalf("read rewritten torrc: %v", err)
+	}
+	rewrittenTorrcText := string(rewrittenTorrc)
+	for _, expected := range []string{
+		"ControlPort 127.0.0.1:15040",
+		"ControlPort [::1]:15040",
+		"OrPort 127.0.0.1:15000",
+		"orport=15000",
+		"127.0.0.1:15020",
+		"DirPort 15020",
+	} {
+		if !strings.Contains(rewrittenTorrcText, expected) {
+			t.Fatalf("missing %q in rewritten torrc:\n%s", expected, rewrittenTorrcText)
+		}
+	}
+
+	rewrittenArti, err := os.ReadFile(artiPath)
+	if err != nil {
+		t.Fatalf("read rewritten arti.toml: %v", err)
+	}
+	rewrittenArtiText := string(rewrittenArti)
+	for _, expected := range []string{
+		`"127.0.0.1:15000"`,
+		`"127.0.0.1:15020"`,
+	} {
+		if !strings.Contains(rewrittenArtiText, expected) {
+			t.Fatalf("missing %q in rewritten arti.toml:\n%s", expected, rewrittenArtiText)
+		}
+	}
+}
+
 func TestCollectChutneyListenerPIDs(t *testing.T) {
 	pids := map[int]struct{}{}
 	output := []byte(`
@@ -233,7 +331,7 @@ LISTEN 0 128 127.0.0.1:9999 0.0.0.0:* users:(("ignored",pid=222,fd=7))
 LISTEN 0 128 [::1]:8003 [::]:* users:(("tor",pid=333,fd=7),("python3",pid=444,fd=8))
 `)
 
-	collectChutneyListenerPIDs(pids, regexp.MustCompile(`pid=(\d+)`), output)
+	collectChutneyListenerPIDs(pids, regexp.MustCompile(`pid=(\d+)`), output, sharedChutneyPortLayout())
 
 	if len(pids) != 3 {
 		t.Fatalf("unexpected pid count: %+v", pids)
@@ -249,6 +347,31 @@ LISTEN 0 128 [::1]:8003 [::]:* users:(("tor",pid=333,fd=7),("python3",pid=444,fd
 	}
 	if _, ok := pids[222]; ok {
 		t.Fatalf("unexpected non-Chutney pid: %+v", pids)
+	}
+}
+
+func TestCollectChutneyListenerPIDsUsesProvidedLayout(t *testing.T) {
+	pids := map[int]struct{}{}
+	output := []byte(`
+LISTEN 0 128 127.0.0.1:5101 0.0.0.0:* users:(("shared",pid=111,fd=7))
+LISTEN 0 128 127.0.0.1:15001 0.0.0.0:* users:(("persistent",pid=222,fd=7))
+`)
+
+	collectChutneyListenerPIDs(
+		pids,
+		regexp.MustCompile(`pid=(\d+)`),
+		output,
+		chutneyPortLayout{OrBase: 15000, DirBase: 15020, ControlBase: 15040},
+	)
+
+	if len(pids) != 1 {
+		t.Fatalf("unexpected pid count: %+v", pids)
+	}
+	if _, ok := pids[222]; !ok {
+		t.Fatalf("missing pid 222: %+v", pids)
+	}
+	if _, ok := pids[111]; ok {
+		t.Fatalf("unexpected shared pid: %+v", pids)
 	}
 }
 
