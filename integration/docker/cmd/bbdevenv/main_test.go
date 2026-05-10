@@ -63,7 +63,7 @@ func TestFindBBCLIBinaryHonorsOverride(t *testing.T) {
 }
 
 func TestBuildBBCLIInvocationUsesSelectedNodeContext(t *testing.T) {
-	t.Parallel()
+	t.Setenv("BB_DOCKER_BBCLI_BIN", "")
 
 	workRoot := t.TempDir()
 	repoRoot := filepath.Join(workRoot, "repo")
