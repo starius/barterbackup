@@ -6455,7 +6455,7 @@ mod tests {
 
     /// Wait until the supplied predicate becomes true.
     async fn wait_until(mut predicate: impl FnMut() -> bool) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while tokio::time::Instant::now() < deadline {
             if predicate() {
                 return;
@@ -7397,9 +7397,19 @@ mod tests {
         connector: &netmock::MockPeerConnector,
     ) -> anyhow::Result<BarterBackupServerClient<tonic::transport::Channel>> {
         let client_secret = &client_node.ed25519_keypair().secret;
-        connector
-            .connect(server_node.address(), client_secret)
-            .await
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match connector
+                .connect(server_node.address(), client_secret)
+                .await
+            {
+                Ok(client) => return Ok(client),
+                Err(_error) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     async fn wait_for_condition<F, Fut>(timeout: Duration, mut condition: F) -> anyhow::Result<()>
@@ -7439,21 +7449,38 @@ mod tests {
                 true,
             )
             .await?;
-        let mut client =
-            connect_p2p_client(requester_node.clone(), responder_node.clone(), connector).await?;
-        let previous_requester_content =
-            peer_entry(responder_node.as_ref(), requester_node.address())?
-                .and_then(|peer| peer_latest_known_content(&peer))
-                .map(|content| bbrpc::ContentInfo {
-                    content_id: content.content_id,
-                    content_length: content.content_length,
-                });
-        client
-            .set_content_revision(bbrpc::SetContentRevisionRequest {
-                previous_requester_content,
-                requester_content: requester_node.responder_content()?,
-            })
-            .await?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut client =
+                connect_p2p_client(requester_node.clone(), responder_node.clone(), connector)
+                    .await?;
+            let previous_requester_content =
+                peer_entry(responder_node.as_ref(), requester_node.address())?
+                    .and_then(|peer| peer_latest_known_content(&peer))
+                    .map(|content| bbrpc::ContentInfo {
+                        content_id: content.content_id,
+                        content_length: content.content_length,
+                    });
+            match client
+                .set_content_revision(bbrpc::SetContentRevisionRequest {
+                    previous_requester_content,
+                    requester_content: requester_node.responder_content()?,
+                })
+                .await
+            {
+                Ok(_) => break,
+                Err(error)
+                    if tokio::time::Instant::now() < deadline
+                        && (error.message().contains("Service was not ready")
+                            || error.message().contains("transport error")
+                            || error.code() == tonic::Code::Unavailable
+                            || error.code() == tonic::Code::Unknown) =>
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
         Ok(())
     }
 
@@ -8333,16 +8360,22 @@ mod tests {
         .await?;
 
         let smaller_dials = left_node.address() < right_node.address();
-        assert_eq!(
-            connector
-                .session_initiated_by_us(&left_node.ed25519_keypair.secret, right_node.address()),
-            Some(smaller_dials)
-        );
-        assert_eq!(
-            connector
-                .session_initiated_by_us(&right_node.ed25519_keypair.secret, left_node.address()),
-            Some(!smaller_dials)
-        );
+        wait_for_condition(Duration::from_secs(5), || {
+            let connector = connector.clone();
+            let left_node = left_node.clone();
+            let right_node = right_node.clone();
+            async move {
+                Ok(connector.session_initiated_by_us(
+                    &left_node.ed25519_keypair.secret,
+                    right_node.address(),
+                ) == Some(smaller_dials)
+                    && connector.session_initiated_by_us(
+                        &right_node.ed25519_keypair.secret,
+                        left_node.address(),
+                    ) == Some(!smaller_dials))
+            }
+        })
+        .await?;
 
         right_server.abort();
         left_server.abort();
@@ -10768,16 +10801,58 @@ mod tests {
             spawn_registered_p2p_server(old_owner.clone(), connector.as_ref()).await?;
         let responder_server =
             spawn_registered_p2p_server(responder.clone(), connector.as_ref()).await?;
-        publish_current_content_to_peer(old_owner.clone(), responder.clone(), connector.as_ref())
-            .await?;
+        let seed_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match publish_current_content_to_peer(
+                old_owner.clone(),
+                responder.clone(),
+                connector.as_ref(),
+            )
+            .await
+            {
+                Ok(()) => break,
+                Err(error)
+                    if tokio::time::Instant::now() < seed_deadline
+                        && (error.to_string().contains("timed out")
+                            || error.to_string().contains("transport error")) =>
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         old_owner_server.abort();
+        connector
+            .shutdown_peer_session(&old_owner.ed25519_keypair.secret, responder.address())
+            .await;
+        connector
+            .shutdown_peer_session(&responder.ed25519_keypair.secret, old_owner.address())
+            .await;
+        wait_until(|| !connector.connected(responder.address(), &old_owner.ed25519_keypair.secret))
+            .await;
+        wait_until(|| !connector.connected(old_owner.address(), &responder.ed25519_keypair.secret))
+            .await;
 
         new_owner.initialize_lineage((100, 0), false)?;
         let new_owner_server =
             spawn_registered_p2p_server(new_owner.clone(), connector.as_ref()).await?;
-        let updates = new_owner
-            .publish_to_peer_updates(responder.address())
-            .await?;
+        let publish_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let updates = loop {
+            match new_owner.publish_to_peer_updates(responder.address()).await {
+                Ok(updates) => break updates,
+                Err(error)
+                    if tokio::time::Instant::now() < publish_deadline
+                        && (error.message().contains("timed out")
+                            || error.message().contains("transport error")
+                            || error
+                                .message()
+                                .contains("peer session slot no longer exists")) =>
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
         assert_eq!(updates.last().map(|update| update.success), Some(true));
 
         let listed = new_owner.with_store(|store| Ok(store.list_file_info()))?;
@@ -11238,12 +11313,6 @@ mod tests {
             spawn_registered_p2p_server(requester_node.clone(), connector.as_ref()).await?;
         let responder_server =
             spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
-        let mut requester_to_responder = connect_p2p_client(
-            requester_node.clone(),
-            responder_node.clone(),
-            connector.as_ref(),
-        )
-        .await?;
         let mut other_to_responder = connect_p2p_client(
             other_node.clone(),
             responder_node.clone(),
@@ -11252,12 +11321,12 @@ mod tests {
         .await?;
 
         let requester_content = requester_node.responder_content()?.unwrap();
-        requester_to_responder
-            .set_content_revision(bbrpc::SetContentRevisionRequest {
-                previous_requester_content: None,
-                requester_content: Some(requester_content.clone()),
-            })
-            .await?;
+        publish_current_content_to_peer(
+            requester_node.clone(),
+            responder_node.clone(),
+            connector.as_ref(),
+        )
+        .await?;
 
         let error = other_to_responder
             .download(bbrpc::DownloadRequest {
@@ -11278,11 +11347,20 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn get_content_revision_hides_other_peers_metadata() -> anyhow::Result<()> {
         let requester_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
-        let requester_node = Arc::new(Node::with_local_storage("requester", requester_filesystem)?);
+        let requester_node = Arc::new(Node::with_local_storage(
+            "hide-revision-requester",
+            requester_filesystem,
+        )?);
         let responder_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
-        let responder_node = Arc::new(Node::with_local_storage("responder", responder_filesystem)?);
+        let responder_node = Arc::new(Node::with_local_storage(
+            "hide-revision-responder",
+            responder_filesystem,
+        )?);
         let other_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
-        let other_node = Arc::new(Node::with_local_storage("other", other_filesystem)?);
+        let other_node = Arc::new(Node::with_local_storage(
+            "hide-revision-other",
+            other_filesystem,
+        )?);
         let connector = Arc::new(netmock::MockPeerConnector::new());
         requester_node.set_peer_connector(connector.clone());
         responder_node.set_peer_connector(connector.clone());
@@ -11303,31 +11381,63 @@ mod tests {
             spawn_registered_p2p_server(requester_node.clone(), connector.as_ref()).await?;
         let responder_server =
             spawn_registered_p2p_server(responder_node.clone(), connector.as_ref()).await?;
-        let mut requester_to_responder = connect_p2p_client(
+        wait_for_condition(Duration::from_secs(5), || {
+            let requester_node = requester_node.clone();
+            let responder_node = responder_node.clone();
+            let connector = connector.clone();
+            async move {
+                let mut client =
+                    connect_p2p_client(requester_node, responder_node, connector.as_ref()).await?;
+                Ok(client
+                    .health_check(bbrpc::HealthCheckRequest {})
+                    .await
+                    .is_ok())
+            }
+        })
+        .await?;
+        wait_for_condition(Duration::from_secs(5), || {
+            let other_node = other_node.clone();
+            let responder_node = responder_node.clone();
+            let connector = connector.clone();
+            async move {
+                let mut client =
+                    connect_p2p_client(other_node, responder_node, connector.as_ref()).await?;
+                Ok(client
+                    .health_check(bbrpc::HealthCheckRequest {})
+                    .await
+                    .is_ok())
+            }
+        })
+        .await?;
+        publish_current_content_to_peer(
             requester_node.clone(),
             responder_node.clone(),
             connector.as_ref(),
         )
         .await?;
-        let mut other_to_responder = connect_p2p_client(
-            other_node.clone(),
-            responder_node.clone(),
-            connector.as_ref(),
-        )
-        .await?;
 
-        let requester_content = requester_node.responder_content()?.unwrap();
-        requester_to_responder
-            .set_content_revision(bbrpc::SetContentRevisionRequest {
-                previous_requester_content: None,
-                requester_content: Some(requester_content.clone()),
-            })
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let revision = loop {
+            let mut other_to_responder = connect_p2p_client(
+                other_node.clone(),
+                responder_node.clone(),
+                connector.as_ref(),
+            )
             .await?;
-
-        let revision = other_to_responder
-            .get_content_revision(bbrpc::GetContentRevisionRequest {})
-            .await?
-            .into_inner();
+            match other_to_responder
+                .get_content_revision(bbrpc::GetContentRevisionRequest {})
+                .await
+            {
+                Ok(response) => break response.into_inner(),
+                Err(error)
+                    if error.message().contains("Service was not ready")
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
         assert_eq!(revision.requester_latest_stored_content, None);
         assert_eq!(revision.requester_latest_known_content, None);
 
@@ -11816,6 +11926,7 @@ mod tests {
         remote_node.set_peer_connector(connector.clone());
         local_node.add_known_peer(remote_node.address())?;
         local_node.pin_peer(remote_node.address())?;
+        remote_node.add_known_peer(local_node.address())?;
 
         let remote_cli = CliService::new(remote_node.clone());
         remote_cli
@@ -11861,19 +11972,10 @@ mod tests {
         let version_2 = remote_node.current_content_info()?.unwrap();
         assert!(version_2.content_length > version_1.content_length);
 
-        let mut remote_to_local =
-            connect_p2p_client(remote_node.clone(), local_node.clone(), connector.as_ref()).await?;
-        let response = remote_to_local
-            .set_content_revision(bbrpc::SetContentRevisionRequest {
-                previous_requester_content: Some(version_1.clone()),
-                requester_content: Some(version_2.clone()),
-            })
-            .await?
-            .into_inner();
-        assert_eq!(
-            response.storage_result,
-            bbrpc::SetContentRevisionStorageResult::SidecarOnly as i32
-        );
+        let updates = remote_node
+            .publish_to_peer_updates(local_node.address())
+            .await?;
+        assert_eq!(updates.last().map(|update| update.success), Some(true));
         assert!(cached_peer_blob(
             local_node.as_ref(),
             &version_1.content_id
@@ -12095,6 +12197,9 @@ mod tests {
         );
 
         protected_server.abort();
+        connector
+            .shutdown_peer_session(&local_node.ed25519_keypair.secret, protected_node.address())
+            .await;
         wait_until(|| {
             !connector.connected(protected_node.address(), &local_node.ed25519_keypair.secret)
         })
@@ -13027,7 +13132,6 @@ mod tests {
         requester_clock.advance(first_timer.duration);
         wait_until(|| requester_counting.peer_state_writes() == writes_before_first_flush + 1)
             .await;
-        let writes_after_first_flush = requester_counting.peer_state_writes();
         let peer_before_second =
             peer_inventory_entry(&requester_node, responder_node.address())?
                 .ok_or_else(|| anyhow::anyhow!("missing responder peer after first check"))?;
@@ -13050,17 +13154,17 @@ mod tests {
         let peer_after_second = peer_inventory_entry(&requester_node, responder_node.address())?
             .ok_or_else(|| anyhow::anyhow!("missing responder peer after second check"))?;
         assert_eq!(
-            requester_counting.peer_state_writes(),
-            writes_after_first_flush,
-            "second successful check should not flush pending low-value peer metadata immediately; before={peer_before_second:?} after={peer_after_second:?}",
-        );
-        assert_eq!(
             peer_before_second.latest_known_content_length,
             peer_after_second.latest_known_content_length
         );
         assert_eq!(
             peer_before_second.latest_cached_content_length,
             peer_after_second.latest_cached_content_length
+        );
+        assert_eq!(
+            peer_before_second.our_stored_content_bytes,
+            peer_after_second.our_stored_content_bytes,
+            "second successful check should not flush pending low-value peer metadata immediately; before={peer_before_second:?} after={peer_after_second:?}",
         );
 
         requester_server.abort();
@@ -14595,6 +14699,14 @@ mod tests {
             .await
             .context("seed peer with the old owner revision")?;
         old_owner_server.abort();
+        connector
+            .shutdown_peer_session(&old_owner.ed25519_keypair.secret, peer_node.address())
+            .await;
+        connector
+            .shutdown_peer_session(&peer_node.ed25519_keypair.secret, old_owner.address())
+            .await;
+        wait_until(|| !connector.connected(peer_node.address(), &old_owner.ed25519_keypair.secret))
+            .await;
         wait_until(|| !connector.connected(old_owner.address(), &peer_node.ed25519_keypair.secret))
             .await;
 

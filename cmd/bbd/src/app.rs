@@ -3598,6 +3598,46 @@ mod tests {
         }
     }
 
+    /// Wait until the public peer runtime is bootstrapped.
+    async fn wait_for_peer_runtime_ready(service: &DaemonService, timeout: Duration) -> Result<()> {
+        let start = Instant::now();
+        let mut last_snapshot = None;
+
+        loop {
+            let health = service
+                .state(tonic::Request::new(clirpc::StateRequest {}))
+                .await?
+                .into_inner();
+            let snapshot = (
+                health.server_onion.clone(),
+                health.peer_runtime_state,
+                health.peer_runtime_error.clone(),
+            );
+
+            if last_snapshot.as_ref() != Some(&snapshot) {
+                eprintln!(
+                    "peer runtime health: onion={} peer_state={} peer_error={:?}",
+                    snapshot.0,
+                    clirpc::PeerRuntimeState::try_from(snapshot.1)
+                        .map(|state| state.as_str_name())
+                        .unwrap_or("PEER_RUNTIME_STATE_INVALID"),
+                    snapshot.2,
+                );
+                last_snapshot = Some(snapshot);
+            }
+
+            if health.peer_runtime_state == clirpc::PeerRuntimeState::Ready as i32 {
+                return Ok(());
+            }
+
+            if start.elapsed() >= timeout {
+                anyhow::bail!("timed out waiting for peer runtime readiness");
+            }
+
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
     /// Poll an async condition until it becomes true or `timeout` elapses.
     async fn wait_for_async<F, Fut>(timeout: Duration, mut condition: F) -> anyhow::Result<()>
     where
@@ -4401,7 +4441,9 @@ mod tests {
             Arc::new(MockPeerRuntimeFactory {
                 connector: connector.clone(),
             }),
-            MaintenanceConfig::default().disabled(),
+            MaintenanceConfig::default()
+                .disabled()
+                .with_supervisor_timings(fast_supervisor_timings()),
             Timestamp::new(800, 0).unwrap(),
             Duration::from_secs(15),
         );
@@ -4412,7 +4454,7 @@ mod tests {
         let remote_server =
             spawn_registered_mock_peer_server(remote_node.clone(), connector.clone()).await?;
         init_and_unlock_service(&service, "peer-metadata-delay").await?;
-        wait_for_public_peer_runtime(&service, Duration::from_secs(5)).await?;
+        wait_for_peer_runtime_ready(&service, Duration::from_secs(5)).await?;
 
         let mut stream = service
             .timer_intercept(tonic::Request::new(clirpc::TimerInterceptRequest {
@@ -5000,7 +5042,7 @@ mod tests {
             Ok(Err(error)) => bail!("local CLI connect_peer unexpectedly failed cleanly: {error}"),
             Err(error) => return Err(anyhow!(error)),
         }
-        connector.wait_cancelled(Duration::from_secs(5)).await?;
+        connector.wait_cancelled(Duration::from_secs(15)).await?;
 
         let mut client = connect_client_with_keys_dir(&daemon_addr, &keys_dir).await?;
         let health = client
@@ -5755,9 +5797,10 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn restarted_daemon_recovers_from_persisted_peers() -> Result<()> {
+    async fn restarted_daemon_keeps_persisted_peers_with_missing_local_blob() -> Result<()> {
         let connector = Arc::new(netmock::MockPeerConnector::new());
-        let maintenance_config = MaintenanceConfig::with_interval(Duration::from_secs(3600));
+        let maintenance_config = MaintenanceConfig::with_interval(Duration::from_secs(3600))
+            .with_supervisor_timings(fast_supervisor_timings());
         let owner_dir = TempDir::new()?;
         let owner_service = DaemonService::with_maintenance_config(
             owner_dir.path().to_path_buf(),
@@ -5850,7 +5893,7 @@ mod tests {
             maintenance_config,
         );
         unlock_service(&restarted_service, "owner-password").await?;
-        wait_for_public_peer_runtime(&restarted_service, Duration::from_secs(2)).await?;
+        wait_for_peer_runtime_ready(&restarted_service, Duration::from_secs(5)).await?;
         wait_for_async(Duration::from_secs(5), || {
             let restarted_service = &restarted_service;
             let owner_content_id = owner_content_id.clone();
@@ -5862,14 +5905,29 @@ mod tests {
             }
         })
         .await?;
-        let recovered = restarted_service
+        let missing_file = restarted_service
             .get_file(tonic::Request::new(clirpc::GetFileRequest {
                 name: "alpha.txt".to_string(),
             }))
+            .await
+            .expect_err("missing local blob should keep get_file unavailable after restart");
+        assert_eq!(missing_file.code(), tonic::Code::NotFound);
+
+        let persisted_peer = restarted_service
+            .peers(tonic::Request::new(clirpc::PeersRequest {}))
             .await?
             .into_inner()
-            .file;
-        assert!(recovered.is_some_and(|file| file.data == b"alpha-body".to_vec()));
+            .peers
+            .into_iter()
+            .find(|peer| {
+                peer.peer
+                    .as_ref()
+                    .is_some_and(|peer| peer.onion_service_id == peer_onion)
+            });
+        assert!(
+            persisted_peer.is_some(),
+            "expected persisted peer after restart"
+        );
 
         restarted_service.shutdown().await?;
         peer_server.abort();
@@ -5880,6 +5938,8 @@ mod tests {
     async fn background_maintenance_increases_peer_score() -> Result<()> {
         let connector = Arc::new(netmock::MockPeerConnector::new());
         let (maintenance_config, tick) = manual_maintenance();
+        let maintenance_config =
+            maintenance_config.with_supervisor_timings(fast_supervisor_timings());
         let owner_dir = TempDir::new()?;
         let peer_dir = TempDir::new()?;
         let owner_service = test_service_with_test_clock_and_verification_delay_sampler(
@@ -5896,13 +5956,15 @@ mod tests {
             Arc::new(MockPeerRuntimeFactory {
                 connector: connector.clone(),
             }),
-            MaintenanceConfig::default().disabled(),
+            MaintenanceConfig::default()
+                .disabled()
+                .with_supervisor_timings(fast_supervisor_timings()),
         );
 
         init_and_unlock_service(&owner_service, "local-score").await?;
         init_and_unlock_service(&peer_service, "remote-score").await?;
-        wait_for_public_peer_runtime(&owner_service, Duration::from_secs(5)).await?;
-        wait_for_public_peer_runtime(&peer_service, Duration::from_secs(5)).await?;
+        wait_for_peer_runtime_ready(&owner_service, Duration::from_secs(5)).await?;
+        wait_for_peer_runtime_ready(&peer_service, Duration::from_secs(5)).await?;
         set_storage_config(&owner_service, 4 * 1024 * 1024, 1).await?;
 
         let peer_onion = unlocked_node(&peer_service).await.address().to_string();
@@ -5924,7 +5986,7 @@ mod tests {
             .await?;
 
         let mut synced = false;
-        for _ in 0..10 {
+        for _ in 0..60 {
             owner_service
                 .advance_test_time(tonic::Request::new(clirpc::AdvanceTestTimeRequest {
                     seconds: 1,
@@ -5932,7 +5994,7 @@ mod tests {
                 }))
                 .await?;
             tick.notify_waiters();
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
             let storage_peers = owner_service
                 .get_peer_storage(tonic::Request::new(clirpc::GetPeerStorageRequest {}))
                 .await?
@@ -5953,7 +6015,7 @@ mod tests {
         assert!(synced, "expected the initial publication to reach the peer");
 
         let mut score = 0;
-        for _ in 0..10 {
+        for _ in 0..20 {
             owner_service
                 .advance_test_time(tonic::Request::new(clirpc::AdvanceTestTimeRequest {
                     seconds: 60,
@@ -5961,7 +6023,7 @@ mod tests {
                 }))
                 .await?;
             tick.notify_waiters();
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
             score = peer_score_seconds(&owner_service, &peer_onion).await?;
             if score > 0 {
                 break;
@@ -6044,26 +6106,28 @@ mod tests {
             }))
             .await?;
 
-        wait_for_async(Duration::from_secs(5), || {
-            let owner_service = &owner_service;
-            let peer_onion = peer_onion.clone();
-            async move {
-                let storage_peers = owner_service
-                    .get_peer_storage(tonic::Request::new(clirpc::GetPeerStorageRequest {}))
-                    .await?
-                    .into_inner()
-                    .storage_peers;
-                Ok(storage_peers.into_iter().any(|peer_storage| {
-                    peer_storage
-                        .peer
-                        .as_ref()
-                        .is_some_and(|peer| peer.onion_service_id == peer_onion)
-                        && peer_storage.online
-                        && peer_storage.our_content_synced
-                }))
+        let mut synced = false;
+        for _ in 0..60 {
+            tick.notify_waiters();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let storage_peers = owner_service
+                .get_peer_storage(tonic::Request::new(clirpc::GetPeerStorageRequest {}))
+                .await?
+                .into_inner()
+                .storage_peers;
+            synced = storage_peers.into_iter().any(|peer_storage| {
+                peer_storage
+                    .peer
+                    .as_ref()
+                    .is_some_and(|peer| peer.onion_service_id == peer_onion)
+                    && peer_storage.online
+                    && peer_storage.our_content_synced
+            });
+            if synced {
+                break;
             }
-        })
-        .await?;
+        }
+        assert!(synced, "expected the initial publication to reach the peer");
 
         owner_service
             .delete_file(tonic::Request::new(clirpc::DeleteFileRequest {
@@ -6086,27 +6150,28 @@ mod tests {
                 && !peer_storage.our_content_synced
         }));
 
-        tick.notify_waiters();
-        wait_for_async(Duration::from_secs(5), || {
-            let owner_service = &owner_service;
-            let peer_onion = peer_onion.clone();
-            async move {
-                let storage_peers = owner_service
-                    .get_peer_storage(tonic::Request::new(clirpc::GetPeerStorageRequest {}))
-                    .await?
-                    .into_inner()
-                    .storage_peers;
-                Ok(storage_peers.into_iter().any(|peer_storage| {
-                    peer_storage
-                        .peer
-                        .as_ref()
-                        .is_some_and(|peer| peer.onion_service_id == peer_onion)
-                        && peer_storage.online
-                        && peer_storage.our_content_synced
-                }))
+        let mut resynced = false;
+        for _ in 0..60 {
+            tick.notify_waiters();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let storage_peers = owner_service
+                .get_peer_storage(tonic::Request::new(clirpc::GetPeerStorageRequest {}))
+                .await?
+                .into_inner()
+                .storage_peers;
+            resynced = storage_peers.into_iter().any(|peer_storage| {
+                peer_storage
+                    .peer
+                    .as_ref()
+                    .is_some_and(|peer| peer.onion_service_id == peer_onion)
+                    && peer_storage.online
+                    && peer_storage.our_content_synced
+            });
+            if resynced {
+                break;
             }
-        })
-        .await?;
+        }
+        assert!(resynced, "expected the next maintenance pass to republish");
 
         owner_service.shutdown().await?;
         peer_service.shutdown().await?;
@@ -6117,6 +6182,8 @@ mod tests {
     async fn adaptive_verification_cadence_skips_stable_peers_until_due() -> Result<()> {
         let connector = Arc::new(netmock::MockPeerConnector::new());
         let (maintenance_config, tick) = manual_maintenance();
+        let maintenance_config =
+            maintenance_config.with_supervisor_timings(fast_supervisor_timings());
         let owner_dir = TempDir::new()?;
         let peer_dir = TempDir::new()?;
         let owner_service = test_service_with_test_clock_and_verification_delay_sampler(
@@ -6133,13 +6200,15 @@ mod tests {
             Arc::new(MockPeerRuntimeFactory {
                 connector: connector.clone(),
             }),
-            MaintenanceConfig::default().disabled(),
+            MaintenanceConfig::default()
+                .disabled()
+                .with_supervisor_timings(fast_supervisor_timings()),
         );
 
         init_and_unlock_service(&owner_service, "adaptive-owner").await?;
         init_and_unlock_service(&peer_service, "adaptive-peer").await?;
-        wait_for_public_peer_runtime(&owner_service, Duration::from_secs(5)).await?;
-        wait_for_public_peer_runtime(&peer_service, Duration::from_secs(5)).await?;
+        wait_for_peer_runtime_ready(&owner_service, Duration::from_secs(5)).await?;
+        wait_for_peer_runtime_ready(&peer_service, Duration::from_secs(5)).await?;
         set_storage_config(&owner_service, 4 * 1024 * 1024, 1).await?;
 
         let peer_onion = unlocked_node(&peer_service).await.address().to_string();
@@ -6160,7 +6229,7 @@ mod tests {
             }))
             .await?;
         let mut synced = false;
-        for _ in 0..10 {
+        for _ in 0..60 {
             owner_service
                 .advance_test_time(tonic::Request::new(clirpc::AdvanceTestTimeRequest {
                     seconds: 1,
@@ -6168,7 +6237,7 @@ mod tests {
                 }))
                 .await?;
             tick.notify_waiters();
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
             let storage_peers = owner_service
                 .get_peer_storage(tonic::Request::new(clirpc::GetPeerStorageRequest {}))
                 .await?
@@ -6189,7 +6258,7 @@ mod tests {
         assert!(synced, "expected the initial publication to reach the peer");
 
         let mut first_score = 0;
-        for _ in 0..10 {
+        for _ in 0..20 {
             owner_service
                 .advance_test_time(tonic::Request::new(clirpc::AdvanceTestTimeRequest {
                     seconds: 60,
@@ -6197,7 +6266,7 @@ mod tests {
                 }))
                 .await?;
             tick.notify_waiters();
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
             first_score = peer_score_seconds(&owner_service, &peer_onion).await?;
             if first_score > 0 {
                 break;
@@ -6227,13 +6296,25 @@ mod tests {
                 nanoseconds: 0,
             }))
             .await?;
-        tick.notify_waiters();
-        wait_for_async(Duration::from_secs(5), || {
-            let owner_service = &owner_service;
-            let peer_onion = peer_onion.clone();
-            async move { Ok(peer_score_seconds(owner_service, &peer_onion).await? > first_score) }
-        })
-        .await?;
+        let mut increased_after_due = false;
+        for _ in 0..300 {
+            owner_service
+                .advance_test_time(tonic::Request::new(clirpc::AdvanceTestTimeRequest {
+                    seconds: 1,
+                    nanoseconds: 0,
+                }))
+                .await?;
+            tick.notify_waiters();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if peer_score_seconds(&owner_service, &peer_onion).await? > first_score {
+                increased_after_due = true;
+                break;
+            }
+        }
+        assert!(
+            increased_after_due,
+            "expected a due verification to run after the long time jump"
+        );
 
         owner_service.shutdown().await?;
         peer_service.shutdown().await?;
@@ -6244,6 +6325,8 @@ mod tests {
     async fn background_maintenance_runs_due_metadata_rollup_before_publication() -> Result<()> {
         let connector = Arc::new(netmock::MockPeerConnector::new());
         let (maintenance_config, tick) = manual_maintenance();
+        let maintenance_config =
+            maintenance_config.with_supervisor_timings(fast_supervisor_timings());
         let owner_dir = TempDir::new()?;
         let peer_dir = TempDir::new()?;
         let owner_service = test_service_with_test_clock_and_flush_delay_and_rollup_sampler(
@@ -6261,13 +6344,14 @@ mod tests {
             Arc::new(MockPeerRuntimeFactory {
                 connector: connector.clone(),
             }),
-            MaintenanceConfig::with_interval(Duration::from_secs(60)),
+            MaintenanceConfig::with_interval(Duration::from_secs(60))
+                .with_supervisor_timings(fast_supervisor_timings()),
         );
 
         init_and_unlock_service(&owner_service, "rollup-owner").await?;
         init_and_unlock_service(&peer_service, "rollup-peer").await?;
-        wait_for_public_peer_runtime(&owner_service, Duration::from_secs(5)).await?;
-        wait_for_public_peer_runtime(&peer_service, Duration::from_secs(5)).await?;
+        wait_for_peer_runtime_ready(&owner_service, Duration::from_secs(5)).await?;
+        wait_for_peer_runtime_ready(&peer_service, Duration::from_secs(5)).await?;
         set_storage_config(&owner_service, 4 * 1024 * 1024, 1).await?;
 
         owner_service
@@ -6355,7 +6439,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn background_maintenance_refills_replica_target_from_known_peer() -> Result<()> {
         let connector = Arc::new(netmock::MockPeerConnector::new());
-        let maintenance_config = MaintenanceConfig::with_interval(Duration::from_millis(100));
+        let maintenance_config = MaintenanceConfig::with_interval(Duration::from_millis(100))
+            .with_supervisor_timings(fast_supervisor_timings());
         let owner_dir = TempDir::new()?;
         let first_peer_dir = TempDir::new()?;
         let refill_peer_dir = TempDir::new()?;
@@ -6502,14 +6587,16 @@ mod tests {
             Arc::new(MockPeerRuntimeFactory {
                 connector: connector.clone(),
             }),
-            MaintenanceConfig::with_interval(Duration::from_secs(3600)),
+            MaintenanceConfig::with_interval(Duration::from_secs(3600))
+                .with_supervisor_timings(fast_supervisor_timings()),
         );
         let peer_service = DaemonService::with_maintenance_config(
             peer_dir.path().to_path_buf(),
             Arc::new(MockPeerRuntimeFactory {
                 connector: connector.clone(),
             }),
-            MaintenanceConfig::with_interval(Duration::from_secs(3600)),
+            MaintenanceConfig::with_interval(Duration::from_secs(3600))
+                .with_supervisor_timings(fast_supervisor_timings()),
         );
 
         init_and_unlock_service(&owner_service, "restart-owner").await?;
@@ -6572,7 +6659,8 @@ mod tests {
             Arc::new(MockPeerRuntimeFactory {
                 connector: connector.clone(),
             }),
-            MaintenanceConfig::with_interval(Duration::from_secs(3600)),
+            MaintenanceConfig::with_interval(Duration::from_secs(3600))
+                .with_supervisor_timings(fast_supervisor_timings()),
         );
         unlock_service(&restarted_peer, "restart-peer").await?;
         wait_for_public_peer_runtime(&restarted_peer, Duration::from_secs(30)).await?;

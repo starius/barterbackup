@@ -4041,11 +4041,11 @@ mod tests {
 
         connect_peer_with_client(&mut client, peer_a.address()).await?;
         connect_peer_with_client(&mut client, peer_b.address()).await?;
-        let peers = peers_with_client(&mut client).await?;
-        assert_eq!(
-            peers,
-            vec![peer_a.address().to_string(), peer_b.address().to_string()]
-        );
+        let mut peers = peers_with_client(&mut client).await?;
+        peers.sort();
+        let mut expected_peers = vec![peer_a.address().to_string(), peer_b.address().to_string()];
+        expected_peers.sort();
+        assert_eq!(peers, expected_peers);
         pin_peer_with_client(&mut client, peer_b.address()).await?;
         let peer_inventory = peers_response_with_client(&mut client).await?;
         assert!(peer_inventory.peers.iter().any(|peer| {
@@ -4600,7 +4600,26 @@ mod tests {
             spawn_registered_p2p_server(remote_peer.clone(), connector.as_ref()).await?;
 
         connect_peer_with_client(&mut client, remote_peer.address()).await?;
-        let _contracts = get_peer_storage_with_client(&mut client).await?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let peers = peers_response_with_client(&mut client).await?;
+            let connected = peers.peers.iter().any(|peer| {
+                peer.peer
+                    .as_ref()
+                    .is_some_and(|peer_id| peer_id.onion_service_id == remote_peer.address())
+                    && matches!(
+                        PeerStatus::try_from(peer.status),
+                        Ok(PeerStatus::Connected) | Ok(PeerStatus::Online)
+                    )
+            });
+            if connected {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!("peer did not become connected in the exported inventory");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         let source = export_built_in_peers_with_client(&mut client).await?;
 
         assert!(source.contains("pub const BUILTIN_PEERS"));
