@@ -153,9 +153,12 @@ sanitize-address:
 ifeq ($(findstring -linux-gnu,$(HOST_TRIPLE)),)
 	$(error sanitize-address currently supports Linux GNU hosts only)
 endif
+	# Keep the sanitizer lane focused on the shipped Rust crates. The `cli-docs`
+	# xtask is a developer-only documentation generator rather than product
+	# runtime code.
 	RUSTFLAGS="-Zsanitizer=address" \
 		CARGO_TARGET_DIR=$(SANITIZER_TARGET_DIR) \
-		$(CARGO) test --workspace -Zbuild-std --target $(HOST_TRIPLE)
+		$(CARGO) test --workspace --exclude cli-docs -Zbuild-std --target $(HOST_TRIPLE)
 
 clean:
 	$(CARGO) clean
