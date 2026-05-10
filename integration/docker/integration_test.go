@@ -30,7 +30,11 @@ var (
 	publicTorSuite     *harness.Suite
 	publicTorSuiteErr  error
 	publicTorSuiteOnce sync.Once
+
+	testClockUnixAnchor = uint64(time.Now().Unix())
 )
+
+const syntheticTestClockCutoff = 1_000_000_000
 
 type recoveryScenario struct {
 	scenario   *harness.Scenario
@@ -154,19 +158,31 @@ func TestDockerLogicalClockAccumulatesLongTermPeerScore(t *testing.T) {
 	waitForPeerStorage(t, peer, ownerOnion, int64(len(payload)))
 
 	checkContract(t, owner, peerOnion)
-	waitForPeerScoreSeconds(t, owner, peerOnion, 0)
+	waitForOurScoreThereSeconds(t, owner, peerOnion, 0)
 
 	const thirtyDays = 30 * 24 * 60 * 60
 
-	advanceNodeTime(t, owner, thirtyDays, 0)
-	advanceNodeTime(t, peer, thirtyDays, 0)
+	// Seed one positive remote score before the long jump so the peer treats our
+	// mirrored revision as reserved instead of best-effort cache.
+	advanceNodeTime(t, peer, 1, 0)
+	checkContract(t, peer, ownerOnion)
+	waitForPeerScoreSeconds(t, peer, ownerOnion, 1)
 	checkContract(t, owner, peerOnion)
-	waitForPeerScoreSeconds(t, owner, peerOnion, thirtyDays)
+	waitForOurScoreThereSeconds(t, owner, peerOnion, 1)
 
 	advanceNodeTime(t, owner, thirtyDays, 0)
 	advanceNodeTime(t, peer, thirtyDays, 0)
+	checkContract(t, peer, ownerOnion)
+	waitForPeerScoreSeconds(t, peer, ownerOnion, thirtyDays+1)
 	checkContract(t, owner, peerOnion)
-	waitForPeerScoreSeconds(t, owner, peerOnion, 2*thirtyDays)
+	waitForOurScoreThereSeconds(t, owner, peerOnion, thirtyDays+1)
+
+	advanceNodeTime(t, owner, thirtyDays, 0)
+	advanceNodeTime(t, peer, thirtyDays, 0)
+	checkContract(t, peer, ownerOnion)
+	waitForPeerScoreSeconds(t, peer, ownerOnion, 2*thirtyDays+1)
+	checkContract(t, owner, peerOnion)
+	waitForOurScoreThereSeconds(t, owner, peerOnion, 2*thirtyDays+1)
 }
 
 func TestDockerNodeLifecycle(t *testing.T) {
@@ -1717,6 +1733,13 @@ func startInitializedReadyTestClockNode(
 	return state.GetServerOnion()
 }
 
+func normalizeTestClockUnixSeconds(seconds uint64) uint64 {
+	if seconds >= syntheticTestClockCutoff {
+		return seconds
+	}
+	return testClockUnixAnchor + seconds
+}
+
 func initNodeWithRecoveryMode(t *testing.T, node *harness.Node, recoveryMode bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
@@ -1982,6 +2005,29 @@ func waitForPeerScoreSeconds(t *testing.T, node *harness.Node, peerOnion string,
 	}
 }
 
+func waitForOurScoreThereSeconds(t *testing.T, node *harness.Node, peerOnion string, expected int64) {
+	t.Helper()
+	deadline := time.Now().Add(harnessDefaultTimeout())
+
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+		response, err := node.Peers(ctx)
+		cancel()
+		if err == nil {
+			for _, peer := range response.GetPeers() {
+				if peer.GetPeer().GetOnionServiceId() == peerOnion &&
+					peer.GetOurScoreThereSeconds() == expected {
+					return
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s remote score on %s to become %d", peerOnion, node.Name(), expected)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
 func stopNode(t *testing.T, node *harness.Node) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
@@ -2011,7 +2057,7 @@ func setNodeTime(t *testing.T, node *harness.Node, seconds uint64, nanoseconds u
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
 	defer cancel()
-	if _, err := node.SetTestTime(ctx, seconds, nanoseconds); err != nil {
+	if _, err := node.SetTestTime(ctx, normalizeTestClockUnixSeconds(seconds), nanoseconds); err != nil {
 		t.Fatalf("set test time on %s: %v", node.Name(), err)
 	}
 }
