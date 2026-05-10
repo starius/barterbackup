@@ -53,7 +53,17 @@ func TestManualEnvCliTargetsSelectedNode(t *testing.T) {
 		_ = runDevEnvCommandBestEffort(workRoot, envName, "down")
 	})
 
-	runDevEnvCommand(t, workRoot, envName, "cli", "0", "--", "init", "owner-password")
+	runDevEnvCommand(
+		t,
+		workRoot,
+		envName,
+		"cli",
+		"0",
+		"--",
+		"init",
+		"--allow-weak-password",
+		"owner-password",
+	)
 	runDevEnvCommand(t, workRoot, envName, "cli", "0", "--", "unlock", "owner-password")
 
 	node0State := runDevEnvCommand(t, workRoot, envName, "cli", "0", "--", "state")
@@ -285,9 +295,30 @@ func initializeManualEnvNodeWithRecoveryMode(
 	}
 
 	if recoveryMode {
-		runDevEnvCommand(t, workRoot, envName, "cli", nodeName, "--", "init", "--recovery-mode", password)
+		runDevEnvCommand(
+			t,
+			workRoot,
+			envName,
+			"cli",
+			nodeName,
+			"--",
+			"init",
+			"--allow-weak-password",
+			"--recovery-mode",
+			password,
+		)
 	} else {
-		runDevEnvCommand(t, workRoot, envName, "cli", nodeName, "--", "init", password)
+		runDevEnvCommand(
+			t,
+			workRoot,
+			envName,
+			"cli",
+			nodeName,
+			"--",
+			"init",
+			"--allow-weak-password",
+			password,
+		)
 	}
 	runDevEnvCommand(t, workRoot, envName, "cli", nodeName, "--", "unlock", password)
 
