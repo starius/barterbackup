@@ -1675,6 +1675,24 @@ func waitForReadyNode(t *testing.T, node *harness.Node) *clirpc.StateResponse {
 	return state
 }
 
+func waitForStateNodes(t *testing.T, nodes ...*harness.Node) []*clirpc.StateResponse {
+	t.Helper()
+	states := make([]*clirpc.StateResponse, len(nodes))
+	for index, node := range nodes {
+		ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
+		state, err := node.WaitForState(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("wait for state on %s: %v", node.Name(), err)
+		}
+		states[index] = state
+		if state.GetPeerRuntimeState() == clirpc.PeerRuntimeState_PEER_RUNTIME_STATE_FAILED {
+			t.Fatalf("peer runtime failed on %s: %s", node.Name(), state.GetPeerRuntimeError())
+		}
+	}
+	return states
+}
+
 func startInitializedReadyNode(t *testing.T, node *harness.Node) string {
 	t.Helper()
 	startLockedNode(t, node)
@@ -1834,8 +1852,20 @@ func prepareRecoveryMergeScenarioBase(t *testing.T) *recoveryScenario {
 	peerC := addConflictNode(t, scenario, "peer-c", "peer-c password")
 	recovered := addConflictNode(t, scenario, "recovered", "correct horse battery staple")
 
-	ownerOnion := startInitializedReadyTestClockNode(t, owner, 1000)
-	peerBOnion := startInitializedReadyTestClockNode(t, peerB, 1000)
+	startLockedNode(t, owner)
+	startLockedNode(t, peerB)
+	waitForStateNodes(t, owner, peerB)
+	setNodeTime(t, owner, 1000, 0)
+	setNodeTime(t, peerB, 1000, 0)
+	initNode(t, owner)
+	initNode(t, peerB)
+	unlockNode(t, owner)
+	unlockNode(t, peerB)
+	states := waitForTestClockNodesReady(t, owner, peerB)
+	setNodeTime(t, owner, 1000, 0)
+	setNodeTime(t, peerB, 1000, 0)
+	ownerOnion := states[0].GetServerOnion()
+	peerBOnion := states[1].GetServerOnion()
 
 	connectPeer(t, owner, peerBOnion)
 	connectPeer(t, peerB, ownerOnion)
@@ -1865,16 +1895,15 @@ func prepareRecoveryMergeScenarioBase(t *testing.T) *recoveryScenario {
 	assertCLIKeysRemoved(t, owner)
 
 	startLockedNode(t, peerB)
-	waitForReadyNode(t, peerB)
-	setNodeTime(t, peerB, 1020, 0)
-	unlockTestClockAndWaitReady(t, peerB)
-	waitForPeerStorage(t, peerB, ownerOnion, int64(len(payloadV1)))
-
 	startLockedNode(t, recovered)
-	waitForReadyNode(t, recovered)
+	waitForStateNodes(t, peerB, recovered)
+	setNodeTime(t, peerB, 1020, 0)
 	setNodeTime(t, recovered, 1030, 0)
 	initRecoveryNode(t, recovered)
-	unlockTestClockAndWaitReady(t, recovered)
+	unlockNode(t, peerB)
+	unlockNode(t, recovered)
+	waitForTestClockNodesReady(t, peerB, recovered)
+	waitForPeerStorage(t, peerB, ownerOnion, int64(len(payloadV1)))
 	assertNoFiles(t, recovered)
 	connectPeer(t, recovered, peerBOnion)
 	recoverFileUntilEquals(t, recovered, "payload.bin", payloadV1)
