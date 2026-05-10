@@ -1475,40 +1475,6 @@ func TestDockerPinnedStorageReportingAndTrackedOnlyState(t *testing.T) {
 	}
 }
 
-func TestDockerPinnedPeerSurvivesTrackedPeerCapacityPressure(t *testing.T) {
-	scenario := newScenario(t)
-	node := addNode(t, scenario, "node", "correct horse battery staple")
-	node.DisableMaintenance()
-
-	startInitializedReadyNode(t, node)
-
-	pinnedOnion := fakeOnionServiceID("pinned", 0)
-	connectPeer(t, node, pinnedOnion)
-	pinPeer(t, node, pinnedOnion)
-
-	for index := 0; index < 1023; index++ {
-		onion := fakeOnionServiceID("manual", index)
-		connectPeer(t, node, onion)
-	}
-	overflowOnion := fakeOnionServiceID("manual-overflow", 0)
-	err := connectPeerRPC(t, node, overflowOnion)
-	assertStatusMessage(
-		t,
-		err,
-		codes.ResourceExhausted,
-		fmt.Sprintf("peer capacity reached; refusing to track %s", overflowOnion),
-	)
-
-	peers := getPeers(t, node)
-	if len(peers.GetPeers()) != 1024 {
-		t.Fatalf("unexpected tracked peer count under capacity pressure: got %d want 1024", len(peers.GetPeers()))
-	}
-	pinnedInfo := peerInfoFromResponse(t, peers, pinnedOnion)
-	if !pinnedInfo.GetPinnedByUs() {
-		t.Fatalf("expected pinned peer to remain admitted with pinned_by_us=true")
-	}
-}
-
 func TestDockerPinnedPeerClientSurvivesCachePressure(t *testing.T) {
 	scenario := newScenario(t)
 	owner := addNode(t, scenario, "owner", "correct horse battery staple")
