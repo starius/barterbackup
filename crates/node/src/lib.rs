@@ -8402,6 +8402,83 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn duplicate_inbound_sessions_from_the_same_peer_identity_stay_ephemeral(
+    ) -> anyhow::Result<()> {
+        let owner_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let owner_node = Arc::new(Node::with_local_storage(
+            "duplicate-owner",
+            owner_filesystem,
+        )?);
+        let recovered_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let recovered_node = Arc::new(Node::with_local_storage(
+            "duplicate-owner",
+            recovered_filesystem,
+        )?);
+        let peer_filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
+        let peer_node = Arc::new(Node::with_local_storage("duplicate-peer", peer_filesystem)?);
+        let connector = Arc::new(netmock::MockPeerConnector::new());
+        owner_node.set_peer_connector(connector.clone());
+
+        let (endpoint, peer_server) = spawn_p2p_server(peer_node.clone()).await?;
+        connector.register_peer(peer_node.address(), &endpoint);
+
+        let mut owner_client =
+            connect_p2p_client(owner_node.clone(), peer_node.clone(), connector.as_ref()).await?;
+        let owner_response = owner_client
+            .health_check(bbrpc::HealthCheckRequest {})
+            .await?
+            .into_inner();
+        assert_eq!(owner_response.client_onion, owner_node.address());
+        assert_eq!(owner_response.server_onion, peer_node.address());
+
+        wait_until(|| {
+            connector
+                .session_nonce(&peer_node.ed25519_keypair.secret, owner_node.address())
+                .is_some()
+        })
+        .await;
+        let durable_peer_session = connector
+            .session_nonce(&peer_node.ed25519_keypair.secret, owner_node.address())
+            .context("missing durable inbound session for the original owner")?;
+
+        let recovered_sessions =
+            transport::PeerSessionRegistry::new(recovered_node.address().to_string());
+        let mut recovered_client = connector
+            .connect_with_sessions(
+                peer_node.address(),
+                &recovered_node.ed25519_keypair().secret,
+                recovered_sessions,
+            )
+            .await?;
+        let recovered_response = tokio::time::timeout(
+            Duration::from_secs(5),
+            recovered_client.health_check(bbrpc::HealthCheckRequest {}),
+        )
+        .await
+        .context("timed out waiting for the duplicate recovered session health check")??
+        .into_inner();
+        assert_eq!(recovered_response.client_onion, recovered_node.address());
+        assert_eq!(recovered_response.server_onion, peer_node.address());
+
+        assert_eq!(
+            connector.session_nonce(&peer_node.ed25519_keypair.secret, owner_node.address()),
+            Some(durable_peer_session)
+        );
+        let owner_response = tokio::time::timeout(
+            Duration::from_secs(5),
+            owner_client.health_check(bbrpc::HealthCheckRequest {}),
+        )
+        .await
+        .context("timed out waiting for the original owner health check after the duplicate dial")??
+        .into_inner();
+        assert_eq!(owner_response.client_onion, owner_node.address());
+        assert_eq!(owner_response.server_onion, peer_node.address());
+
+        peer_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn local_file_rpc_round_trip_uses_encrypted_store() -> anyhow::Result<()> {
         let filesystem: Arc<dyn Filesystem> = Arc::new(storage::MemoryFilesystem::new());
         let node = Arc::new(Node::with_local_storage("password", filesystem)?);

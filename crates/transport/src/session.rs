@@ -314,6 +314,14 @@ impl PeerSessionRegistry {
         io: BoxedAsyncIo,
     ) -> Result<()> {
         let slot = self.inner.slot_for_peer(peer_onion);
+        if slot.has_live_inbound_session() {
+            info!(
+                peer = %peer_onion,
+                "serving duplicate inbound outer peer session ephemerally"
+            );
+            self.register_ephemeral_inbound_session(peer_onion, peer_public_key, io);
+            return Ok(());
+        }
         let session = self.inner.spawn_session(
             slot.clone(),
             peer_public_key,
@@ -614,6 +622,14 @@ impl PeerSessionSlot {
 
     fn current_session(&self) -> Option<Arc<PeerOuterSession>> {
         self.current_session.lock().unwrap().clone()
+    }
+
+    fn has_live_inbound_session(&self) -> bool {
+        self.current_session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|session| session.is_live() && !session.initiated_by_us)
     }
 
     fn install_session(&self, candidate: Arc<PeerOuterSession>) -> Option<Arc<PeerOuterSession>> {

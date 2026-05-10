@@ -191,6 +191,51 @@ impl MockPeerConnector {
             .insert(peer_onion.to_string(), endpoint.to_string());
     }
 
+    /// Connect to one peer using an explicit session registry instead of the
+    /// shared process-global registry for the local onion.
+    pub async fn connect_with_sessions(
+        &self,
+        peer_onion: &str,
+        client_private_key: &SecretKey,
+        sessions: transport::PeerSessionRegistry,
+    ) -> Result<PeerClient> {
+        let local_onion =
+            onion_hostname_from_public_key(&ed25519_dalek::PublicKey::from(client_private_key));
+        let dialing_self = peer_onion == local_onion;
+        if !dialing_self && sessions.connected(peer_onion) {
+            return Ok(sessions.client_for_peer(peer_onion));
+        }
+
+        let endpoint = self
+            .endpoints
+            .read()
+            .unwrap()
+            .get(peer_onion)
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown peer onion: {peer_onion}"))?;
+        let client_tls = tlsutil::build_peer_client_tls(peer_onion, client_private_key)?;
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client_tls));
+        let server_name = ServerName::try_from(peer_onion.to_string())
+            .map_err(|err| anyhow!("invalid peer onion {peer_onion:?}: {err}"))?;
+        let socket_addr = endpoint.strip_prefix("https://").unwrap_or(&endpoint);
+        let tcp_stream = TcpStream::connect(socket_addr).await?;
+        let tls_stream = connector
+            .connect(server_name, tcp_stream)
+            .await
+            .map_err(io::Error::other)?;
+        let peer_public_key = peer_public_key_from_common_state(tls_stream.get_ref().1)?;
+        if dialing_self {
+            return Ok(transport::build_ephemeral_peer_client(
+                peer_onion.to_string(),
+                peer_public_key,
+                Box::new(tls_stream),
+            ));
+        }
+        sessions
+            .register_outbound_session(peer_onion, peer_public_key, Box::new(tls_stream))
+            .await
+    }
+
     fn local_sessions(&self, client_private_key: &SecretKey) -> transport::PeerSessionRegistry {
         let local_onion =
             onion_hostname_from_public_key(&ed25519_dalek::PublicKey::from(client_private_key));
@@ -261,41 +306,8 @@ impl PeerConnector for MockPeerConnector {
         peer_onion: &str,
         client_private_key: &SecretKey,
     ) -> Result<PeerClient> {
-        let local_onion =
-            onion_hostname_from_public_key(&ed25519_dalek::PublicKey::from(client_private_key));
         let sessions = self.local_sessions(client_private_key);
-        let dialing_self = peer_onion == local_onion;
-        if !dialing_self && sessions.connected(peer_onion) {
-            return Ok(sessions.client_for_peer(peer_onion));
-        }
-
-        let endpoint = self
-            .endpoints
-            .read()
-            .unwrap()
-            .get(peer_onion)
-            .cloned()
-            .ok_or_else(|| anyhow!("unknown peer onion: {peer_onion}"))?;
-        let client_tls = tlsutil::build_peer_client_tls(peer_onion, client_private_key)?;
-        let connector = tokio_rustls::TlsConnector::from(Arc::new(client_tls));
-        let server_name = ServerName::try_from(peer_onion.to_string())
-            .map_err(|err| anyhow!("invalid peer onion {peer_onion:?}: {err}"))?;
-        let socket_addr = endpoint.strip_prefix("https://").unwrap_or(&endpoint);
-        let tcp_stream = TcpStream::connect(socket_addr).await?;
-        let tls_stream = connector
-            .connect(server_name, tcp_stream)
-            .await
-            .map_err(io::Error::other)?;
-        let peer_public_key = peer_public_key_from_common_state(tls_stream.get_ref().1)?;
-        if dialing_self {
-            return Ok(transport::build_ephemeral_peer_client(
-                peer_onion.to_string(),
-                peer_public_key,
-                Box::new(tls_stream),
-            ));
-        }
-        sessions
-            .register_outbound_session(peer_onion, peer_public_key, Box::new(tls_stream))
+        self.connect_with_sessions(peer_onion, client_private_key, sessions)
             .await
     }
 
