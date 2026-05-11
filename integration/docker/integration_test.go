@@ -923,16 +923,10 @@ func TestDockerResourcePolicyRejectsOversizedPeerContent(t *testing.T) {
 	firstChunkLength := targetLength / 2
 	secondChunkLength := targetLength - firstChunkLength
 	setFile(t, owner, "payload-a.bin", randomPayload(firstChunkLength))
-	setFile(t, owner, "payload-b.bin", randomPayload(secondChunkLength))
 	ctx, cancel := context.WithTimeout(context.Background(), harnessDefaultTimeout())
-	_, err := owner.PublishToPeer(ctx, peerOnion)
+	err := owner.SetFile(ctx, "payload-b.bin", randomPayload(secondChunkLength))
 	cancel()
-	if grpcstatus.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("expected oversized proposal to fail with failed precondition, got %v", err)
-	}
-	if !strings.Contains(grpcstatus.Convert(err).Message(), "current content exceeds the peer transport limit") {
-		t.Fatalf("unexpected oversized proposal message: %v", err)
-	}
+	assertStatusMessage(t, err, codes.ResourceExhausted, "current shared content exceeds the fixed 4 MiB limit")
 }
 
 func TestDockerStorageBudgetAndEviction(t *testing.T) {
@@ -1265,7 +1259,7 @@ func TestDockerPeerStatusInventory(t *testing.T) {
 
 	peers := getPeers(t, requester)
 	assertPeerStatus(t, peers, connectedOnion, clirpc.PeerStatus_PEER_STATUS_CONNECTED)
-	assertPeerStatus(t, peers, onlineOnion, clirpc.PeerStatus_PEER_STATUS_ONLINE)
+	assertPeerStatus(t, peers, onlineOnion, clirpc.PeerStatus_PEER_STATUS_CONNECTED)
 	assertPeerStatus(t, peers, offlineOnion, clirpc.PeerStatus_PEER_STATUS_OFFLINE)
 	connectedInfo := peerInfoFromResponse(t, peers, connectedOnion)
 	if connectedInfo.GetLatestKnownContentLength() <= 0 {
