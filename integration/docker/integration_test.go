@@ -145,6 +145,8 @@ func TestDockerLogicalClockAccumulatesLongTermPeerScore(t *testing.T) {
 	scenario := newScenario(t)
 	owner := addTestClockNode(t, scenario, "owner", "correct horse battery staple")
 	peer := addTestClockNode(t, scenario, "peer", "peer password")
+	owner.DisableMaintenance()
+	peer.DisableMaintenance()
 
 	ownerOnion := startInitializedReadyTestClockNode(t, owner, 1000)
 	peerOnion := startInitializedReadyTestClockNode(t, peer, 1000)
@@ -156,6 +158,9 @@ func TestDockerLogicalClockAccumulatesLongTermPeerScore(t *testing.T) {
 	setFile(t, owner, "payload.bin", payload)
 	proposeContract(t, owner, peerOnion)
 	waitForPeerStorage(t, peer, ownerOnion, int64(len(payload)))
+	proposeContract(t, peer, ownerOnion)
+	checkContract(t, peer, ownerOnion)
+	waitForPeerScoreSeconds(t, peer, ownerOnion, 0)
 
 	checkContract(t, owner, peerOnion)
 	waitForOurScoreThereSeconds(t, owner, peerOnion, 0)
@@ -175,6 +180,7 @@ func TestDockerLogicalClockAccumulatesLongTermPeerScore(t *testing.T) {
 	checkContract(t, peer, ownerOnion)
 	waitForPeerScoreSeconds(t, peer, ownerOnion, thirtyDays+1)
 	checkContract(t, owner, peerOnion)
+	waitForPeerScoreSeconds(t, owner, peerOnion, thirtyDays)
 	waitForOurScoreThereSeconds(t, owner, peerOnion, thirtyDays+1)
 
 	advanceNodeTime(t, owner, thirtyDays, 0)
@@ -182,6 +188,7 @@ func TestDockerLogicalClockAccumulatesLongTermPeerScore(t *testing.T) {
 	checkContract(t, peer, ownerOnion)
 	waitForPeerScoreSeconds(t, peer, ownerOnion, 2*thirtyDays+1)
 	checkContract(t, owner, peerOnion)
+	waitForPeerScoreSeconds(t, owner, peerOnion, 2*thirtyDays)
 	waitForOurScoreThereSeconds(t, owner, peerOnion, 2*thirtyDays+1)
 }
 
