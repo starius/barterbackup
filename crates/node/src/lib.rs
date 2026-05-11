@@ -575,6 +575,73 @@ impl PeerMetadataBatcher {
         Ok(())
     }
 
+    /// Stage one low-value requester revision observation in memory.
+    fn set_peer_requester_revision_state(
+        &self,
+        onion_pubkey: &[u8],
+        latest_stored_content_id: Option<&[u8]>,
+        latest_stored_content_length: Option<i64>,
+        latest_known_content_id: Option<&[u8]>,
+        latest_known_content_length: Option<i64>,
+    ) -> Result<(), Status> {
+        let changed = self
+            .inner
+            .store
+            .lock()
+            .unwrap()
+            .set_peer_requester_revision_state_pending(
+                onion_pubkey,
+                latest_stored_content_id,
+                latest_stored_content_length,
+                latest_known_content_id,
+                latest_known_content_length,
+            )
+            .map_err(map_storage_error)?;
+        if changed {
+            self.inner.schedule_flush();
+        }
+        Ok(())
+    }
+
+    /// Stage one low-value requester score observation in memory.
+    fn set_peer_requester_remaining_state(
+        &self,
+        onion_pubkey: &[u8],
+        requester_remaining_seconds: i64,
+        observed_at: (i64, i64),
+    ) -> Result<(), Status> {
+        let changed = self
+            .inner
+            .store
+            .lock()
+            .unwrap()
+            .set_peer_requester_remaining_state_pending(
+                onion_pubkey,
+                requester_remaining_seconds,
+                observed_at,
+            )
+            .map_err(map_storage_error)?;
+        if changed {
+            self.inner.schedule_flush();
+        }
+        Ok(())
+    }
+
+    /// Stage one low-value peer call-outcome update in memory.
+    fn record_peer_call_outcome(&self, onion_pubkey: &[u8], succeeded: bool) -> Result<(), Status> {
+        let changed = self
+            .inner
+            .store
+            .lock()
+            .unwrap()
+            .record_peer_call_outcome_pending(onion_pubkey, succeeded)
+            .map_err(map_storage_error)?;
+        if changed {
+            self.inner.schedule_flush();
+        }
+        Ok(())
+    }
+
     /// Flush any pending low-value peer metadata immediately.
     fn flush_now(&self) -> Result<(), Status> {
         self.inner.flush_now()
@@ -2337,7 +2404,7 @@ impl Node {
             storedpb::PeerReachability::Online as i32,
             Some(now_secs),
         )?;
-        self.with_store(|store| store.record_peer_call_outcome(peer_public_key.as_bytes(), true))
+        batcher.record_peer_call_outcome(peer_public_key.as_bytes(), true)
     }
 
     /// Persist a failed live transport interaction with one peer.
@@ -2359,7 +2426,7 @@ impl Node {
             storedpb::PeerReachability::Offline as i32,
             None,
         )?;
-        self.with_store(|store| store.record_peer_call_outcome(peer_public_key.as_bytes(), false))
+        batcher.record_peer_call_outcome(peer_public_key.as_bytes(), false)
     }
 
     /// Classify one peer-operation failure for local operator-facing status.
@@ -2773,6 +2840,37 @@ impl Node {
             return Ok(());
         }
         let observed_at = self.clock.now();
+        if let Some(batcher) = &self.peer_metadata_batcher {
+            batcher.set_peer_requester_revision_state(
+                peer_public_key.as_bytes(),
+                revision
+                    .requester_latest_stored_content
+                    .as_ref()
+                    .map(|content| content.content_id.as_slice()),
+                revision
+                    .requester_latest_stored_content
+                    .as_ref()
+                    .map(|content| content.content_length),
+                revision
+                    .requester_latest_known_content
+                    .as_ref()
+                    .map(|content| content.content_id.as_slice()),
+                revision
+                    .requester_latest_known_content
+                    .as_ref()
+                    .map(|content| content.content_length),
+            )?;
+            batcher.set_peer_requester_remaining_state(
+                peer_public_key.as_bytes(),
+                revision.requester_remaining_seconds,
+                (
+                    i64::try_from(observed_at.secs).unwrap_or(i64::MAX),
+                    i64::from(observed_at.nanos),
+                ),
+            )?;
+            return Ok(());
+        }
+
         self.with_store(|store| {
             store.set_peer_requester_revision_state(
                 peer_public_key.as_bytes(),

@@ -1298,6 +1298,48 @@ impl Store {
         latest_known_content_id: Option<&[u8]>,
         latest_known_content_length: Option<i64>,
     ) -> Result<(), StorageError> {
+        self.set_peer_requester_revision_state_with_persist(
+            onion_pubkey,
+            latest_stored_content_id,
+            latest_stored_content_length,
+            latest_known_content_id,
+            latest_known_content_length,
+            true,
+        )
+        .map(|_| ())
+    }
+
+    /// Stage the latest requester revision view we learned from this peer
+    /// without immediately writing the encrypted peer sidecar.
+    pub fn set_peer_requester_revision_state_pending(
+        &mut self,
+        onion_pubkey: &[u8],
+        latest_stored_content_id: Option<&[u8]>,
+        latest_stored_content_length: Option<i64>,
+        latest_known_content_id: Option<&[u8]>,
+        latest_known_content_length: Option<i64>,
+    ) -> Result<bool, StorageError> {
+        self.set_peer_requester_revision_state_with_persist(
+            onion_pubkey,
+            latest_stored_content_id,
+            latest_stored_content_length,
+            latest_known_content_id,
+            latest_known_content_length,
+            false,
+        )
+    }
+
+    /// Persist the latest requester revision view we learned from this peer
+    /// under the requested durability policy.
+    fn set_peer_requester_revision_state_with_persist(
+        &mut self,
+        onion_pubkey: &[u8],
+        latest_stored_content_id: Option<&[u8]>,
+        latest_stored_content_length: Option<i64>,
+        latest_known_content_id: Option<&[u8]>,
+        latest_known_content_length: Option<i64>,
+        persist: bool,
+    ) -> Result<bool, StorageError> {
         if onion_pubkey.is_empty() {
             return Err(StorageError::InvalidFileName);
         }
@@ -1319,7 +1361,7 @@ impl Store {
             i64::try_from(now.secs).unwrap_or(i64::MAX),
             i64::from(now.nanos),
         );
-        self.update_peers(|peers| {
+        self.update_peers_with_persist(persist, |peers| {
             ensure_peer_entry(peers, onion_pubkey, first_seen_at);
             let peer = peers
                 .iter_mut()
@@ -1349,12 +1391,46 @@ impl Store {
         requester_remaining_seconds: i64,
         observed_at: (i64, i64),
     ) -> Result<(), StorageError> {
+        self.set_peer_requester_remaining_state_with_persist(
+            onion_pubkey,
+            requester_remaining_seconds,
+            observed_at,
+            true,
+        )
+        .map(|_| ())
+    }
+
+    /// Stage the latest requester score we observed from this peer without
+    /// immediately writing the encrypted peer sidecar.
+    pub fn set_peer_requester_remaining_state_pending(
+        &mut self,
+        onion_pubkey: &[u8],
+        requester_remaining_seconds: i64,
+        observed_at: (i64, i64),
+    ) -> Result<bool, StorageError> {
+        self.set_peer_requester_remaining_state_with_persist(
+            onion_pubkey,
+            requester_remaining_seconds,
+            observed_at,
+            false,
+        )
+    }
+
+    /// Persist the latest requester score we observed from this peer under the
+    /// requested durability policy.
+    fn set_peer_requester_remaining_state_with_persist(
+        &mut self,
+        onion_pubkey: &[u8],
+        requester_remaining_seconds: i64,
+        observed_at: (i64, i64),
+        persist: bool,
+    ) -> Result<bool, StorageError> {
         if onion_pubkey.is_empty() {
             return Err(StorageError::InvalidFileName);
         }
 
         let first_seen_at = observed_at;
-        self.update_peers(|peers| {
+        self.update_peers_with_persist(persist, |peers| {
             ensure_peer_entry(peers, onion_pubkey, first_seen_at);
             let peer = peers
                 .iter_mut()
@@ -1481,6 +1557,28 @@ impl Store {
         onion_pubkey: &[u8],
         succeeded: bool,
     ) -> Result<(), StorageError> {
+        self.record_peer_call_outcome_with_persist(onion_pubkey, succeeded, true)
+            .map(|_| ())
+    }
+
+    /// Stage one outbound peer-call outcome for availability weighting
+    /// without immediately writing the encrypted peer sidecar.
+    pub fn record_peer_call_outcome_pending(
+        &mut self,
+        onion_pubkey: &[u8],
+        succeeded: bool,
+    ) -> Result<bool, StorageError> {
+        self.record_peer_call_outcome_with_persist(onion_pubkey, succeeded, false)
+    }
+
+    /// Persist one outbound peer-call outcome under the requested durability
+    /// policy.
+    fn record_peer_call_outcome_with_persist(
+        &mut self,
+        onion_pubkey: &[u8],
+        succeeded: bool,
+        persist: bool,
+    ) -> Result<bool, StorageError> {
         if onion_pubkey.is_empty() {
             return Err(StorageError::InvalidFileName);
         }
@@ -1490,7 +1588,7 @@ impl Store {
             i64::try_from(now.secs).unwrap_or(i64::MAX),
             i64::from(now.nanos),
         );
-        self.update_peers(|peers| {
+        self.update_peers_with_persist(persist, |peers| {
             ensure_peer_entry(peers, onion_pubkey, first_seen_at);
             let peer = peers
                 .iter_mut()
@@ -2734,6 +2832,52 @@ mod tests {
     }
 
     #[test]
+    fn pending_peer_call_outcome_requires_explicit_flush() {
+        let base: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let counting = Arc::new(CountingFilesystem {
+            inner: base.clone(),
+            peer_state_writes: Mutex::new(0),
+        });
+        let fs: Arc<dyn Filesystem> = counting.clone();
+        let mut store = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        let peer_key = b"call-outcome-peer";
+
+        store.ensure_peer(peer_key).unwrap();
+        let writes_after_ensure = *counting.peer_state_writes.lock().unwrap();
+        assert_eq!(writes_after_ensure, 1);
+
+        assert!(store
+            .record_peer_call_outcome_pending(peer_key, true)
+            .unwrap());
+        assert!(store
+            .record_peer_call_outcome_pending(peer_key, false)
+            .unwrap());
+        assert_eq!(
+            *counting.peer_state_writes.lock().unwrap(),
+            writes_after_ensure
+        );
+        let peer = &store.peers()[0];
+        assert_eq!(peer.successful_calls, 1);
+        assert_eq!(peer.failed_calls, 1);
+
+        let reloaded = Store::new_with_time_source(base.clone(), &master(), time_source()).unwrap();
+        let peer = &reloaded.peers()[0];
+        assert_eq!(peer.successful_calls, 0);
+        assert_eq!(peer.failed_calls, 0);
+
+        store.flush_peer_state().unwrap();
+        assert_eq!(
+            *counting.peer_state_writes.lock().unwrap(),
+            writes_after_ensure + 1
+        );
+
+        let reloaded = Store::new_with_time_source(base, &master(), time_source()).unwrap();
+        let peer = &reloaded.peers()[0];
+        assert_eq!(peer.successful_calls, 1);
+        assert_eq!(peer.failed_calls, 1);
+    }
+
+    #[test]
     fn requester_advertisement_persists_and_superseding_pending_revision_returns_penalty() {
         let fs: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
         let clock = Arc::new(clock::ManualClock::new(
@@ -3104,6 +3248,79 @@ mod tests {
         let reloaded = Store::new_with_time_source(base, &master(), time_source()).unwrap();
         assert_eq!(reloaded.peers()[0].score_seconds, 42);
         assert_eq!(reloaded.peers()[0].score_measured_at, 99);
+    }
+
+    #[test]
+    fn pending_requester_metadata_requires_explicit_flush() {
+        let base: Arc<dyn Filesystem> = Arc::new(MemoryFilesystem::new());
+        let counting = Arc::new(CountingFilesystem {
+            inner: base.clone(),
+            peer_state_writes: Mutex::new(0),
+        });
+        let fs: Arc<dyn Filesystem> = counting.clone();
+        let mut store = Store::new_with_time_source(fs, &master(), time_source()).unwrap();
+        let peer_key = b"requester-pending-peer";
+
+        store.ensure_peer(peer_key).unwrap();
+        let writes_after_ensure = *counting.peer_state_writes.lock().unwrap();
+        assert_eq!(writes_after_ensure, 1);
+
+        assert!(store
+            .set_peer_requester_revision_state_pending(
+                peer_key,
+                Some(b"stored-revision"),
+                Some(123),
+                Some(b"known-revision"),
+                Some(456),
+            )
+            .unwrap());
+        assert!(store
+            .set_peer_requester_remaining_state_pending(peer_key, 789, (12, 3))
+            .unwrap());
+        assert_eq!(
+            *counting.peer_state_writes.lock().unwrap(),
+            writes_after_ensure
+        );
+        let peer = &store.peers()[0];
+        assert_eq!(
+            peer.requester_latest_stored_content
+                .as_ref()
+                .map(|content| (content.content_id.clone(), content.content_length)),
+            Some((b"stored-revision".to_vec(), 123))
+        );
+        assert_eq!(peer.requester_remaining_seconds, 789);
+
+        let reloaded = Store::new_with_time_source(base.clone(), &master(), time_source()).unwrap();
+        let peer = &reloaded.peers()[0];
+        assert!(peer.requester_latest_stored_content.is_none());
+        assert_eq!(peer.requester_remaining_seconds, 0);
+        assert!(peer.requester_remaining_observed_at.is_none());
+
+        store.flush_peer_state().unwrap();
+        assert_eq!(
+            *counting.peer_state_writes.lock().unwrap(),
+            writes_after_ensure + 1
+        );
+
+        let reloaded = Store::new_with_time_source(base, &master(), time_source()).unwrap();
+        let peer = &reloaded.peers()[0];
+        assert_eq!(
+            peer.requester_latest_stored_content
+                .as_ref()
+                .map(|content| (content.content_id.clone(), content.content_length)),
+            Some((b"stored-revision".to_vec(), 123))
+        );
+        assert_eq!(
+            peer.requester_latest_known_content
+                .as_ref()
+                .map(|content| (content.content_id.clone(), content.content_length)),
+            Some((b"known-revision".to_vec(), 456))
+        );
+        assert_eq!(peer.requester_remaining_seconds, 789);
+        assert_eq!(
+            optional_metadata_timestamp(peer.requester_remaining_observed_at.as_ref()).unwrap(),
+            Some((12, 3))
+        );
     }
 
     #[test]
