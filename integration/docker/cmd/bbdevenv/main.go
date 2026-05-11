@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -562,6 +563,12 @@ func findBBCLIBinary(repoRoot string) (string, error) {
 	}
 	if binary, err := harness.FindStaticBBCLIBinary(repoRoot); err == nil {
 		return binary, nil
+	}
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		cargoInstalledBinary := filepath.Join(homeDir, ".cargo", "bin", "bbcli")
+		if _, err := os.Stat(cargoInstalledBinary); err == nil {
+			return cargoInstalledBinary, nil
+		}
 	}
 	if binary, err := exec.LookPath("bbcli"); err == nil {
 		return binary, nil

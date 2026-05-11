@@ -62,6 +62,27 @@ func TestFindBBCLIBinaryHonorsOverride(t *testing.T) {
 	}
 }
 
+func TestFindBBCLIBinaryFallsBackToCargoHome(t *testing.T) {
+	homeDir := t.TempDir()
+	cargoBinary := filepath.Join(homeDir, ".cargo", "bin", "bbcli")
+	if err := os.MkdirAll(filepath.Dir(cargoBinary), 0o755); err != nil {
+		t.Fatalf("create cargo bin dir: %v", err)
+	}
+	if err := os.WriteFile(cargoBinary, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write cargo-home bbcli: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("BB_DOCKER_BBCLI_BIN", "")
+
+	binary, err := findBBCLIBinary(t.TempDir())
+	if err != nil {
+		t.Fatalf("find bbcli from cargo home: %v", err)
+	}
+	if binary != cargoBinary {
+		t.Fatalf("unexpected cargo-home path: got %s want %s", binary, cargoBinary)
+	}
+}
+
 func TestBuildBBCLIInvocationUsesSelectedNodeContext(t *testing.T) {
 	t.Setenv("BB_DOCKER_BBCLI_BIN", "")
 
