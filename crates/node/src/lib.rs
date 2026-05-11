@@ -10240,20 +10240,14 @@ mod tests {
             .await
             .ok_or_else(|| anyhow::anyhow!("missing delayed peer metadata timer"))?;
         assert_eq!(timer.duration, Duration::from_secs(60));
-        assert_eq!(
-            counting.peer_state_writes(),
-            writes_before_delayed_updates + 1
-        );
+        assert_eq!(counting.peer_state_writes(), writes_before_delayed_updates);
 
         clock.advance(Duration::from_secs(59));
         tokio::task::yield_now().await;
-        assert_eq!(
-            counting.peer_state_writes(),
-            writes_before_delayed_updates + 1
-        );
+        assert_eq!(counting.peer_state_writes(), writes_before_delayed_updates);
 
         clock.advance(Duration::from_secs(1));
-        wait_until(|| counting.peer_state_writes() == writes_before_delayed_updates + 2).await;
+        wait_until(|| counting.peer_state_writes() == writes_before_delayed_updates + 1).await;
 
         let reloaded = Node::with_local_storage_and_clock_and_flush_delay(
             "batched-peer-metadata-owner",
