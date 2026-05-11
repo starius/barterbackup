@@ -15,6 +15,7 @@ STATIC_LINUX_ARM64_TARGET := aarch64-unknown-linux-musl
 STATIC_TARGET_DIR ?= target-static
 WINDOWS_TARGET_DIR ?= target-windows
 SANITIZER_TARGET_DIR ?= target-sanitize
+SANITIZER_FD_LIMIT ?= 8192
 GO_RPC_MODULE := barterbackup/integration/docker
 GO_RPC_OUT_DIR := integration/docker/gen/clirpc
 
@@ -156,6 +157,10 @@ endif
 	# Keep the sanitizer lane focused on the shipped Rust crates. The `cli-docs`
 	# xtask is a developer-only documentation generator rather than product
 	# runtime code.
+	# ASan stretches the runtime of the multi-daemon tests enough that the
+	# default per-process file-descriptor soft limit can become the bottleneck
+	# before the sanitizer reaches the actual test logic.
+	ulimit -n $(SANITIZER_FD_LIMIT) >/dev/null 2>&1 || true; \
 	RUSTFLAGS="-Zsanitizer=address" \
 		CARGO_TARGET_DIR=$(SANITIZER_TARGET_DIR) \
 		$(CARGO) test --workspace --exclude cli-docs -Zbuild-std --target $(HOST_TRIPLE)
